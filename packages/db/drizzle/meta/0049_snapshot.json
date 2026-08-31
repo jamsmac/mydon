@@ -1,6 +1,6 @@
 {
-  "id": "99935730-a42c-446f-8aa5-a5550e3ddf12",
-  "prevId": "8b68a839-ac51-4619-8322-b35addf40223",
+  "id": "28e5a325-5a49-4283-be48-52f6664e0e9c",
+  "prevId": "93e2002d-68aa-487d-9dde-0a3450e9dee3",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -670,102 +670,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.coffee_consumable_log": {
-      "name": "coffee_consumable_log",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "location_id": {
-          "name": "location_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "logged_date": {
-          "name": "logged_date",
-          "type": "date",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "water": {
-          "name": "water",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "cups": {
-          "name": "cups",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "lids": {
-          "name": "lids",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "created_by": {
-          "name": "created_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "coffee_consumable_log_created_idx": {
-          "name": "coffee_consumable_log_created_idx",
-          "columns": [
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "coffee_consumable_log_location_id_entity_id_fk": {
-          "name": "coffee_consumable_log_location_id_entity_id_fk",
-          "tableFrom": "coffee_consumable_log",
-          "tableTo": "entity",
-          "columnsFrom": [
-            "location_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.coffee_container_return": {
       "name": "coffee_container_return",
       "schema": "",
@@ -963,18 +867,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "package_weight": {
-          "name": "package_weight",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "package_label": {
-          "name": "package_label",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1105,7 +997,8 @@
           "name": "package_count",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true,
+          "default": 1
         },
         "entered_date": {
           "name": "entered_date",
@@ -3610,15 +3503,7 @@
           "name": "machine_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
-        },
-        "location": {
-          "name": "location",
-          "type": "part_location",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'machine'"
+          "notNull": true
         },
         "part_kind": {
           "name": "part_kind",
@@ -3747,23 +3632,7 @@
             }
           ],
           "isUnique": true,
-          "where": "removed_on is null and machine_id is not null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "machine_part_serial_idx": {
-          "name": "machine_part_serial_idx",
-          "columns": [
-            {
-              "expression": "serial_number",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "serial_number is not null",
+          "where": "removed_on is null",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -3821,10 +3690,6 @@
         "machine_part_dates": {
           "name": "machine_part_dates",
           "value": "\"machine_part\".\"removed_on\" is null or \"machine_part\".\"removed_on\" >= \"machine_part\".\"installed_on\""
-        },
-        "machine_part_location_matches": {
-          "name": "machine_part_location_matches",
-          "value": "(\"machine_part\".\"machine_id\" is not null and \"machine_part\".\"location\" = 'machine') or (\"machine_part\".\"machine_id\" is null and \"machine_part\".\"location\" <> 'machine')"
         }
       },
       "isRLSEnabled": false
@@ -4419,12 +4284,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "client_key": {
-          "name": "client_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_by": {
           "name": "created_by",
           "type": "text",
@@ -4447,21 +4306,6 @@
         }
       },
       "indexes": {
-        "maintenance_log_client_key": {
-          "name": "maintenance_log_client_key",
-          "columns": [
-            {
-              "expression": "client_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "maintenance_log_entity_idx": {
           "name": "maintenance_log_entity_idx",
           "columns": [
@@ -6913,12 +6757,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "client_key": {
-          "name": "client_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_by": {
           "name": "created_by",
           "type": "text",
@@ -6934,21 +6772,6 @@
         }
       },
       "indexes": {
-        "stock_movement_client_key": {
-          "name": "stock_movement_client_key",
-          "columns": [
-            {
-              "expression": "client_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "stock_movement_ing_idx": {
           "name": "stock_movement_ing_idx",
           "columns": [
@@ -7206,21 +7029,9 @@
           "primaryKey": false,
           "notNull": false
         },
-        "closed_by": {
-          "name": "closed_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "reminded_at": {
           "name": "reminded_at",
           "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "client_key": {
-          "name": "client_key",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
@@ -7296,21 +7107,6 @@
           ],
           "isUnique": true,
           "where": "source ~ ':[0-9]{4}-[0-9]{2}-[0-9]{2}$'",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "task_client_key": {
-          "name": "task_client_key",
-          "columns": [
-            {
-              "expression": "client_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -8591,9 +8387,7 @@
         "inspection",
         "calibration",
         "repair",
-        "other",
-        "part_install",
-        "part_remove"
+        "other"
       ]
     },
     "public.maintenance_outcome": {
@@ -8646,17 +8440,6 @@
         "spiral",
         "elevator",
         "other"
-      ]
-    },
-    "public.part_location": {
-      "name": "part_location",
-      "schema": "public",
-      "values": [
-        "machine",
-        "warehouse",
-        "washing",
-        "drying",
-        "repair"
       ]
     },
     "public.part_swap_reason": {

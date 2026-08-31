@@ -1,6 +1,6 @@
 {
-  "id": "99935730-a42c-446f-8aa5-a5550e3ddf12",
-  "prevId": "8b68a839-ac51-4619-8322-b35addf40223",
+  "id": "008bfe66-b34b-4bae-9dc1-7240ea39c043",
+  "prevId": "b95cfc45-93b8-4b0a-b9a8-4b8ab3bd92a8",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -162,6 +162,583 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.agent_task_llm_authorization": {
+      "name": "agent_task_llm_authorization",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "job_id": {
+          "name": "job_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "day": {
+          "name": "day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "spend_id": {
+          "name": "spend_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "decision": {
+          "name": "decision",
+          "type": "agent_task_llm_authorization_decision",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "agent_task_llm_authorization_job_day_key": {
+          "name": "agent_task_llm_authorization_job_day_key",
+          "columns": [
+            {
+              "expression": "job_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_task_llm_authorization_spend_key": {
+          "name": "agent_task_llm_authorization_spend_key",
+          "columns": [
+            {
+              "expression": "spend_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_task_llm_authorization_job_granted_key": {
+          "name": "agent_task_llm_authorization_job_granted_key",
+          "columns": [
+            {
+              "expression": "job_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"agent_task_llm_authorization\".\"decision\" = 'granted'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_task_llm_authorization_day_decision_idx": {
+          "name": "agent_task_llm_authorization_day_decision_idx",
+          "columns": [
+            {
+              "expression": "day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "decision",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "agent_task_llm_authorization_job_id_agent_task_llm_job_id_fk": {
+          "name": "agent_task_llm_authorization_job_id_agent_task_llm_job_id_fk",
+          "tableFrom": "agent_task_llm_authorization",
+          "tableTo": "agent_task_llm_job",
+          "columnsFrom": [
+            "job_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "agent_task_llm_authorization_spend_id_llm_spend_id_fk": {
+          "name": "agent_task_llm_authorization_spend_id_llm_spend_id_fk",
+          "tableFrom": "agent_task_llm_authorization",
+          "tableTo": "llm_spend",
+          "columnsFrom": [
+            "spend_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.agent_task_llm_job": {
+      "name": "agent_task_llm_job",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "task_agent_execution_id": {
+          "name": "task_agent_execution_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "step_key": {
+          "name": "step_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider_attempt_no": {
+          "name": "provider_attempt_no",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "agent_task_llm_job_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "feature": {
+          "name": "feature",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "adapter": {
+          "name": "adapter",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "adapter_version": {
+          "name": "adapter_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "endpoint_profile": {
+          "name": "endpoint_profile",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "input_token_ceiling": {
+          "name": "input_token_ceiling",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "output_token_ceiling": {
+          "name": "output_token_ceiling",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "job_key": {
+          "name": "job_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "operation_hash": {
+          "name": "operation_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_payload": {
+          "name": "request_payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "spend_id": {
+          "name": "spend_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "agent_task_llm_job_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'waiting_budget'"
+        },
+        "dispatch_count": {
+          "name": "dispatch_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "dispatch_token": {
+          "name": "dispatch_token",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dispatch_run_id": {
+          "name": "dispatch_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dispatch_granted_at": {
+          "name": "dispatch_granted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dispatch_deadline_at": {
+          "name": "dispatch_deadline_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "unknown_at": {
+          "name": "unknown_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cancelled_at": {
+          "name": "cancelled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "agent_task_llm_job_job_key": {
+          "name": "agent_task_llm_job_job_key",
+          "columns": [
+            {
+              "expression": "job_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_task_llm_job_execution_step_attempt_key": {
+          "name": "agent_task_llm_job_execution_step_attempt_key",
+          "columns": [
+            {
+              "expression": "task_agent_execution_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "step_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider_attempt_no",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_task_llm_job_spend_key": {
+          "name": "agent_task_llm_job_spend_key",
+          "columns": [
+            {
+              "expression": "spend_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"agent_task_llm_job\".\"spend_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_task_llm_job_execution_idx": {
+          "name": "agent_task_llm_job_execution_idx",
+          "columns": [
+            {
+              "expression": "task_agent_execution_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_task_llm_job_status_idx": {
+          "name": "agent_task_llm_job_status_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_task_llm_job_status_deadline_idx": {
+          "name": "agent_task_llm_job_status_deadline_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "dispatch_deadline_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "agent_task_llm_job_task_agent_execution_id_task_agent_execution_id_fk": {
+          "name": "agent_task_llm_job_task_agent_execution_id_task_agent_execution_id_fk",
+          "tableFrom": "agent_task_llm_job",
+          "tableTo": "task_agent_execution",
+          "columnsFrom": [
+            "task_agent_execution_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "agent_task_llm_job_spend_id_llm_spend_id_fk": {
+          "name": "agent_task_llm_job_spend_id_llm_spend_id_fk",
+          "tableFrom": "agent_task_llm_job",
+          "tableTo": "llm_spend",
+          "columnsFrom": [
+            "spend_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "agent_task_llm_job_attempt_version_positive": {
+          "name": "agent_task_llm_job_attempt_version_positive",
+          "value": "\"agent_task_llm_job\".\"provider_attempt_no\" > 0 and \"agent_task_llm_job\".\"adapter_version\" > 0"
+        },
+        "agent_task_llm_job_token_ceilings_nonnegative": {
+          "name": "agent_task_llm_job_token_ceilings_nonnegative",
+          "value": "\"agent_task_llm_job\".\"input_token_ceiling\" >= 0 and \"agent_task_llm_job\".\"output_token_ceiling\" >= 0"
+        },
+        "agent_task_llm_job_dispatch_count_range": {
+          "name": "agent_task_llm_job_dispatch_count_range",
+          "value": "\"agent_task_llm_job\".\"dispatch_count\" >= 0 and \"agent_task_llm_job\".\"dispatch_count\" <= 1"
+        },
+        "agent_task_llm_job_operation_hash_format": {
+          "name": "agent_task_llm_job_operation_hash_format",
+          "value": "\"agent_task_llm_job\".\"operation_hash\" ~ '^[0-9a-f]{64}$'"
+        },
+        "agent_task_llm_job_request_payload_bounded": {
+          "name": "agent_task_llm_job_request_payload_bounded",
+          "value": "\"agent_task_llm_job\".\"request_payload\" is null or (jsonb_typeof(\"agent_task_llm_job\".\"request_payload\") = 'object' and octet_length(\"agent_task_llm_job\".\"request_payload\"::text) <= 1048576)"
+        },
+        "agent_task_llm_job_state_fields_consistent": {
+          "name": "agent_task_llm_job_state_fields_consistent",
+          "value": "(\"agent_task_llm_job\".\"status\" = 'waiting_budget' and \"agent_task_llm_job\".\"spend_id\" is null and \"agent_task_llm_job\".\"request_payload\" is not null and \"agent_task_llm_job\".\"dispatch_count\" = 0 and \"agent_task_llm_job\".\"dispatch_token\" is null and \"agent_task_llm_job\".\"dispatch_run_id\" is null and \"agent_task_llm_job\".\"dispatch_granted_at\" is null and \"agent_task_llm_job\".\"dispatch_deadline_at\" is null and \"agent_task_llm_job\".\"unknown_at\" is null and \"agent_task_llm_job\".\"completed_at\" is null and \"agent_task_llm_job\".\"cancelled_at\" is null) or (\"agent_task_llm_job\".\"status\" = 'ready' and \"agent_task_llm_job\".\"spend_id\" is not null and \"agent_task_llm_job\".\"request_payload\" is not null and \"agent_task_llm_job\".\"dispatch_count\" = 0 and \"agent_task_llm_job\".\"dispatch_token\" is null and \"agent_task_llm_job\".\"dispatch_run_id\" is null and \"agent_task_llm_job\".\"dispatch_granted_at\" is null and \"agent_task_llm_job\".\"dispatch_deadline_at\" is null and \"agent_task_llm_job\".\"unknown_at\" is null and \"agent_task_llm_job\".\"completed_at\" is null and \"agent_task_llm_job\".\"cancelled_at\" is null) or (\"agent_task_llm_job\".\"status\" = 'dispatching' and \"agent_task_llm_job\".\"spend_id\" is not null and \"agent_task_llm_job\".\"request_payload\" is not null and \"agent_task_llm_job\".\"dispatch_count\" = 1 and \"agent_task_llm_job\".\"dispatch_token\" is not null and \"agent_task_llm_job\".\"dispatch_run_id\" is not null and \"agent_task_llm_job\".\"dispatch_granted_at\" is not null and \"agent_task_llm_job\".\"dispatch_deadline_at\" is not null and \"agent_task_llm_job\".\"unknown_at\" is null and \"agent_task_llm_job\".\"completed_at\" is null and \"agent_task_llm_job\".\"cancelled_at\" is null) or (\"agent_task_llm_job\".\"status\" in ('succeeded', 'rejected') and \"agent_task_llm_job\".\"spend_id\" is not null and \"agent_task_llm_job\".\"request_payload\" is null and \"agent_task_llm_job\".\"dispatch_count\" = 1 and \"agent_task_llm_job\".\"dispatch_token\" is not null and \"agent_task_llm_job\".\"dispatch_run_id\" is not null and \"agent_task_llm_job\".\"dispatch_granted_at\" is not null and \"agent_task_llm_job\".\"dispatch_deadline_at\" is not null and \"agent_task_llm_job\".\"completed_at\" is not null and \"agent_task_llm_job\".\"cancelled_at\" is null) or (\"agent_task_llm_job\".\"status\" = 'unknown' and \"agent_task_llm_job\".\"spend_id\" is not null and \"agent_task_llm_job\".\"request_payload\" is null and \"agent_task_llm_job\".\"dispatch_count\" = 1 and \"agent_task_llm_job\".\"dispatch_token\" is not null and \"agent_task_llm_job\".\"dispatch_run_id\" is not null and \"agent_task_llm_job\".\"dispatch_granted_at\" is not null and \"agent_task_llm_job\".\"dispatch_deadline_at\" is not null and \"agent_task_llm_job\".\"unknown_at\" is not null and \"agent_task_llm_job\".\"completed_at\" is null and \"agent_task_llm_job\".\"cancelled_at\" is null) or (\"agent_task_llm_job\".\"status\" = 'cancelled' and \"agent_task_llm_job\".\"request_payload\" is null and \"agent_task_llm_job\".\"dispatch_count\" = 0 and \"agent_task_llm_job\".\"dispatch_token\" is null and \"agent_task_llm_job\".\"dispatch_run_id\" is null and \"agent_task_llm_job\".\"dispatch_granted_at\" is null and \"agent_task_llm_job\".\"dispatch_deadline_at\" is null and \"agent_task_llm_job\".\"unknown_at\" is null and \"agent_task_llm_job\".\"completed_at\" is null and \"agent_task_llm_job\".\"cancelled_at\" is not null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.agent_task_llm_result": {
+      "name": "agent_task_llm_result",
+      "schema": "",
+      "columns": {
+        "job_id": {
+          "name": "job_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "agent_task_llm_result_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payload": {
+          "name": "payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "result_hash": {
+          "name": "result_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "received_at": {
+          "name": "received_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "agent_task_llm_result_job_id_agent_task_llm_job_id_fk": {
+          "name": "agent_task_llm_result_job_id_agent_task_llm_job_id_fk",
+          "tableFrom": "agent_task_llm_result",
+          "tableTo": "agent_task_llm_job",
+          "columnsFrom": [
+            "job_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "agent_task_llm_result_hash_format": {
+          "name": "agent_task_llm_result_hash_format",
+          "value": "\"agent_task_llm_result\".\"result_hash\" ~ '^[0-9a-f]{64}$'"
+        },
+        "agent_task_llm_result_payload_bounded": {
+          "name": "agent_task_llm_result_payload_bounded",
+          "value": "jsonb_typeof(\"agent_task_llm_result\".\"payload\") = 'object' and octet_length(\"agent_task_llm_result\".\"payload\"::text) <= 1048576"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.approval": {
       "name": "approval",
       "schema": "",
@@ -213,6 +790,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "client_key": {
+          "name": "client_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -221,7 +804,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "approval_client_key": {
+          "name": "approval_client_key",
+          "columns": [
+            {
+              "expression": "client_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -975,6 +1574,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "entity_id": {
+          "name": "entity_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -983,8 +1588,39 @@
           "default": "now()"
         }
       },
-      "indexes": {},
-      "foreignKeys": {},
+      "indexes": {
+        "ux_coffee_ingredient_entity": {
+          "name": "ux_coffee_ingredient_entity",
+          "columns": [
+            {
+              "expression": "entity_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "entity_id is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "coffee_ingredient_entity_id_entity_id_fk": {
+          "name": "coffee_ingredient_entity_id_entity_id_fk",
+          "tableFrom": "coffee_ingredient",
+          "tableTo": "entity",
+          "columnsFrom": [
+            "entity_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "coffee_ingredient_name_unique": {
@@ -995,6 +1631,239 @@
           ]
         }
       },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.coffee_order": {
+      "name": "coffee_order",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "ext_id": {
+          "name": "ext_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'gjvending'"
+        },
+        "ts": {
+          "name": "ts",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "brewed_at": {
+          "name": "brewed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "machine_serial": {
+          "name": "machine_serial",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "machine_id": {
+          "name": "machine_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "address": {
+          "name": "address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "goods_name": {
+          "name": "goods_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "flavour_name": {
+          "name": "flavour_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "product_id": {
+          "name": "product_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "amount": {
+          "name": "amount",
+          "type": "numeric(15, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'UZS'"
+        },
+        "payment_status": {
+          "name": "payment_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "brew_status": {
+          "name": "brew_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "order_resource": {
+          "name": "order_resource",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "countable": {
+          "name": "countable",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "coffee_order_src_key": {
+          "name": "coffee_order_src_key",
+          "columns": [
+            {
+              "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ext_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "coffee_order_ts_idx": {
+          "name": "coffee_order_ts_idx",
+          "columns": [
+            {
+              "expression": "ts",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "coffee_order_machine_idx": {
+          "name": "coffee_order_machine_idx",
+          "columns": [
+            {
+              "expression": "machine_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ts",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "coffee_order_countable_idx": {
+          "name": "coffee_order_countable_idx",
+          "columns": [
+            {
+              "expression": "countable",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ts",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "coffee_order_machine_id_entity_id_fk": {
+          "name": "coffee_order_machine_id_entity_id_fk",
+          "tableFrom": "coffee_order",
+          "tableTo": "entity",
+          "columnsFrom": [
+            "machine_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "coffee_order_product_id_entity_id_fk": {
+          "name": "coffee_order_product_id_entity_id_fk",
+          "tableFrom": "coffee_order",
+          "tableTo": "entity",
+          "columnsFrom": [
+            "product_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -1690,6 +2559,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "denominations": {
+          "name": "denominations",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "client_key": {
+          "name": "client_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1731,6 +2612,21 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "collection_client_key": {
+          "name": "collection_client_key",
+          "columns": [
+            {
+              "expression": "client_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -2245,6 +3141,12 @@
           "notNull": true,
           "default": "'{}'::jsonb"
         },
+        "client_key": {
+          "name": "client_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "occurred_at": {
           "name": "occurred_at",
           "type": "timestamp with time zone",
@@ -2278,6 +3180,21 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "event_client_key": {
+          "name": "event_client_key",
+          "columns": [
+            {
+              "expression": "client_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -3503,6 +4420,578 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.llm_model_price": {
+      "name": "llm_model_price",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "billing_kind": {
+          "name": "billing_kind",
+          "type": "llm_billing_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'metered'"
+        },
+        "settlement_kind": {
+          "name": "settlement_kind",
+          "type": "llm_settlement_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'tokens'"
+        },
+        "input_usd_per_mtok": {
+          "name": "input_usd_per_mtok",
+          "type": "numeric(24, 9)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "output_usd_per_mtok": {
+          "name": "output_usd_per_mtok",
+          "type": "numeric(24, 9)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "cache_read_usd_per_mtok": {
+          "name": "cache_read_usd_per_mtok",
+          "type": "numeric(24, 9)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "cache_write_5m_usd_per_mtok": {
+          "name": "cache_write_5m_usd_per_mtok",
+          "type": "numeric(24, 9)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "cache_write_1h_usd_per_mtok": {
+          "name": "cache_write_1h_usd_per_mtok",
+          "type": "numeric(24, 9)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "fixed_request_usd": {
+          "name": "fixed_request_usd",
+          "type": "numeric(24, 9)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "reservation_ceiling_usd": {
+          "name": "reservation_ceiling_usd",
+          "type": "numeric(24, 9)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "code_execution_usd_per_request": {
+          "name": "code_execution_usd_per_request",
+          "type": "numeric(24, 9)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "valid_from": {
+          "name": "valid_from",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "valid_to": {
+          "name": "valid_to",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "llm_model_price_active_provider_model_idx": {
+          "name": "llm_model_price_active_provider_model_idx",
+          "columns": [
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "model",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"llm_model_price\".\"valid_to\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "llm_model_price_lookup_idx": {
+          "name": "llm_model_price_lookup_idx",
+          "columns": [
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "model",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "valid_from",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "llm_model_price_valid_range": {
+          "name": "llm_model_price_valid_range",
+          "value": "\"llm_model_price\".\"valid_to\" is null or \"llm_model_price\".\"valid_to\" > \"llm_model_price\".\"valid_from\""
+        },
+        "llm_model_price_nonnegative": {
+          "name": "llm_model_price_nonnegative",
+          "value": "\"llm_model_price\".\"input_usd_per_mtok\" >= 0 and \"llm_model_price\".\"output_usd_per_mtok\" >= 0 and \"llm_model_price\".\"cache_read_usd_per_mtok\" >= 0 and \"llm_model_price\".\"cache_write_5m_usd_per_mtok\" >= 0 and \"llm_model_price\".\"cache_write_1h_usd_per_mtok\" >= 0 and \"llm_model_price\".\"fixed_request_usd\" >= 0 and (\"llm_model_price\".\"reservation_ceiling_usd\" is null or \"llm_model_price\".\"reservation_ceiling_usd\" >= 0) and \"llm_model_price\".\"code_execution_usd_per_request\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.llm_spend": {
+      "name": "llm_spend",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "request_key": {
+          "name": "request_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_hash": {
+          "name": "request_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "settlement_hash": {
+          "name": "settlement_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "trace_key": {
+          "name": "trace_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "consumer": {
+          "name": "consumer",
+          "type": "llm_ledger_consumer",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "feature": {
+          "name": "feature",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "agent_id": {
+          "name": "agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_name": {
+          "name": "agent_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "resolved_model": {
+          "name": "resolved_model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "price_id": {
+          "name": "price_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "price_snapshot": {
+          "name": "price_snapshot",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "status": {
+          "name": "status",
+          "type": "llm_spend_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "llm_settlement_outcome",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "day": {
+          "name": "day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "input_token_ceiling": {
+          "name": "input_token_ceiling",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "output_token_ceiling": {
+          "name": "output_token_ceiling",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reserved_usd": {
+          "name": "reserved_usd",
+          "type": "numeric(24, 9)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "actual_usd": {
+          "name": "actual_usd",
+          "type": "numeric(24, 9)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "input_tokens": {
+          "name": "input_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "output_tokens": {
+          "name": "output_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cache_read_input_tokens": {
+          "name": "cache_read_input_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cache_creation_input_tokens": {
+          "name": "cache_creation_input_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cache_creation_5m_input_tokens": {
+          "name": "cache_creation_5m_input_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cache_creation_1h_input_tokens": {
+          "name": "cache_creation_1h_input_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "code_execution_requests": {
+          "name": "code_execution_requests",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "provider_request_id": {
+          "name": "provider_request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "reserved_at": {
+          "name": "reserved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "settled_at": {
+          "name": "settled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failed_at": {
+          "name": "failed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "released_at": {
+          "name": "released_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "denied_at": {
+          "name": "denied_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "llm_spend_request_key_idx": {
+          "name": "llm_spend_request_key_idx",
+          "columns": [
+            {
+              "expression": "request_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "llm_spend_provider_request_id_idx": {
+          "name": "llm_spend_provider_request_id_idx",
+          "columns": [
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider_request_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"llm_spend\".\"provider_request_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "llm_spend_day_status_idx": {
+          "name": "llm_spend_day_status_idx",
+          "columns": [
+            {
+              "expression": "day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "llm_spend_agent_day_idx": {
+          "name": "llm_spend_agent_day_idx",
+          "columns": [
+            {
+              "expression": "agent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "llm_spend_trace_key_idx": {
+          "name": "llm_spend_trace_key_idx",
+          "columns": [
+            {
+              "expression": "trace_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "llm_spend_provider_failed_at_idx": {
+          "name": "llm_spend_provider_failed_at_idx",
+          "columns": [
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "failed_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"llm_spend\".\"failed_at\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "llm_spend_price_id_llm_model_price_id_fk": {
+          "name": "llm_spend_price_id_llm_model_price_id_fk",
+          "tableFrom": "llm_spend",
+          "tableTo": "llm_model_price",
+          "columnsFrom": [
+            "price_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "llm_spend_money_nonnegative": {
+          "name": "llm_spend_money_nonnegative",
+          "value": "\"llm_spend\".\"reserved_usd\" >= 0 and (\"llm_spend\".\"actual_usd\" is null or \"llm_spend\".\"actual_usd\" >= 0)"
+        },
+        "llm_spend_tokens_nonnegative": {
+          "name": "llm_spend_tokens_nonnegative",
+          "value": "\"llm_spend\".\"input_token_ceiling\" >= 0 and \"llm_spend\".\"output_token_ceiling\" >= 0 and (\"llm_spend\".\"input_tokens\" is null or \"llm_spend\".\"input_tokens\" >= 0) and (\"llm_spend\".\"output_tokens\" is null or \"llm_spend\".\"output_tokens\" >= 0) and (\"llm_spend\".\"cache_read_input_tokens\" is null or \"llm_spend\".\"cache_read_input_tokens\" >= 0) and (\"llm_spend\".\"cache_creation_input_tokens\" is null or \"llm_spend\".\"cache_creation_input_tokens\" >= 0) and (\"llm_spend\".\"cache_creation_5m_input_tokens\" is null or \"llm_spend\".\"cache_creation_5m_input_tokens\" >= 0) and (\"llm_spend\".\"cache_creation_1h_input_tokens\" is null or \"llm_spend\".\"cache_creation_1h_input_tokens\" >= 0) and (\"llm_spend\".\"code_execution_requests\" is null or \"llm_spend\".\"code_execution_requests\" >= 0)"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.machine_card": {
       "name": "machine_card",
       "schema": "",
@@ -4051,6 +5540,21 @@
             }
           ],
           "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "machine_sale_captured_idx": {
+          "name": "machine_sale_captured_idx",
+          "columns": [
+            {
+              "expression": "captured_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -4948,6 +6452,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "cash_symbol": {
+          "name": "cash_symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "date": {
           "name": "date",
           "type": "timestamp with time zone",
@@ -5411,6 +6921,401 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.ourvend_sale_snapshot": {
+      "name": "ourvend_sale_snapshot",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "dt": {
+          "name": "dt",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "machine_serial": {
+          "name": "machine_serial",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "product": {
+          "name": "product",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "qty": {
+          "name": "qty",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "amount": {
+          "name": "amount",
+          "type": "numeric(15, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "fetched_at": {
+          "name": "fetched_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "ourvend_sale_snap_key": {
+          "name": "ourvend_sale_snap_key",
+          "columns": [
+            {
+              "expression": "dt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "machine_serial",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "product",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "ourvend_sale_snap_dt_idx": {
+          "name": "ourvend_sale_snap_dt_idx",
+          "columns": [
+            {
+              "expression": "dt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.ourvend_stock_snapshot": {
+      "name": "ourvend_stock_snapshot",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "dt": {
+          "name": "dt",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "machine_serial": {
+          "name": "machine_serial",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "product": {
+          "name": "product",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "qty": {
+          "name": "qty",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "fetched_at": {
+          "name": "fetched_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "ourvend_stock_snap_key": {
+          "name": "ourvend_stock_snap_key",
+          "columns": [
+            {
+              "expression": "dt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "machine_serial",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "product",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "ourvend_stock_snap_dt_idx": {
+          "name": "ourvend_stock_snap_dt_idx",
+          "columns": [
+            {
+              "expression": "dt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.outbox_delivery": {
+      "name": "outbox_delivery",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "task_agent_execution_id": {
+          "name": "task_agent_execution_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "destination": {
+          "name": "destination",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payload": {
+          "name": "payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payload_hash": {
+          "name": "payload_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "outbox_delivery_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "lease_token": {
+          "name": "lease_token",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "claimed_at": {
+          "name": "claimed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "provider_ref": {
+          "name": "provider_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "outbox_delivery_key": {
+          "name": "outbox_delivery_key",
+          "columns": [
+            {
+              "expression": "key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "outbox_delivery_destination_status_created_idx": {
+          "name": "outbox_delivery_destination_status_created_idx",
+          "columns": [
+            {
+              "expression": "destination",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "outbox_delivery_execution_idx": {
+          "name": "outbox_delivery_execution_idx",
+          "columns": [
+            {
+              "expression": "task_agent_execution_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "outbox_delivery_task_agent_execution_id_task_agent_execution_id_fk": {
+          "name": "outbox_delivery_task_agent_execution_id_task_agent_execution_id_fk",
+          "tableFrom": "outbox_delivery",
+          "tableTo": "task_agent_execution",
+          "columnsFrom": [
+            "task_agent_execution_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "outbox_delivery_attempts_nonnegative": {
+          "name": "outbox_delivery_attempts_nonnegative",
+          "value": "\"outbox_delivery\".\"attempts\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.person": {
       "name": "person",
       "schema": "",
@@ -5530,6 +7435,89 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.product_name_alias": {
+      "name": "product_name_alias",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "entity_id": {
+          "name": "entity_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "product_name_alias_entity_idx": {
+          "name": "product_name_alias_entity_idx",
+          "columns": [
+            {
+              "expression": "entity_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "product_name_alias_entity_id_entity_id_fk": {
+          "name": "product_name_alias_entity_id_entity_id_fk",
+          "tableFrom": "product_name_alias",
+          "tableTo": "entity",
+          "columnsFrom": [
+            "entity_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "product_name_alias_name_unique": {
+          "name": "product_name_alias_name_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "name"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.product_sale": {
       "name": "product_sale",
       "schema": "",
@@ -5601,6 +7589,21 @@
               "asc": true,
               "nulls": "last"
             },
+            {
+              "expression": "captured_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "product_sale_captured_idx": {
+          "name": "product_sale_captured_idx",
+          "columns": [
             {
               "expression": "captured_at",
               "isExpression": false,
@@ -6282,6 +8285,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -6660,6 +8669,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "slot_snapshot_captured_idx": {
+          "name": "slot_snapshot_captured_idx",
+          "columns": [
+            {
+              "expression": "captured_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -6807,6 +8831,315 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.stock_batch": {
+      "name": "stock_batch",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "ingredient_id": {
+          "name": "ingredient_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_code": {
+          "name": "batch_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expiry_date": {
+          "name": "expiry_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "manufacture_date": {
+          "name": "manufacture_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "received_on": {
+          "name": "received_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "qty_received": {
+          "name": "qty_received",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "unit": {
+          "name": "unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "opened_on": {
+          "name": "opened_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "opened_by": {
+          "name": "opened_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "person_id": {
+          "name": "person_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "supplier_id": {
+          "name": "supplier_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "invoice_no": {
+          "name": "invoice_no",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "invoice_date": {
+          "name": "invoice_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ikpu": {
+          "name": "ikpu",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "unit_price_net": {
+          "name": "unit_price_net",
+          "type": "numeric(14, 4)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "vat_rate": {
+          "name": "vat_rate",
+          "type": "numeric(5, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "unit_price_gross": {
+          "name": "unit_price_gross",
+          "type": "numeric(14, 4)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "base_unit_snapshot": {
+          "name": "base_unit_snapshot",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "package_weight_snapshot": {
+          "name": "package_weight_snapshot",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'manual'"
+        },
+        "ext_id": {
+          "name": "ext_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "note": {
+          "name": "note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "stock_batch_expiry_idx": {
+          "name": "stock_batch_expiry_idx",
+          "columns": [
+            {
+              "expression": "expiry_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "expiry_date is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "stock_batch_open_idx": {
+          "name": "stock_batch_open_idx",
+          "columns": [
+            {
+              "expression": "opened_on",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "opened_on is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "stock_batch_code_key": {
+          "name": "stock_batch_code_key",
+          "columns": [
+            {
+              "expression": "ingredient_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "batch_code",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "batch_code is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "stock_batch_ext_key": {
+          "name": "stock_batch_ext_key",
+          "columns": [
+            {
+              "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ext_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "ext_id is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "stock_batch_ingredient_id_entity_id_fk": {
+          "name": "stock_batch_ingredient_id_entity_id_fk",
+          "tableFrom": "stock_batch",
+          "tableTo": "entity",
+          "columnsFrom": [
+            "ingredient_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "stock_batch_warehouse_id_entity_id_fk": {
+          "name": "stock_batch_warehouse_id_entity_id_fk",
+          "tableFrom": "stock_batch",
+          "tableTo": "entity",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "stock_batch_opened_by_person_id_fk": {
+          "name": "stock_batch_opened_by_person_id_fk",
+          "tableFrom": "stock_batch",
+          "tableTo": "person",
+          "columnsFrom": [
+            "opened_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "stock_batch_person_id_person_id_fk": {
+          "name": "stock_batch_person_id_person_id_fk",
+          "tableFrom": "stock_batch",
+          "tableTo": "person",
+          "columnsFrom": [
+            "person_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "stock_batch_supplier_id_entity_id_fk": {
+          "name": "stock_batch_supplier_id_entity_id_fk",
+          "tableFrom": "stock_batch",
+          "tableTo": "entity",
+          "columnsFrom": [
+            "supplier_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.stock_movement": {
       "name": "stock_movement",
       "schema": "",
@@ -6839,6 +9172,12 @@
         },
         "counterparty_id": {
           "name": "counterparty_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "batch_id": {
+          "name": "batch_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
@@ -7052,6 +9391,19 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "stock_movement_batch_id_stock_batch_id_fk": {
+          "name": "stock_movement_batch_id_stock_batch_id_fk",
+          "tableFrom": "stock_movement",
+          "tableTo": "stock_batch",
+          "columnsFrom": [
+            "batch_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -7155,6 +9507,49 @@
           "notNull": true,
           "default": "'todo'"
         },
+        "agent_run_id": {
+          "name": "agent_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_execution_attempt_id": {
+          "name": "agent_execution_attempt_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_execution_retry_at": {
+          "name": "agent_execution_retry_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_execution_blocked_at": {
+          "name": "agent_execution_blocked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_execution_blocked_reason": {
+          "name": "agent_execution_blocked_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_run_generation": {
+          "name": "agent_run_generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "agent_run_claimed_at": {
+          "name": "agent_run_claimed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "priority": {
           "name": "priority",
           "type": "task_priority",
@@ -7209,6 +9604,24 @@
         "closed_by": {
           "name": "closed_by",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "confirmed_at": {
+          "name": "confirmed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "confirmed_by": {
+          "name": "confirmed_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "assign_notified_at": {
+          "name": "assign_notified_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -7314,6 +9727,38 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "task_assign_pending_idx": {
+          "name": "task_assign_pending_idx",
+          "columns": [
+            {
+              "expression": "owner_ref",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "assign_notified_at is null and owner_ref is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "task_awaiting_idx": {
+          "name": "task_awaiting_idx",
+          "columns": [
+            {
+              "expression": "completed_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "confirmed_at is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -7334,7 +9779,301 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "task_agent_run_generation_nonnegative": {
+          "name": "task_agent_run_generation_nonnegative",
+          "value": "\"task\".\"agent_run_generation\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.task_agent_execution": {
+      "name": "task_agent_execution",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "execution_attempt_id": {
+          "name": "execution_attempt_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "agent_name": {
+          "name": "agent_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "skill": {
+          "name": "skill",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "schema_version": {
+          "name": "schema_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "task_input_hash": {
+          "name": "task_input_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "workflow_version": {
+          "name": "workflow_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "execution_plan": {
+          "name": "execution_plan",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{\"version\":1,\"steps\":[]}'::jsonb"
+        },
+        "execution_plan_hash": {
+          "name": "execution_plan_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'a5dd3ce7993c63ad01d8a9a45922bc5f17d2c41c5f21a10671ec8c05c5ffc4aa'"
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "input_snapshot_kind": {
+          "name": "input_snapshot_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "input_snapshot_payload": {
+          "name": "input_snapshot_payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "input_snapshot_hash": {
+          "name": "input_snapshot_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "checkpoint_kind": {
+          "name": "checkpoint_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "checkpoint_payload": {
+          "name": "checkpoint_payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "checkpoint_hash": {
+          "name": "checkpoint_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "task_agent_execution_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'ready'"
+        },
+        "outcome_payload": {
+          "name": "outcome_payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "outcome_hash": {
+          "name": "outcome_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "approval_id": {
+          "name": "approval_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "committed_at": {
+          "name": "committed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "abandoned_at": {
+          "name": "abandoned_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "abandon_reason": {
+          "name": "abandon_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "task_agent_execution_attempt_key": {
+          "name": "task_agent_execution_attempt_key",
+          "columns": [
+            {
+              "expression": "execution_attempt_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "task_agent_execution_task_idx": {
+          "name": "task_agent_execution_task_idx",
+          "columns": [
+            {
+              "expression": "task_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "task_agent_execution_status_idx": {
+          "name": "task_agent_execution_status_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "task_agent_execution_task_id_task_id_fk": {
+          "name": "task_agent_execution_task_id_task_id_fk",
+          "tableFrom": "task_agent_execution",
+          "tableTo": "task",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "task_agent_execution_approval_id_approval_id_fk": {
+          "name": "task_agent_execution_approval_id_approval_id_fk",
+          "tableFrom": "task_agent_execution",
+          "tableTo": "approval",
+          "columnsFrom": [
+            "approval_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "task_agent_execution_schema_version_positive": {
+          "name": "task_agent_execution_schema_version_positive",
+          "value": "\"task_agent_execution\".\"schema_version\" > 0"
+        },
+        "task_agent_execution_workflow_version_positive": {
+          "name": "task_agent_execution_workflow_version_positive",
+          "value": "\"task_agent_execution\".\"workflow_version\" > 0"
+        },
+        "task_agent_execution_plan_bounded": {
+          "name": "task_agent_execution_plan_bounded",
+          "value": "jsonb_typeof(\"task_agent_execution\".\"execution_plan\") = 'object' and octet_length(\"task_agent_execution\".\"execution_plan\"::text) <= 65536"
+        },
+        "task_agent_execution_plan_hash_format": {
+          "name": "task_agent_execution_plan_hash_format",
+          "value": "\"task_agent_execution\".\"execution_plan_hash\" ~ '^[0-9a-f]{64}$'"
+        },
+        "task_agent_execution_input_snapshot_consistent": {
+          "name": "task_agent_execution_input_snapshot_consistent",
+          "value": "(\"task_agent_execution\".\"input_snapshot_kind\" is null and \"task_agent_execution\".\"input_snapshot_payload\" is null and \"task_agent_execution\".\"input_snapshot_hash\" is null) or (\"task_agent_execution\".\"input_snapshot_kind\" is not null and \"task_agent_execution\".\"input_snapshot_payload\" is not null and \"task_agent_execution\".\"input_snapshot_hash\" is not null)"
+        },
+        "task_agent_execution_input_snapshot_kind_bounded": {
+          "name": "task_agent_execution_input_snapshot_kind_bounded",
+          "value": "\"task_agent_execution\".\"input_snapshot_kind\" is null or (char_length(btrim(\"task_agent_execution\".\"input_snapshot_kind\")) between 1 and 128)"
+        },
+        "task_agent_execution_input_snapshot_payload_bounded": {
+          "name": "task_agent_execution_input_snapshot_payload_bounded",
+          "value": "\"task_agent_execution\".\"input_snapshot_payload\" is null or (jsonb_typeof(\"task_agent_execution\".\"input_snapshot_payload\") = 'object' and octet_length(\"task_agent_execution\".\"input_snapshot_payload\"::text) <= 65536)"
+        },
+        "task_agent_execution_input_snapshot_hash_format": {
+          "name": "task_agent_execution_input_snapshot_hash_format",
+          "value": "\"task_agent_execution\".\"input_snapshot_hash\" is null or \"task_agent_execution\".\"input_snapshot_hash\" ~ '^[0-9a-f]{64}$'"
+        },
+        "task_agent_execution_terminal_fields_consistent": {
+          "name": "task_agent_execution_terminal_fields_consistent",
+          "value": "(\"task_agent_execution\".\"status\" = 'active' and \"task_agent_execution\".\"checkpoint_kind\" is null and \"task_agent_execution\".\"checkpoint_payload\" is null and \"task_agent_execution\".\"checkpoint_hash\" is null and \"task_agent_execution\".\"outcome_payload\" is null and \"task_agent_execution\".\"outcome_hash\" is null and \"task_agent_execution\".\"committed_at\" is null and \"task_agent_execution\".\"abandoned_at\" is null and \"task_agent_execution\".\"abandon_reason\" is null) or (\"task_agent_execution\".\"status\" = 'ready' and \"task_agent_execution\".\"checkpoint_kind\" is not null and \"task_agent_execution\".\"checkpoint_payload\" is not null and \"task_agent_execution\".\"checkpoint_hash\" is not null and \"task_agent_execution\".\"outcome_payload\" is null and \"task_agent_execution\".\"outcome_hash\" is null and \"task_agent_execution\".\"committed_at\" is null and \"task_agent_execution\".\"abandoned_at\" is null and \"task_agent_execution\".\"abandon_reason\" is null) or (\"task_agent_execution\".\"status\" = 'committed' and \"task_agent_execution\".\"checkpoint_kind\" is not null and \"task_agent_execution\".\"checkpoint_payload\" is not null and \"task_agent_execution\".\"checkpoint_hash\" is not null and \"task_agent_execution\".\"outcome_payload\" is not null and \"task_agent_execution\".\"outcome_hash\" is not null and \"task_agent_execution\".\"committed_at\" is not null and \"task_agent_execution\".\"abandoned_at\" is null and \"task_agent_execution\".\"abandon_reason\" is null) or (\"task_agent_execution\".\"status\" = 'abandoned' and ((\"task_agent_execution\".\"checkpoint_kind\" is null and \"task_agent_execution\".\"checkpoint_payload\" is null and \"task_agent_execution\".\"checkpoint_hash\" is null) or (\"task_agent_execution\".\"checkpoint_kind\" is not null and \"task_agent_execution\".\"checkpoint_payload\" is not null and \"task_agent_execution\".\"checkpoint_hash\" is not null)) and \"task_agent_execution\".\"outcome_payload\" is null and \"task_agent_execution\".\"outcome_hash\" is null and \"task_agent_execution\".\"committed_at\" is null and \"task_agent_execution\".\"abandoned_at\" is not null and \"task_agent_execution\".\"abandon_reason\" is not null)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.task_comment": {
@@ -7837,9 +10576,22 @@
           "primaryKey": false,
           "notNull": true
         },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'own'"
+        },
         "created_by": {
           "name": "created_by",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reverses_id": {
+          "name": "reverses_id",
+          "type": "uuid",
           "primaryKey": false,
           "notNull": false
         },
@@ -7851,8 +10603,39 @@
           "default": "now()"
         }
       },
-      "indexes": {},
-      "foreignKeys": {},
+      "indexes": {
+        "vending_cash_session_storno_key": {
+          "name": "vending_cash_session_storno_key",
+          "columns": [
+            {
+              "expression": "reverses_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"vending_cash_session\".\"source\" = 'storno'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "vending_cash_session_reverses_id_vending_cash_session_id_fk": {
+          "name": "vending_cash_session_reverses_id_vending_cash_session_id_fk",
+          "tableFrom": "vending_cash_session",
+          "tableTo": "vending_cash_session",
+          "columnsFrom": [
+            "reverses_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -7890,12 +10673,70 @@
           "primaryKey": false,
           "notNull": false
         },
+        "sale_price": {
+          "name": "sale_price",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
         "pack_size": {
           "name": "pack_size",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "default": 1
+        },
+        "excluded_from_purchase": {
+          "name": "excluded_from_purchase",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "fixed_purchase_qty": {
+          "name": "fixed_purchase_qty",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ikpu": {
+          "name": "ikpu",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mxik": {
+          "name": "mxik",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "vat_pct": {
+          "name": "vat_pct",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 12
+        },
+        "barcode": {
+          "name": "barcode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "package_code": {
+          "name": "package_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'796'"
+        },
+        "marked": {
+          "name": "marked",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "is_active": {
           "name": "is_active",
@@ -8017,6 +10858,18 @@
         "unmatched_distribution": {
           "name": "unmatched_distribution",
           "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "received_at": {
+          "name": "received_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "received_by": {
+          "name": "received_by",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         }
@@ -8141,6 +10994,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "reverses_id": {
+          "name": "reverses_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -8206,6 +11065,22 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "vending_refill_reverses_idx": {
+          "name": "vending_refill_reverses_idx",
+          "columns": [
+            {
+              "expression": "reverses_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"vending_refill\".\"reverses_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -8260,17 +11135,158 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "vending_refill_reverses_id_vending_refill_id_fk": {
+          "name": "vending_refill_reverses_id_vending_refill_id_fk",
+          "tableFrom": "vending_refill",
+          "tableTo": "vending_refill",
+          "columnsFrom": [
+            "reverses_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {
-        "vending_refill_qty_positive": {
-          "name": "vending_refill_qty_positive",
-          "value": "\"vending_refill\".\"qty\" > 0"
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.vending_refill_event": {
+      "name": "vending_refill_event",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "machine_serial": {
+          "name": "machine_serial",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "machine_id": {
+          "name": "machine_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "window_from": {
+          "name": "window_from",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "window_to": {
+          "name": "window_to",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "units": {
+          "name": "units",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "slots": {
+          "name": "slots",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "matched_refill_id": {
+          "name": "matched_refill_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
         }
       },
+      "indexes": {
+        "vending_refill_event_serial_to": {
+          "name": "vending_refill_event_serial_to",
+          "columns": [
+            {
+              "expression": "machine_serial",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "window_to",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "vending_refill_event_to_idx": {
+          "name": "vending_refill_event_to_idx",
+          "columns": [
+            {
+              "expression": "window_to",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "vending_refill_event_machine_id_entity_id_fk": {
+          "name": "vending_refill_event_machine_id_entity_id_fk",
+          "tableFrom": "vending_refill_event",
+          "tableTo": "entity",
+          "columnsFrom": [
+            "machine_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "vending_refill_event_matched_refill_id_vending_refill_id_fk": {
+          "name": "vending_refill_event_matched_refill_id_vending_refill_id_fk",
+          "tableFrom": "vending_refill_event",
+          "tableTo": "vending_refill",
+          "columnsFrom": [
+            "matched_refill_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.vending_stock": {
@@ -8347,6 +11363,236 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.vending_stock_count": {
+      "name": "vending_stock_count",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "dt": {
+          "name": "dt",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "product_name": {
+          "name": "product_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "product_id": {
+          "name": "product_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "qty": {
+          "name": "qty",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ext_id": {
+          "name": "ext_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "counted_at": {
+          "name": "counted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "person_id": {
+          "name": "person_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "note": {
+          "name": "note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reverses_id": {
+          "name": "reverses_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "vending_stock_count_src_key": {
+          "name": "vending_stock_count_src_key",
+          "columns": [
+            {
+              "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ext_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"vending_stock_count\".\"ext_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "vending_stock_count_own_key": {
+          "name": "vending_stock_count_own_key",
+          "columns": [
+            {
+              "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "counted_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "product_name",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"vending_stock_count\".\"source\" = 'own'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "vending_stock_count_product_dt_idx": {
+          "name": "vending_stock_count_product_dt_idx",
+          "columns": [
+            {
+              "expression": "product_name",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "dt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "vending_stock_count_dt_idx": {
+          "name": "vending_stock_count_dt_idx",
+          "columns": [
+            {
+              "expression": "dt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "vending_stock_count_storno_key": {
+          "name": "vending_stock_count_storno_key",
+          "columns": [
+            {
+              "expression": "reverses_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"vending_stock_count\".\"source\" = 'storno'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "vending_stock_count_product_id_vending_product_id_fk": {
+          "name": "vending_stock_count_product_id_vending_product_id_fk",
+          "tableFrom": "vending_stock_count",
+          "tableTo": "vending_product",
+          "columnsFrom": [
+            "product_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "vending_stock_count_person_id_person_id_fk": {
+          "name": "vending_stock_count_person_id_person_id_fk",
+          "tableFrom": "vending_stock_count",
+          "tableTo": "person",
+          "columnsFrom": [
+            "person_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "vending_stock_count_reverses_id_vending_stock_count_id_fk": {
+          "name": "vending_stock_count_reverses_id_vending_stock_count_id_fk",
+          "tableFrom": "vending_stock_count",
+          "tableTo": "vending_stock_count",
+          "columnsFrom": [
+            "reverses_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.vending_sync_run": {
       "name": "vending_sync_run",
       "schema": "",
@@ -8406,7 +11652,23 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "vending_sync_run_started_idx": {
+          "name": "vending_sync_run_started_idx",
+          "columns": [
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -8501,6 +11763,43 @@
         "system"
       ]
     },
+    "public.agent_task_llm_authorization_decision": {
+      "name": "agent_task_llm_authorization_decision",
+      "schema": "public",
+      "values": [
+        "denied",
+        "granted"
+      ]
+    },
+    "public.agent_task_llm_job_kind": {
+      "name": "agent_task_llm_job_kind",
+      "schema": "public",
+      "values": [
+        "chat",
+        "embedding"
+      ]
+    },
+    "public.agent_task_llm_job_status": {
+      "name": "agent_task_llm_job_status",
+      "schema": "public",
+      "values": [
+        "waiting_budget",
+        "ready",
+        "dispatching",
+        "succeeded",
+        "rejected",
+        "unknown",
+        "cancelled"
+      ]
+    },
+    "public.agent_task_llm_result_kind": {
+      "name": "agent_task_llm_result_kind",
+      "schema": "public",
+      "values": [
+        "success",
+        "provider_rejection"
+      ]
+    },
     "public.approval_decision": {
       "name": "approval_decision",
       "schema": "public",
@@ -8560,6 +11859,53 @@
         "mydon"
       ]
     },
+    "public.llm_billing_kind": {
+      "name": "llm_billing_kind",
+      "schema": "public",
+      "values": [
+        "metered",
+        "subscription"
+      ]
+    },
+    "public.llm_ledger_consumer": {
+      "name": "llm_ledger_consumer",
+      "schema": "public",
+      "values": [
+        "agents",
+        "bot",
+        "cc",
+        "documents",
+        "embeddings"
+      ]
+    },
+    "public.llm_settlement_kind": {
+      "name": "llm_settlement_kind",
+      "schema": "public",
+      "values": [
+        "tokens",
+        "provider_reported"
+      ]
+    },
+    "public.llm_settlement_outcome": {
+      "name": "llm_settlement_outcome",
+      "schema": "public",
+      "values": [
+        "success",
+        "provider_error",
+        "unknown"
+      ]
+    },
+    "public.llm_spend_status": {
+      "name": "llm_spend_status",
+      "schema": "public",
+      "values": [
+        "reserved",
+        "settled",
+        "failed",
+        "released",
+        "denied"
+      ]
+    },
     "public.machine_kind": {
       "name": "machine_kind",
       "schema": "public",
@@ -8611,6 +11957,18 @@
       "values": [
         "in",
         "out"
+      ]
+    },
+    "public.outbox_delivery_status": {
+      "name": "outbox_delivery_status",
+      "schema": "public",
+      "values": [
+        "pending",
+        "dispatching",
+        "sent",
+        "skipped",
+        "unknown",
+        "dead"
       ]
     },
     "public.owner_kind": {
@@ -8687,6 +12045,16 @@
         "consumption",
         "transfer",
         "adjustment"
+      ]
+    },
+    "public.task_agent_execution_status": {
+      "name": "task_agent_execution_status",
+      "schema": "public",
+      "values": [
+        "active",
+        "ready",
+        "committed",
+        "abandoned"
       ]
     },
     "public.task_priority": {
