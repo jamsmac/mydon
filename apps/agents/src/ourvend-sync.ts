@@ -86,6 +86,14 @@ export interface SyncResult {
    * роняет сбор — только помечается "failed" и уходит в лог.
    */
   detect?: { events: number; matched: number } | "failed";
+  /**
+   * Журнал прогона НЕ закрылся (finishVendingSync упал даже после повтора):
+   * текст последнего отказа. Есть ключ → запись сбора осталась в статусе
+   * «running» навсегда, а сторож застоя её из фонового успеха не увидит.
+   * Данные при этом собраны — сам сбор не проваливаем, но вызыватель обязан
+   * отразить это в логе, а НЕ рапортовать чистый успех.
+   */
+  journalError?: string;
 }
 
 export interface RunOptions {
@@ -140,16 +148,32 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
       durationMs,
       ...(result.error ? { error: result.error.slice(0, MAX_ERROR_CHARS) } : {}),
     };
+    const finishInput = {
+      status: full.status,
+      machinesTotal: full.machinesTotal,
+      machinesOk: full.machinesOk,
+      durationMs,
+      ...(full.error ? { error: full.error } : {}),
+    };
     try {
-      await core.finishVendingSync(id, {
-        status: full.status,
-        machinesTotal: full.machinesTotal,
-        machinesOk: full.machinesOk,
-        durationMs,
-        ...(full.error ? { error: full.error } : {}),
-      });
+      await core.finishVendingSync(id, finishInput);
     } catch {
-      // Не удалось закрыть журнал — не роняем сбор; запись останется «running».
+      // Первая попытка закрыть журнал не прошла — короткий повтор. Сеть/Core
+      // мигнули → второй заход обычно проходит, и запись не зависает «running».
+      try {
+        await core.finishVendingSync(id, finishInput);
+      } catch (err2) {
+        // Журнал не закрылся дважды: запись сбора остаётся «running» НАВСЕГДА,
+        // а сторож застоя её из фонового «успеха» не увидит. Данные уже собраны
+        // — сам сбор не роняем, но делаем застревание ВИДИМЫМ: error-лог с id
+        // прогона и текстом отказа + флаг наверх, чтобы cron не рапортовал
+        // чистый успех (см. `SyncResult.journalError` и вызыватель в index.ts).
+        const journalError = errText(err2);
+        console.error(
+          `[ourvend:sync] журнал прогона ${id} НЕ закрыт (останется «running»): ${journalError}`,
+        );
+        return { ...full, journalError };
+      }
     }
     return full;
   };

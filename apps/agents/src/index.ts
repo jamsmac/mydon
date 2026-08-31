@@ -529,10 +529,18 @@ async function main(): Promise<void> {
                 : r.detect === "failed"
                   ? ", детектор: сбой"
                   : `, заливок ${r.detect.events} (подтверждено ${r.detect.matched})`;
-            console.log(
+            const итог =
               `[ourvend:sync] ${r.status} — автоматов ${r.machinesOk}/${r.machinesTotal}, слотов ${r.slots}, продаж ${r.productSales}${детектор}, ${r.durationMs} мс` +
-                (r.error ? ` — ${r.error}` : ""),
-            );
+              (r.error ? ` — ${r.error}` : "");
+            // Журнал прогона НЕ закрылся (finish упал даже после повтора):
+            // запись сбора висит «running», сторож застоя её не увидит. НЕ
+            // рапортуем чистый успех — отдельная error-строка, чтобы застревание
+            // было видно в логе крона, а не только во внутреннем error-логе finish.
+            if (r.journalError) {
+              console.error(`${итог} — ЖУРНАЛ НЕ ЗАКРЫТ («running»): ${r.journalError}`);
+            } else {
+              console.log(итог);
+            }
           } catch (err) {
             console.error("[ourvend:sync] сбой:", err);
           }
