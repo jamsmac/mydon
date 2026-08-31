@@ -284,12 +284,19 @@ export default async function DomainPage({
   let entities: Entity[];
   let people: Person[] = [];
   let tasks: Task[] = [];
+  // Команда и задачи тянутся ОДНИМ Promise.all и падают вместе — один честный
+  // флаг на оба источника. Провал глотать в пустой список нельзя: пустая
+  // «Команда»/«Задачи» и ноль «Открытых задач» читаются как «всё спокойно»,
+  // хотя на деле Core не ответил. Отличаем «нет записей» от «данные недоступны»
+  // тем же приёмом, что и `contractorsLoaded` ниже.
+  let teamLoaded = false;
   let contractors: Entity[] = [];
   let contractorsLoaded = false;
   try {
     entities = await core.entitiesOf(domain);
     try {
       [people, tasks] = await Promise.all([core.people(), core.tasks({ domain })]);
+      teamLoaded = true;
     } catch {
       // команда и задачи — не повод ронять страницу направления
     }
@@ -317,11 +324,17 @@ export default async function DomainPage({
     overdueTotal: 0,
     overdueTruncated: false,
   };
+  // Провал обязательств нельзя показывать нулями: «0 просрочек» и «нет открытых
+  // счетов» — это утверждение, а не отсутствие данных. Флаг отличает «Core
+  // ответил, долгов нет» от «Core не ответил» — плитки тогда честно говорят
+  // «данные недоступны», а не занижают до нуля.
+  let obligationsLoaded = false;
   if (isOverview) {
     try {
       obligations = await core.obligations(domain);
+      obligationsLoaded = true;
     } catch {
-      // Core ответил на реестр, но не на обязательства — показываем нули.
+      // Core ответил на реестр, но не на обязательства — покажем «данные недоступны».
     }
   }
 
@@ -1102,9 +1115,21 @@ export default async function DomainPage({
   const snackRevenue30 = salesSummary?.days30.amount ?? null;
   const hasRevenue30 = coffeeRevenue30 !== null || snackRevenue30 !== null;
   const revenue30 = (coffeeRevenue30 ?? 0) + (snackRevenue30 ?? 0);
+  // Итог «Выручка» складывает кофе и снек. Если один контур недоступен (запрос
+  // провалился или эндпоинт ещё не на проде), сумма второго — НЕ выручка
+  // предприятия, а её заниженная часть. Показать её как итог значило бы
+  // соврать вниз, поэтому при частичной доступности плитка честно говорит
+  // «частично недоступно», а не рисует урезанное число.
+  const revenuePartial = hasRevenue30 && (coffeeRevenue30 === null || snackRevenue30 === null);
   const deficitCount = vendingDeficit?.length ?? 0;
   const notIssuedCount = coffeeOrders?.неВыдано ?? 0;
   const attentionTotal = deficitCount + notIssuedCount + openTasks.length;
+  // «Требует внимания» суммирует три источника: дефицит, невыданные заказы и
+  // открытые задачи. Провал любого из них подменяется нулём в сумме — тревога
+  // занижается и владелец видит «спокойнее, чем есть». Отмечаем частичную
+  // доступность, чтобы итог не выдавал недобор за штиль.
+  const attentionPartial =
+    vendingDeficit === null || coffeeOrders === null || !teamLoaded;
   // I3: сколько автоматов ни разу не инкассировались — оценка «Деньги в
   // автоматах» по ним идёт за всю историю, а не с последнего сбора.
   const cashNoCollectionCount = cashEstimate?.поАвтоматам.filter((m) => m.с === null).length ?? 0;
@@ -1175,7 +1200,16 @@ export default async function DomainPage({
         <h1 className="h1">{DOMAIN_LABELS[domain]}</h1>
         <p className="lead">
           {entities.length} {plural(entities.length, "запись", "записи", "записей")} в реестре
-          {openTasks.length > 0 ? ` · открытых задач: ${openTasks.length}` : ""}
+          {/* Провал команды/задач нельзя прятать под успокаивающим умолчанием:
+              при !teamLoaded openTasks схлопывается в [], и сегмент про задачи
+              тихо гас — «Core не ответил» читалось как «открытых задач нет».
+              Для vendhub это ОСНОВНОЙ индикатор задач в шапке (см. I4 ниже),
+              поэтому недоступность честно называется, а не молчит. */}
+          {!teamLoaded
+            ? " · задачи: данные недоступны"
+            : openTasks.length > 0
+              ? ` · открытых задач: ${openTasks.length}`
+              : ""}
         </p>
       </div>
 
@@ -1312,39 +1346,70 @@ export default async function DomainPage({
               (GLOBERENT и т.д.), где своей сводки по обязательствам ещё нет. */}
           {domain !== "vendhub" && (
             <div className="tiles">
-              <div className={`tile ${hasMoney(owedToUs) ? "" : "zero"}`}>
+              {/* Обязательства (должны нам/мы/просрочено) — best-effort: провал
+                  запроса нельзя показывать нулём и «нет открытых счетов», иначе
+                  недоступность читается как «долгов нет». При провале плитка
+                  честно говорит «данные недоступны». */}
+              <div
+                className={`tile ${!obligationsLoaded ? "off" : hasMoney(owedToUs) ? "" : "zero"}`}
+              >
                 <div className="lab">Должны нам</div>
-                <div className="v">{moneyByCurrency(owedToUs)}</div>
+                <div className="v">{obligationsLoaded ? moneyByCurrency(owedToUs) : "—"}</div>
                 <div className="foot">
                   <span className="mk" />
-                  {hasMoney(owedToUs) ? "по реестру обязательств" : "нет открытых счетов"}
+                  {!obligationsLoaded
+                    ? "данные недоступны"
+                    : hasMoney(owedToUs)
+                      ? "по реестру обязательств"
+                      : "нет открытых счетов"}
                 </div>
               </div>
-              <div className={`tile ${hasMoney(owedByUs) ? "" : "zero"}`}>
+              <div
+                className={`tile ${!obligationsLoaded ? "off" : hasMoney(owedByUs) ? "" : "zero"}`}
+              >
                 <div className="lab">Должны мы</div>
-                <div className="v">{moneyByCurrency(owedByUs)}</div>
+                <div className="v">{obligationsLoaded ? moneyByCurrency(owedByUs) : "—"}</div>
                 <div className="foot">
                   <span className="mk" />
-                  {hasMoney(owedByUs) ? "поставщики и аренда" : "нет открытых счетов"}
+                  {!obligationsLoaded
+                    ? "данные недоступны"
+                    : hasMoney(owedByUs)
+                      ? "поставщики и аренда"
+                      : "нет открытых счетов"}
                 </div>
               </div>
-              <div className={`tile ${obligations.overdueTotal > 0 ? "is-hot" : "zero"}`}>
+              <div
+                className={`tile ${
+                  !obligationsLoaded ? "off" : obligations.overdueTotal > 0 ? "is-hot" : "zero"
+                }`}
+              >
                 <div className="lab">Просрочено</div>
-                <div className="v">{obligations.overdueTotal}</div>
+                <div className="v">{obligationsLoaded ? obligations.overdueTotal : "—"}</div>
                 <div className="foot">
                   <span className="mk" />
-                  {obligations.overdueTotal > 0 ? "требует твоего решения" : "просрочек нет"}
+                  {!obligationsLoaded
+                    ? "данные недоступны"
+                    : obligations.overdueTotal > 0
+                      ? "требует твоего решения"
+                      : "просрочек нет"}
                 </div>
               </div>
-              <Link href={href("tasks")} className={`tile ${openTasks.length === 0 ? "zero" : ""}`}>
+              <Link
+                href={href("tasks")}
+                className={`tile ${!teamLoaded ? "off" : openTasks.length === 0 ? "zero" : ""}`}
+              >
                 <div className="lab">Открытых задач</div>
-                <div className="v">{openTasks.length}</div>
+                <div className="v">{teamLoaded ? openTasks.length : "—"}</div>
                 <div className="foot">
                   <span className="mk" />
                   {/* Этот легаси-ряд у VendHub не рендерится (I4) — разбивку
                       кофе/снек показывать здесь уже некому, у остальных
                       направлений признака контура нет. */}
-                  {openTasks.length === 0 ? "задач нет" : "по направлению"}
+                  {!teamLoaded
+                    ? "данные недоступны"
+                    : openTasks.length === 0
+                      ? "задач нет"
+                      : "по направлению"}
                   <span className="go">→</span>
                 </div>
               </Link>
@@ -1505,15 +1570,22 @@ export default async function DomainPage({
                 <h3 className="h2">Предприятие</h3>
               </div>
               <div className="wgrid">
-                <div className={`wt ${hasRevenue30 ? "" : "off"}`}>
+                <div className={`wt ${hasRevenue30 && !revenuePartial ? "" : "off"}`}>
                   <div className="wl">Выручка · 30 дней</div>
                   <div className="wv">
-                    {hasRevenue30 ? Math.round(revenue30).toLocaleString("ru-RU") : "—"}
+                    {/* При частичной доступности НЕ показываем сумму: она была
+                        бы занижена на недоступный контур. Прочерк честнее
+                        неполного итога. */}
+                    {revenuePartial || !hasRevenue30
+                      ? "—"
+                      : Math.round(revenue30).toLocaleString("ru-RU")}
                   </div>
                   <div className="wf">
-                    {hasRevenue30
-                      ? `кофе ${((coffeeRevenue30 ?? 0) / 1_000_000).toFixed(1)} + снек ${((snackRevenue30 ?? 0) / 1_000_000).toFixed(1)} млн`
-                      : "нет данных"}
+                    {revenuePartial
+                      ? `частично недоступно · ${coffeeRevenue30 === null ? "нет данных кофе" : "нет данных снек"}`
+                      : hasRevenue30
+                        ? `кофе ${((coffeeRevenue30 ?? 0) / 1_000_000).toFixed(1)} + снек ${((snackRevenue30 ?? 0) / 1_000_000).toFixed(1)} млн`
+                        : "нет данных"}
                   </div>
                 </div>
                 <div className={`wt ${coffeeOrders ? "" : "off"}`}>
@@ -1563,12 +1635,18 @@ export default async function DomainPage({
                 </details>
                 <Link
                   href={href("service:feed")}
-                  className={`wt ${attentionTotal > 0 ? "is-hot" : ""}`}
+                  className={`wt ${attentionPartial ? "off" : attentionTotal > 0 ? "is-hot" : ""}`}
                 >
                   <div className="wl">Требует внимания</div>
-                  <div className="wv">{attentionTotal}</div>
+                  {/* Частичная доступность → прочерк, а не заниженная сумма:
+                      недобор тревог хуже её отсутствия. Разбивка показывает,
+                      какой источник не ответил («—» вместо цифры). */}
+                  <div className="wv">{attentionPartial ? "—" : attentionTotal}</div>
                   <div className="wf">
-                    пусто {deficitCount} · не выдано {notIssuedCount} · задачи {openTasks.length}
+                    пусто {vendingDeficit === null ? "—" : deficitCount} · не выдано{" "}
+                    {coffeeOrders === null ? "—" : notIssuedCount} · задачи{" "}
+                    {teamLoaded ? openTasks.length : "—"}
+                    {attentionPartial ? " · частично недоступно" : ""}
                     <span className="go">→</span>
                   </div>
                 </Link>
@@ -2684,7 +2762,13 @@ export default async function DomainPage({
               HR — люди и оценка работы. Оценка объёмов — следующим этапом.
             </p>
           )}
-          {ourPeople.length === 0 ? (
+          {!teamLoaded ? (
+            <div className="empty">
+              <b>Данные недоступны</b>
+              Core не ответил на запрос команды. Обнови страницу — это не значит,
+              что в направлении никого нет.
+            </div>
+          ) : ourPeople.length === 0 ? (
             <div className="empty">
               <b>В этом направлении пока никого</b>
               Назначь сотруднику направление в его карточке — он появится здесь.
@@ -2720,7 +2804,12 @@ export default async function DomainPage({
       {/* ── Задачи направления ── */}
       {activeGroup === "tasks" && (
         <>
-          {domain === "vendhub" && taskKpi.length > 0 && (
+          {/* KPI строится из openTasks: при провале core.tasks() openTasks=[],
+              и «Открыто: 0»/«Свободных: 0»/«За неделю: 0» повисли бы над пустым
+              состоянием «Данные недоступны» — тот же тихий ноль, что фикс снял
+              на всех плитках. Гейтим по teamLoaded: команда не загрузилась —
+              KPI не показываем, ниже честное «Данные недоступны». */}
+          {domain === "vendhub" && teamLoaded && taskKpi.length > 0 && (
             <div
               className="wgrid"
               style={{
@@ -2736,7 +2825,13 @@ export default async function DomainPage({
               ))}
             </div>
           )}
-          {openTasks.length === 0 ? (
+          {!teamLoaded ? (
+            <div className="empty">
+              <b>Данные недоступны</b>
+              Core не ответил на запрос задач. Обнови страницу — это не значит,
+              что открытых задач нет.
+            </div>
+          ) : openTasks.length === 0 ? (
             <div className="empty">
               <b>Открытых задач нет</b>
               Задачи с этим направлением появятся здесь.
