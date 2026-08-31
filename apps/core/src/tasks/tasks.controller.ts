@@ -34,7 +34,7 @@ import {
 } from "class-validator";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
-import { isOwnerIdentityEnforced, ownerTokenValid } from "../common/owner-enforcement";
+import { excludePersonal } from "../common/owner-enforcement";
 import { OwnerActionGuard } from "../common/owner-action.guard";
 import { TasksService } from "./tasks.service";
 
@@ -456,8 +456,8 @@ export class TasksController {
    * всех доменов, включая personal — здесь закрываем этот обход. Флаг выключен
    * (дефолт) → false → выдача прода не меняется.
    */
-  private async excludePersonal(req: Request): Promise<boolean> {
-    return (await isOwnerIdentityEnforced(this.db)) && !ownerTokenValid(req);
+  private excludePersonal(req: Request): Promise<boolean> {
+    return excludePersonal(req, this.db);
   }
 
   @Post()

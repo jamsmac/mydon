@@ -417,9 +417,37 @@ export class CoreClient {
     private readonly timeoutMs = 10_000,
     /** Внутренний токен Core: нужен на мутации (approvals, ack, задачи). */
     private readonly serviceToken = "",
+    /**
+     * «Второй пояс» владельца (R-P5-2). Бот — КАНАЛ владельца, поэтому проставляет
+     * его АДРЕСНО: только на системные owner-нотификации (брифинг, рассыльщики
+     * напоминаний/приёмок/назначений) и owner-мутации из Telegram, инициированные
+     * самим владельцем (approvals decide, invite/revoke/roles). На путях
+     * сотрудников НЕ шлётся — эскалации staff→owner нет. Пусто (по умолчанию) →
+     * бот шлёт только service-token, поведение РОВНО как сегодня (merge-safe): при
+     * выключенном OWNER_IDENTITY_ENFORCED Core owner-токен и не спрашивает.
+     */
+    private readonly ownerActionToken = "",
   ) {}
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+  /**
+   * Активен ли owner-scope. Пусто → нет. Равенство service-token запрещено ТЕМ
+   * ЖЕ инвариантом, что и в Core (`ownerTokenValid`): равный токен Core считает
+   * невалидным, слать его бессмысленно — только мусорит заголовок.
+   */
+  private get ownerScopeActive(): boolean {
+    return this.ownerActionToken !== "" && this.ownerActionToken !== this.serviceToken;
+  }
+
+  /**
+   * `opts.owner` — прикрепить «второй пояс» владельца к ЭТОМУ запросу. Адресно,
+   * а не глобально: owner-scope несут только owner-плуминг и owner-мутации, и
+   * никогда — staff-инициированные записи (заливки/возвраты/пересчёты).
+   */
+  private async request<T>(
+    path: string,
+    init?: RequestInit,
+    opts: { owner?: boolean } = {},
+  ): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -429,6 +457,9 @@ export class CoreClient {
         headers: {
           "Content-Type": "application/json",
           ...(this.serviceToken ? { "x-service-token": this.serviceToken } : {}),
+          ...(opts.owner && this.ownerScopeActive
+            ? { "x-owner-action-token": this.ownerActionToken }
+            : {}),
           ...(init?.headers ?? {}),
         },
       });
@@ -443,7 +474,9 @@ export class CoreClient {
   }
 
   briefing(): Promise<Briefing> {
-    return this.request<Briefing>("/registry/briefing");
+    // Owner-плуминг: брифинг-сводка владельцу. При ужесточении без owner-scope
+    // из неё выпали бы личные задачи владельца.
+    return this.request<Briefing>("/registry/briefing", undefined, { owner: true });
   }
 
   /** Лента действий сотрудников: «кто что сделал» за период (даты по Ташкенту). */
@@ -453,7 +486,8 @@ export class CoreClient {
   }
 
   pendingApprovals(): Promise<ApprovalRow[]> {
-    return this.request<ApprovalRow[]>("/approvals/pending");
+    // Только owner-контекст: брифинг владельцу и его же запрос «согласования».
+    return this.request<ApprovalRow[]>("/approvals/pending", undefined, { owner: true });
   }
 
   /** Сводный закуп вендинга: что заказать, суммы, что на разбор (§5.4–5.5). */
@@ -723,18 +757,40 @@ export class CoreClient {
   }
 
   decide(id: string, decision: "approved" | "rejected" | "clarify", actor: string) {
-    return this.request(`/approvals/${id}/decide`, {
-      method: "POST",
-      body: JSON.stringify({ decision, actor }),
-    });
+    // Owner-мутция. Единственный вызывающий (index.ts) уже за owner-гейтом
+    // `isAllowed(chatId) && !asStaff` — решение инициирует верифицированный
+    // владелец, поэтому «второй пояс» здесь на месте (OwnerMutationGuard).
+    return this.request(
+      `/approvals/${id}/decide`,
+      {
+        method: "POST",
+        body: JSON.stringify({ decision, actor }),
+      },
+      { owner: true },
+    );
   }
 
-  searchEntities(params: { domain?: Domain; type?: string; q?: string }): Promise<EntityRow[]> {
+  /**
+   * `opts.owner` — прикрепить «второй пояс» владельца к поиску по реестру.
+   * Ставят его ТОЛЬКО owner-only вызовы из handler.ts (поиск владельца через
+   * бота): при ужесточении Core режет personal-строки из `/entities`, и без
+   * owner-scope владелец терял бы доступ к собственным личным сущностям.
+   * Staff-хелперы (`warehouses`/`ingredients`, domain=vendhub) зовут БЕЗ него —
+   * эскалации staff→owner нет, а personal их выборки и так не касается.
+   */
+  searchEntities(
+    params: { domain?: Domain; type?: string; q?: string },
+    opts: { owner?: boolean } = {},
+  ): Promise<EntityRow[]> {
     const qs = new URLSearchParams();
     if (params.domain) qs.set("domain", params.domain);
     if (params.type) qs.set("type", params.type);
     if (params.q) qs.set("q", params.q);
-    return this.request<EntityRow[]>(`/entities?${qs.toString()}`);
+    return this.request<EntityRow[]>(
+      `/entities?${qs.toString()}`,
+      undefined,
+      opts.owner ? { owner: true } : {},
+    );
   }
 
   obligations(domain: Domain): Promise<{
@@ -779,7 +835,11 @@ export class CoreClient {
         query.set("afterId", page.after.eventId);
       }
     }
-    return this.request<PendingNotifications>(`/rules/pending?${query.toString()}`);
+    // Owner-плуминг: срочные уведомления доставляются владельцу. Owner-scope
+    // сохраняет сигналы личного контура при ужесточении.
+    return this.request<PendingNotifications>(`/rules/pending?${query.toString()}`, undefined, {
+      owner: true,
+    });
   }
 
   /**
@@ -791,8 +851,11 @@ export class CoreClient {
    * канал, поэтому здесь фильтра нет: доставленное Core отсечёт сам.
    */
   briefingNotifications(since: Date): Promise<PendingNotifications> {
+    // Owner-плуминг: несрочные сигналы для брифинга/недельной сводки владельцу.
     return this.request<PendingNotifications>(
       `/rules/pending?since=${encodeURIComponent(since.toISOString())}`,
+      undefined,
+      { owner: true },
     );
   }
 
@@ -867,7 +930,9 @@ export class CoreClient {
 
   /** Кому пора напомнить (срок близко или прошёл, ещё не напоминали). */
   tasksDueSoon(hours = 24): Promise<TaskRow[]> {
-    return this.request<TaskRow[]>(`/tasks/due-soon?hours=${hours}`);
+    // Owner-плуминг: рассыльщик напоминаний. Без owner-scope личные задачи
+    // владельца выпали бы из окна — напоминания по ним молчали бы.
+    return this.request<TaskRow[]>(`/tasks/due-soon?hours=${hours}`, undefined, { owner: true });
   }
 
   /** Отметка «напомнили» — ставится ПОСЛЕ фактической отправки. */
@@ -877,7 +942,9 @@ export class CoreClient {
 
   /** Задачи, о возврате которых исполнителю ещё не сообщили. */
   redoUnnotified(): Promise<TaskRow[]> {
-    return this.request<TaskRow[]>("/tasks/redo-unnotified");
+    // Owner-плуминг: рассыльщик переделок. Owner-scope сохраняет личные задачи
+    // владельца при ужесточении.
+    return this.request<TaskRow[]>("/tasks/redo-unnotified", undefined, { owner: true });
   }
 
   /** Отметка «о переделке сообщили» — ставится ПОСЛЕ фактической отправки. */
@@ -887,7 +954,9 @@ export class CoreClient {
 
   /** Задачи, о новом назначении которых исполнителю ещё не сообщили. */
   assignUnnotified(): Promise<TaskRow[]> {
-    return this.request<TaskRow[]>("/tasks/assign-unnotified");
+    // Owner-плуминг: рассыльщик назначений. Owner-scope сохраняет личные задачи
+    // владельца при ужесточении.
+    return this.request<TaskRow[]>("/tasks/assign-unnotified", undefined, { owner: true });
   }
 
   /** Отметка «о назначении сообщили» — только ПОСЛЕ фактической доставки. */
@@ -895,7 +964,15 @@ export class CoreClient {
     return this.request(`/tasks/${id}/assign-notified`, { method: "POST" });
   }
 
-  /** Сделанные задачи, которые ещё ждут приёмки менеджером. */
+  /**
+   * Сделанные задачи, которые ещё ждут приёмки менеджером.
+   *
+   * БЕЗ owner-scope намеренно: единственный потребитель — веер «подтвердите»,
+   * который широковещает всем менеджерам (право `tasks.confirm` у staff-роли
+   * `manager`). Owner-токен снял бы `excludePersonal` и подмешал бы ЛИЧНЫЕ
+   * задачи владельца в staff-выборку — их нельзя разослать staff-менеджерам.
+   * Личный контур владельца в приёмку не попадает (R-P5-2, п.3).
+   */
   awaitingTasks(): Promise<TaskRow[]> {
     return this.request<TaskRow[]>("/tasks?awaiting=1");
   }
@@ -1103,18 +1180,30 @@ export class CoreClient {
     roles: string[],
     actor: string,
   ): Promise<{ code: string; expiresAt: string; name: string }> {
-    return this.request(`/people/${personId}/invite`, {
-      method: "POST",
-      body: JSON.stringify({ roles, actor }),
-    });
+    // Owner-мутция (выдача доступа/ролей). Мастер подключения запускается только
+    // из owner-гейта index.ts (`isAllowed && !asStaff`) — инициатор всегда
+    // верифицированный владелец, поэтому «второй пояс» здесь на месте.
+    return this.request(
+      `/people/${personId}/invite`,
+      {
+        method: "POST",
+        body: JSON.stringify({ roles, actor }),
+      },
+      { owner: true },
+    );
   }
 
   /** Отозвать доступ: снять привязку, роли и погасить живые приглашения. */
   revokeAccess(personId: string, actor = "owner"): Promise<PersonRow> {
-    return this.request<PersonRow>(`/people/${personId}/revoke`, {
-      method: "POST",
-      body: JSON.stringify({ actor }),
-    });
+    // Owner-мутция. Как и invite, вызывается только из owner-гейта index.ts.
+    return this.request<PersonRow>(
+      `/people/${personId}/revoke`,
+      {
+        method: "POST",
+        body: JSON.stringify({ actor }),
+      },
+      { owner: true },
+    );
   }
 
   /** Вернуть свою задачу в общий пул. */

@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { Request } from "express";
 import type { Db } from "../db/db.module";
-import { isOwnerIdentityEnforced, ownerTokenValid } from "./owner-enforcement";
+import {
+  excludePersonal,
+  isOwnerIdentityEnforced,
+  ownerTokenValid,
+  personalVisible,
+} from "./owner-enforcement";
 
 /** Мини-заглушка Db: settingValue делает ровно `select().from(systemConfig)`. */
 function fakeDb(rows: { key: string; value: string }[] = []): Db {
@@ -71,5 +76,71 @@ describe("isOwnerIdentityEnforced", () => {
   it("env='0' — аварийный kill-switch: выключает всегда, даже если база='1' (R-P5-6)", async () => {
     process.env.OWNER_IDENTITY_ENFORCED = "0";
     assert.equal(await isOwnerIdentityEnforced(fakeDb([{ key: KEY, value: "1" }])), false);
+  });
+});
+
+/**
+ * ЕДИНЫЙ источник видимости личного контура (R-P5-7b): personalVisible и его
+ * отрицание excludePersonal. Все закрытые поверхности (tasks/entities/registry)
+ * выводят гейт отсюда, поэтому эти три состояния — контракт всего среза.
+ */
+describe("personalVisible / excludePersonal (единый источник)", () => {
+  const prevOwner = process.env.OWNER_ACTION_TOKEN;
+  const prevService = process.env.SERVICE_TOKEN;
+  const prevEnforced = process.env.OWNER_IDENTITY_ENFORCED;
+  afterEach(() => {
+    for (const [k, v] of [
+      ["OWNER_ACTION_TOKEN", prevOwner],
+      ["SERVICE_TOKEN", prevService],
+      ["OWNER_IDENTITY_ENFORCED", prevEnforced],
+    ] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  const ownerReq = () => req({ "x-owner-action-token": "owner-secret" });
+  const botReq = () => req({ "x-service-token": "shared" });
+
+  function armTokens(): void {
+    process.env.SERVICE_TOKEN = "shared";
+    process.env.OWNER_ACTION_TOKEN = "owner-secret";
+  }
+
+  it("флаг ВЫКЛ → personal виден всем, excludePersonal=false (как сегодня)", async () => {
+    delete process.env.OWNER_IDENTITY_ENFORCED;
+    armTokens();
+    const db = fakeDb();
+    // Ни owner, ни бот не меняют картину, пока ужесточение выключено.
+    assert.equal(await personalVisible(botReq(), db), true);
+    assert.equal(await excludePersonal(botReq(), db), false);
+    assert.equal(await personalVisible(ownerReq(), db), true);
+    assert.equal(await excludePersonal(ownerReq(), db), false);
+  });
+
+  it("флаг ВКЛ + owner-токен → personal ВХОДИТ (владелец видит своё)", async () => {
+    armTokens();
+    const db = fakeDb([{ key: KEY, value: "1" }]);
+    assert.equal(await personalVisible(ownerReq(), db), true);
+    assert.equal(await excludePersonal(ownerReq(), db), false);
+  });
+
+  it("флаг ВКЛ + не-owner (бот/сервис-токен) → personal СКРЫТ", async () => {
+    armTokens();
+    const db = fakeDb([{ key: KEY, value: "1" }]);
+    assert.equal(await personalVisible(botReq(), db), false);
+    assert.equal(await excludePersonal(botReq(), db), true);
+  });
+
+  it("excludePersonal — строго отрицание personalVisible во всех состояниях", async () => {
+    armTokens();
+    for (const rows of [[], [{ key: KEY, value: "1" }]]) {
+      for (const r of [ownerReq(), botReq(), req()]) {
+        const db = fakeDb(rows);
+        const vis = await personalVisible(r, db);
+        const excl = await excludePersonal(r, db);
+        assert.equal(excl, !vis);
+      }
+    }
   });
 });

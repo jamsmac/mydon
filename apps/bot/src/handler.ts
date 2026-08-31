@@ -767,16 +767,22 @@ export async function handleMessage(
       }
 
       case "search": {
-        let found = await deps.core.searchEntities({
-          q: intent.query,
-          ...(intent.domain ? { domain: intent.domain } : {}),
-        });
+        // owner-scope: handleMessage — только владелец (isAllowed выше). При
+        // ужесточении без него personal-сущности выпали бы из /entities, и
+        // «личное …» / поиск по личному контуру возвращал бы «не найдено».
+        let found = await deps.core.searchEntities(
+          {
+            q: intent.query,
+            ...(intent.domain ? { domain: intent.domain } : {}),
+          },
+          { owner: true },
+        );
 
         // Слово из запроса может совпасть с названием направления
         // и случайно сузить поиск до чужого домена. Если там пусто — ищем везде,
         // иначе владелец получает «не найдено» на существующую запись.
         if (found.length === 0 && intent.domain) {
-          found = await deps.core.searchEntities({ q: intent.query });
+          found = await deps.core.searchEntities({ q: intent.query }, { owner: true });
         }
 
         if (found.length === 0) return { text: `По запросу «${intent.query}» ничего не найдено.` };

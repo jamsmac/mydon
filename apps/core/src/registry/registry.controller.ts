@@ -1,5 +1,8 @@
-import { BadRequestException, Controller, Get, Param, Query } from "@nestjs/common";
+import { BadRequestException, Controller, Get, Inject, Param, Query, Req } from "@nestjs/common";
+import type { Request } from "express";
 import { DOMAINS, type Domain } from "@mydon/shared";
+import { excludePersonal } from "../common/owner-enforcement";
+import { DB, type Db } from "../db/db.module";
 import { ActionsService } from "./actions.service";
 import { RegistryService } from "./registry.service";
 
@@ -23,15 +26,29 @@ export class RegistryController {
   constructor(
     private readonly registry: RegistryService,
     private readonly actionsFeed: ActionsService,
+    @Inject(DB) private readonly db: Db,
   ) {}
+
+  /**
+   * Исключать ли личный контур из кросс-доменных сводок (R-P5-7b).
+   *
+   * Единый источник — общий хелпер: ужесточение включено И запрос НЕ доказан
+   * owner-токеном. briefing/overview/actions считают по всем направлениям,
+   * включая personal; при не-owner запросе личный контур из них вырезается,
+   * а владелец (owner-токен) видит своё. Флаг выключен (дефолт) → false → SQL
+   * прежний.
+   */
+  private excludePersonal(req: Request): Promise<boolean> {
+    return excludePersonal(req, this.db);
+  }
 
   // ВАЖНО: специфичные маршруты объявляются ВЫШЕ параметрических,
   // иначе ":domain/:type" перехватит "obligations/:domain".
 
   /** Утренний брифинг 07:30 (FR-6). */
   @Get("briefing")
-  briefing() {
-    return this.registry.briefing();
+  async briefing(@Req() req: Request) {
+    return this.registry.briefing(new Date(), await this.excludePersonal(req));
   }
 
   /**
@@ -39,7 +56,12 @@ export class RegistryController {
    * по Ташкенту, включительно). Обе даты не заданы — сегодня.
    */
   @Get("actions")
-  actions(@Query("from") from?: string, @Query("to") to?: string, @Query("person") personId?: string) {
+  async actions(
+    @Req() req: Request,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("person") personId?: string,
+  ) {
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
     const f = from ?? today;
     const t = to ?? f;
@@ -53,7 +75,7 @@ export class RegistryController {
     if (personId !== undefined && !UUID.test(personId)) {
       throw new BadRequestException("person: uuid сотрудника");
     }
-    return this.actionsFeed.actions(f, t, personId);
+    return this.actionsFeed.actions(f, t, personId, await this.excludePersonal(req));
   }
 
   /** Все обязательства направления — DoD Фазы 3. */
@@ -64,8 +86,8 @@ export class RegistryController {
 
   /** Сводка по направлениям: важно объявить ДО маршрута :domain/:type. */
   @Get("overview")
-  overview() {
-    return this.registry.overview();
+  async overview(@Req() req: Request) {
+    return this.registry.overview(await this.excludePersonal(req));
   }
 
   @Get()

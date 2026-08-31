@@ -8,7 +8,7 @@ import {
   type MachineStatus,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
-import { isOwnerIdentityEnforced, ownerTokenValid } from "../common/owner-enforcement";
+import { excludePersonal } from "../common/owner-enforcement";
 import { EntitiesService } from "./entities.service";
 import { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
 
@@ -96,8 +96,8 @@ export class EntitiesController {
    * закрываем именно этот обход. Флаг выключен (дефолт) → false → выдача прода
    * не меняется.
    */
-  private async excludePersonal(req: Request): Promise<boolean> {
-    return (await isOwnerIdentityEnforced(this.db)) && !ownerTokenValid(req);
+  private excludePersonal(req: Request): Promise<boolean> {
+    return excludePersonal(req, this.db);
   }
 
   @Post()

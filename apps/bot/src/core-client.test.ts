@@ -136,6 +136,77 @@ describe("Проводка автора: setVendingStock/recordVendingCash (Task
   });
 });
 
+/**
+ * «Второй пояс» владельца (R-P5-2): бот проставляет `x-owner-action-token`
+ * АДРЕСНО — на owner-плуминг и owner-мутации, и НИКОГДА на staff-пути. Пусто →
+ * ничего сверх service-token (merge-safe: при выключенном ужесточении Core
+ * owner-токен и не спрашивает).
+ */
+describe("Owner-токен проставляется адресно (R-P5-2)", () => {
+  const заголовки = (init?: RequestInit): Record<string, string> =>
+    (init?.headers ?? {}) as Record<string, string>;
+
+  it("owner-нотификация-чтение (tasksDueSoon) шлёт owner-токен", async () => {
+    const { calls } = стубFetchТело(200, []);
+    const core = new CoreClient("http://core", 1000, "svc", "own");
+    await core.tasksDueSoon(24);
+    const h = заголовки(calls[0]!.init);
+    assert.equal(h["x-owner-action-token"], "own");
+    assert.equal(h["x-service-token"], "svc");
+  });
+
+  it("owner-мутация владельца (decide) шлёт owner-токен", async () => {
+    const { calls } = стубFetchТело(200, { ok: true });
+    const core = new CoreClient("http://core", 1000, "svc", "own");
+    await core.decide("a1", "approved", "telegram:1");
+    assert.equal(заголовки(calls[0]!.init)["x-owner-action-token"], "own");
+  });
+
+  it("owner-мутация владельца (revokeAccess) шлёт owner-токен", async () => {
+    const { calls } = стубFetchТело(200, {
+      id: "p1", name: "Иван", role: null, tgUsername: null, tgChatId: null, active: "no",
+    });
+    const core = new CoreClient("http://core", 1000, "svc", "own");
+    await core.revokeAccess("p1");
+    assert.equal(заголовки(calls[0]!.init)["x-owner-action-token"], "own");
+  });
+
+  it("staff-действие (createRefill) НЕ шлёт owner-токен", async () => {
+    const { calls } = стубFetchТело(200, { refill: { id: "r1" }, stockLeft: null, duplicate: false });
+    const core = new CoreClient("http://core", 1000, "svc", "own");
+    await core.createRefill({
+      machineSerial: "2508160376", productName: "Snickers", qty: 5, clientKey: "k1", personId: "p1",
+    });
+    const h = заголовки(calls[0]!.init);
+    assert.ok(!("x-owner-action-token" in h));
+    // Но service-token на staff-записи остаётся — мутация без него отклонится.
+    assert.equal(h["x-service-token"], "svc");
+  });
+
+  it("awaitingTasks: staff-веер приёмки НЕ шлёт owner-токен (личное не подмешивать)", async () => {
+    const { calls } = стубFetchТело(200, []);
+    const core = new CoreClient("http://core", 1000, "svc", "own");
+    await core.awaitingTasks();
+    assert.ok(!("x-owner-action-token" in заголовки(calls[0]!.init)));
+  });
+
+  it("OWNER_ACTION_TOKEN не задан → ничего сверх service-token (merge-safe)", async () => {
+    const { calls } = стубFetchТело(200, []);
+    const core = new CoreClient("http://core", 1000, "svc"); // owner-токен пуст
+    await core.tasksDueSoon(24);
+    const h = заголовки(calls[0]!.init);
+    assert.ok(!("x-owner-action-token" in h));
+    assert.equal(h["x-service-token"], "svc");
+  });
+
+  it("owner-токен == service-token → не шлётся (инвариант Core ownerTokenValid)", async () => {
+    const { calls } = стубFetchТело(200, []);
+    const core = new CoreClient("http://core", 1000, "svc", "svc");
+    await core.tasksDueSoon(24);
+    assert.ok(!("x-owner-action-token" in заголовки(calls[0]!.init)));
+  });
+});
+
 describe("cancelVendingRecord: отказ Core разбирается в структурную причину (Task 7)", () => {
   it("403 too_old — CancelVendingRecordError с распознанными reason/hours", async () => {
     стубFetchТело(403, { reason: "too_old", hours: 24, message: "Записи старше 24 часов отменяет владелец" });
