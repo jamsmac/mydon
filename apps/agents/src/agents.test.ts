@@ -11,6 +11,7 @@ import {
 import { autonomyThreshold, explainPolicy, requiresApproval, tierRank } from "./policy";
 import { loadAgents } from "./registry";
 import { runSkill } from "./runner";
+import { signature } from "./memory";
 import { EXECUTORS } from "./executors";
 import { runAgentTasks } from "./task-worker";
 import { TaskLlmWorkflowChangedError } from "./task-llm-session";
@@ -409,6 +410,54 @@ describe("Прогон навыка", () => {
     );
   });
 
+  it("morning-digest: РОТАЦИЯ состава при том же числе (без обнуления) подаётся заново — П1", async () => {
+    // Ключевой сценарий #242-хвоста: автомат A починен, ВСТАЛ B — idleMachines
+    // ВСЁ ВРЕМЯ 1 (обнуления, что сбросило бы память через no_signal, НЕТ).
+    // Без различителя состава сигнатура по счётчику совпала бы → no_change →
+    // владелец не узнал бы о новом простое. alarmComposition ловит смену состава.
+    const memory = new Map<string, string>();
+    let composition = "hash-machine-A";
+    const { client } = stubCore({
+      briefing: async () => ({
+        ...EMPTY_BRIEFING,
+        idleMachines: 1,
+        // Волатильные поля рантайма — не должны влиять на дедуп.
+        generatedAt: `2026-08-3${memory.size}T02:30:00.000Z`,
+        pendingApprovals: memory.size,
+        alarmComposition: {
+          overdueMoney: "",
+          idleMachines: composition,
+          contractsDueSoon: "",
+          overdueTasks: "",
+        },
+      }),
+      recallMemory: async (source: string, skill: string) =>
+        memory.get(`${source}:${skill}`) ?? null,
+      rememberMemory: async (source: string, skill: string, sig: string) => {
+        memory.set(`${source}:${skill}`, sig);
+      },
+    });
+
+    const first = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(first.outcome, "approval_requested", "первый простой — подаётся");
+    // Различитель состава НЕ течёт в отображаемые владельцу facts.
+    assert.equal("composition" in (first.facts ?? {}), false, "хеш состава не показываем владельцу");
+    assert.equal(first.facts?.idleMachines, 1);
+
+    // Тот же автомат A всё ещё стоит — состав не менялся: молчим.
+    const again = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(again.skipReason, "no_change", "тот же состав дважды — дубль подавлен");
+
+    // A починен, встал B: число прежнее (1), но СОСТАВ иной → подаём заново.
+    composition = "hash-machine-B";
+    const rotated = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(
+      rotated.outcome,
+      "approval_requested",
+      "ротация состава при том же числе обязана подаваться заново",
+    );
+  });
+
   it("no_signal без прежней памяти ничего не пишет — тихие дни не плодят события", async () => {
     let rememberCount = 0;
     const { client } = stubCore({
@@ -706,6 +755,75 @@ describe("Навыки агентов, подключённые к Core", () => 
     assert.ok(p, "должно быть предложение");
     assert.match(p.action, /4/);
     assert.equal(p.facts.idleMachines, 4);
+  });
+
+  it("monitor-stock: РОТАЦИЯ состава при том же числе меняет ключ дедупа — П1", async () => {
+    // A починен, встал B: idleMachines всё время 1 (обнуления, что сбросило бы
+    // память через no_signal, нет). Без различителя состава сигнатура совпала бы
+    // → no_change → владелец через этот навык не узнал бы о новом простое.
+    const coreA = {
+      briefing: async () => ({
+        ...briefing,
+        idleMachines: 1,
+        alarmComposition: {
+          overdueMoney: "",
+          idleMachines: "hash-machine-A",
+          contractsDueSoon: "",
+          overdueTasks: "",
+        },
+      }),
+    } as never;
+    const coreB = {
+      briefing: async () => ({
+        ...briefing,
+        idleMachines: 1,
+        alarmComposition: {
+          overdueMoney: "",
+          idleMachines: "hash-machine-B",
+          contractsDueSoon: "",
+          overdueTasks: "",
+        },
+      }),
+    } as never;
+    const pA = await SKILLS["monitor-stock"](agent, coreA);
+    const pB = await SKILLS["monitor-stock"](agent, coreB);
+    assert.ok(pA && pB);
+    // Хеш состава не течёт в отображаемые владельцу facts.
+    assert.equal("composition" in (pA.facts ?? {}), false, "хеш состава не показываем");
+    assert.equal(pA.facts.idleMachines, 1);
+    // Ключ дедупа меняется при смене состава на том же счётчике.
+    assert.notEqual(
+      signature(pA.signatureFacts!),
+      signature(pB.signatureFacts!),
+      "ротация состава при том же числе обязана менять сигнатуру",
+    );
+  });
+
+  it("monitor-stock: тот же состав → та же сигнатура (дубль подавлен)", async () => {
+    const core = {
+      briefing: async () => ({
+        ...briefing,
+        idleMachines: 1,
+        alarmComposition: {
+          overdueMoney: "",
+          idleMachines: "hash-machine-A",
+          contractsDueSoon: "",
+          overdueTasks: "",
+        },
+      }),
+    } as never;
+    const p1 = await SKILLS["monitor-stock"](agent, core);
+    const p2 = await SKILLS["monitor-stock"](agent, core);
+    assert.ok(p1 && p2);
+    assert.equal(signature(p1.signatureFacts!), signature(p2.signatureFacts!));
+  });
+
+  it("monitor-stock: старое ядро без alarmComposition → сигнатура по счётчику", async () => {
+    const core = { briefing: async () => ({ ...briefing, idleMachines: 2 }) } as never;
+    const p = await SKILLS["monitor-stock"](agent, core);
+    assert.ok(p);
+    // Без alarmComposition signatureFacts откатывается к facts (прежнее поведение).
+    assert.equal(signature(p.signatureFacts!), signature({ idleMachines: 2 }));
   });
 
   it("morning-digest молчит при полном штиле и не дёргает владельца", async () => {

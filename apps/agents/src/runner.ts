@@ -73,6 +73,9 @@ function approvalClientKey(requestKey: string): string {
 function checkpointProposal(checkpoint: AgentTaskCheckpoint): {
   action: string;
   facts: Record<string, unknown>;
+  /** Takeover не хранит signatureFacts (checkpoint держит только facts): единый
+   *  тип с Proposal, значение всегда undefined — см. комментарий у sig ниже. */
+  signatureFacts?: Record<string, unknown>;
   next?: string[];
 } | null {
   if (checkpoint.kind === "no_signal") return null;
@@ -270,9 +273,21 @@ export async function runSkill(
   // «одобрить» не глядя). Сигнатуру прошлого повода читаем из журнала Core.
   // Запоминаем НИЖЕ — только после успешной подачи, чтобы перекрытый потолком
   // или несостоявшийся повод не «забылся».
-  const sig = signature(proposal.facts);
+  // Дедуп идёт по СТАБИЛЬНОМУ подмножеству (signatureFacts), если навык его
+  // задал: displayed facts владелец видит полными, а сигнатура считается без
+  // волатильных полей (excerpt/costUsd/retrievedAt/stars/сырьё LLM), которые
+  // иначе «плывут» каждый прогон и не дают сигнатуре совпасть — навык слал бы
+  // дубли. Навык без signatureFacts работает как раньше (сигнатура от facts).
+  // Механизм один и для крона, и для task-mode: на первом (не-takeover) прогоне
+  // task-mode proposal тоже несёт signatureFacts и коммитит memorySignature=sig
+  // ниже. На takeover checkpoint хранит только facts (signatureFacts там
+  // undefined → откат к facts): различие сигнатур после аварии-передачи может
+  // дать РОВНО ОДИН лишний дубль на следующем прогоне (перенос signatureFacts в
+  // checkpoint — отдельный срез Core, вне зоны реестра).
+  const sigFacts = proposal.signatureFacts ?? proposal.facts;
+  const sig = signature(sigFacts);
   const lastSig = await core.recallMemory(source, skill);
-  if (matchesSignature(lastSig, proposal.facts)) {
+  if (matchesSignature(lastSig, sigFacts)) {
     const note = "Проверил — с прошлого раза ничего не изменилось.";
     return {
       agent: agent.name,

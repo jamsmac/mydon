@@ -17,6 +17,19 @@ export interface AgentsBriefing {
   contractsDueSoon: number;
   contractsBadDate: number;
   overdueTasks: number;
+  /**
+   * Стабильные различители СОСТАВА тревог (хеш отсортированных id по каждой
+   * категории). Меняются при РОТАЦИИ даже на том же числе. morning-digest кладёт
+   * их в signatureFacts (ключ дедупа), а не в отображаемые владельцу facts.
+   * Опционально: старое ядро без этого поля не роняет навык (сигнатура тогда
+   * считается по счётчикам, как раньше).
+   */
+  alarmComposition?: {
+    overdueMoney: string;
+    idleMachines: string;
+    contractsDueSoon: string;
+    overdueTasks: string;
+  };
 }
 
 /** Просроченная позиция обязательств (форма Core: money_flow). */

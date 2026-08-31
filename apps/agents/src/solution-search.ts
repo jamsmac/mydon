@@ -1454,6 +1454,18 @@ export async function findSolutions(
           : "no candidates",
       ),
     },
+    // Дедуп — по НАБОРУ найденных репозиториев (отсортированные url), запросам и
+    // статусу поиска. Волатильные retrievedAt (штамп каждой выемки), stars
+    // (счётчик звёзд плавает между выемками) и баллы ранжирования LLM в сигнатуру
+    // НЕ идут: иначе тот же результат по тому же запросу подавался бы как новый
+    // каждый прогон. Набор url меняется ⟺ GitHub вернул другие репозитории
+    // (содержательное изменение разведки); сортировка делает ключ независимым от
+    // порядка ранжирования. Владельцу facts полные (ownerReport, звёзды, баллы).
+    signatureFacts: {
+      queries: [...snapshot.queries].sort(),
+      status: snapshot.searchStatus,
+      candidates: ranked.map((item) => item.candidate.url).sort(),
+    },
     next: ranked.length === 0 ? noCandidateNextSteps(snapshot) : [...NEXT_STEPS],
   };
 }

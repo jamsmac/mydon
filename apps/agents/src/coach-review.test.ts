@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { runCoachReview, type CoachDeps } from "./coach-review";
+import { signature } from "./memory";
 import type { ModelGateway, ModelRequest } from "./model-gateway";
 
 /** Полный вердикт по рубрике. safety=2 → блок; низкие баллы → improve. */
@@ -138,5 +139,70 @@ describe("runCoachReview — EVAL/PROPOSE", () => {
   it("судья вернул мусор вместо JSON → null", async () => {
     const { gateway } = fakeGateway([{ text: "не смог оценить" }]);
     assert.equal(await runCoachReview(gateway, deps(), OPTS), null);
+  });
+});
+
+describe("coach-review: дедуп по судимому действию + вердикту, не по сырью LLM (П2)", () => {
+  // Один вердикт (одна полоса «improve»), но PROPOSE-правка каждый раз иная —
+  // LLM генерит другой SEARCH/REPLACE. diff/scores/notes волатильны.
+  const слабыйВердикт = verdict({ correctness: 2, completeness: 2 });
+
+  it("та же слабость того же действия, но иной diff LLM — сигнатура та же", async () => {
+    const g1 = fakeGateway([{ text: слабыйВердикт }, { text: `${DIFF}\nвариант правки 1` }]);
+    const g2 = fakeGateway([{ text: слабыйВердикт }, { text: `${DIFF}\nсовсем другой вариант 2` }]);
+    const p1 = await runCoachReview(g1.gateway, deps(), OPTS);
+    const p2 = await runCoachReview(g2.gateway, deps(), OPTS);
+    assert.ok(p1 && p2);
+    // Отображаемый diff РАЗНЫЙ (владельцу — полный).
+    assert.notEqual(p1.facts.diff, p2.facts.diff);
+    // Ключ дедупа — стабилен: diff/scores/notes не «плывут» в сигнатуру.
+    assert.equal(
+      signature(p1.signatureFacts!),
+      signature(p2.signatureFacts!),
+      "тот же вердикт по тому же действию → та же сигнатура, дубль подавлен",
+    );
+  });
+
+  it("переход «файл не найден → правка готова» меняет сигнатуру (П2)", async () => {
+    // Прогон 1: то же действие слабо, но файл навыка отсутствует → «правку не
+    // могу». Прогон 2: то же действие, та же полоса, но файл появился на диске →
+    // PROPOSE генерит реальную правку. Без различителя `proposable` обе ветки
+    // делили бы ОДИН ключ дедупа → готовая actionable-правка глоталась бы как
+    // no_change и не дошла бы до владельца.
+    const g1 = fakeGateway([{ text: слабыйВердикт }]);
+    const g2 = fakeGateway([{ text: слабыйВердикт }, { text: DIFF }]);
+    const noFile = await runCoachReview(g1.gateway, deps({ readSkill: () => null }), OPTS);
+    const withFile = await runCoachReview(g2.gateway, deps(), OPTS);
+    assert.ok(noFile && withFile);
+    assert.match(noFile.action, /файл навыка не найден/);
+    assert.match(withFile.action, /предлагает правку навыка/);
+    assert.notEqual(
+      signature(noFile.signatureFacts!),
+      signature(withFile.signatureFacts!),
+      "появление файла с готовой правкой обязано менять сигнатуру",
+    );
+  });
+
+  it("судим ДРУГОЕ действие — содержательное изменение, подаётся заново", async () => {
+    const g1 = fakeGateway([{ text: слабыйВердикт }, { text: DIFF }]);
+    const g2 = fakeGateway([{ text: слабыйВердикт }, { text: DIFF }]);
+    const p1 = await runCoachReview(g1.gateway, deps(), OPTS);
+    const p2 = await runCoachReview(
+      g2.gateway,
+      deps({
+        latestAction: async () => ({
+          source: "agent:mydon-finance",
+          skill: "watch-receivables",
+          action: "разобрать СОВСЕМ ДРУГУЮ дебиторку",
+        }),
+      }),
+      OPTS,
+    );
+    assert.ok(p1 && p2);
+    assert.notEqual(
+      signature(p1.signatureFacts!),
+      signature(p2.signatureFacts!),
+      "другое судимое действие обязано менять сигнатуру",
+    );
   });
 });

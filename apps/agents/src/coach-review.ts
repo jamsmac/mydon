@@ -110,6 +110,14 @@ export async function runCoachReview(
         scores: verdict.scores,
         notes: verdict.notes ?? "",
       },
+      // Дедуп — по ЛИЧНОСТИ судимого действия (навык + текст действия) и вердикту
+      // (outcome). Волатильные total/scores/notes в сигнатуру НЕ идут: судья-LLM
+      // над одним и тем же действием даёт слегка разные баллы и формулировки на
+      // каждом вызове — total «плывёт» внутри полосы, сигнатура от facts целиком
+      // не совпала бы никогда, coach слал бы дубль. reviewedAction меняется ⟺
+      // судим ДРУГОЕ действие, outcome — ⟺ вердикт сменил полосу: и то, и другое
+      // содержательно. Владельцу facts полные (с баллами и заметками).
+      signatureFacts: { skill: session.skill, reviewedAction: session.action, outcome },
     };
   }
 
@@ -119,6 +127,13 @@ export async function runCoachReview(
     return {
       action: `Coach: навык «${session.skill}» слаб (итог ${total}), но файл навыка не найден — правку предложить не могу.`,
       facts: { skill: session.skill, total, outcome, notes: verdict.notes ?? "" },
+      // Ключ: судимое действие + вердикт, без волатильных total/notes. Плюс
+      // `proposable: false` — различитель «правки нет». Без него эта ветка и
+      // ветка PROPOSE ниже делили бы ОДИН ключ дедупа для того же действия и той
+      // же полосы: файл навыка появился на диске (деплой добавил SKILL.md) →
+      // готовая правка сгенерирована, но сигнатура совпала бы с ранее поданным
+      // «правку не могу» → no_change → владелец не получил бы actionable-правку.
+      signatureFacts: { skill: session.skill, reviewedAction: session.action, outcome, proposable: false },
     };
   }
 
@@ -154,6 +169,12 @@ export async function runCoachReview(
       diff: proposeRes.text.slice(0, 4000),
       blocks: blocks.length,
     },
+    // Тот же ключ: судимое действие + вердикт. Волатильные scores/diff/blocks
+    // (правка SKILL.md, сгенерированная LLM, каждый раз иная) в сигнатуру НЕ
+    // идут — иначе повтор той же слабости слал бы дубль каждый прогон.
+    // `proposable: true` отделяет эту ветку (правка готова) от ветки «файл не
+    // найден» выше: переход «нет файла → правка готова» обязан менять сигнатуру.
+    signatureFacts: { skill: session.skill, reviewedAction: session.action, outcome, proposable: true },
     next: [
       `Применить правку SKILL.md навыка «${session.skill}» после ревью (git-коммитом, обратимо)`,
     ],

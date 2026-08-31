@@ -195,6 +195,17 @@ export async function assessIdeas(
       posts: posts.length,
       priorHits: seen.length,
     },
+    // Дедуп — по НАБОРУ оцениваемых постов (отсортированные id) и каналам.
+    // Волатильные assessment/costUsd/model/priorHits в сигнатуру НЕ идут:
+    // текст оценки LLM и цена меняются на КАЖДОМ вызове даже над тем же входом,
+    // а priorHits «плывёт» по мере наполнения семантической памяти — сигнатура
+    // от facts целиком не совпала бы никогда, навык слал бы дубль каждый прогон.
+    // Набор post-id меняется ⟺ в канале появились/исчезли посты (содержательное
+    // изменение) и не «плывёт» на неизменном наборе. Владельцу facts полные.
+    signatureFacts: {
+      channels: [...new Set(digests.map((d) => d.channel))].sort(),
+      postIds: [...new Set(digests.flatMap((d) => d.posts.map((p) => p.id)))].sort(),
+    },
   };
 }
 
