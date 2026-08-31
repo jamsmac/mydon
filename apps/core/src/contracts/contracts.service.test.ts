@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { org } from "@mydon/db";
+import { MAX_FIND_LIMIT } from "@mydon/shared";
 import { ContractsService } from "./contracts.service";
 
 type Row = Record<string, unknown>;
@@ -223,5 +225,45 @@ describe("ContractsService.create — валидация до базы", () => {
       /finance down/,
     );
     assert.equal(committed, false);
+  });
+});
+
+/**
+ * Стаб под `list`: сначала запрос организации (from(org)), затем выборка
+ * договоров с цепочкой leftJoin → where → groupBy → orderBy → limit.
+ * Переданный предел перехватывается — ровно он и есть предмет теста:
+ * на этом списке плитка «Действующие договоры» считает active/closed/total.
+ */
+function listDb(opts: { onLimit?: (n: number) => void }) {
+  const chain = {
+    leftJoin: () => chain,
+    where: () => chain,
+    groupBy: () => chain,
+    orderBy: () => chain,
+    limit: async (n: number) => {
+      opts.onLimit?.(n);
+      return [];
+    },
+  };
+  return {
+    select: () => ({
+      from: (t: unknown) => {
+        if (t === org) return { where: async () => [{ id: "11111111-1111-4111-8111-111111111111" }] };
+        return chain;
+      },
+    }),
+  } as never;
+}
+
+describe("Договоры: список не режется молча", () => {
+  it("предел выборки — общий потолок MAX_FIND_LIMIT, а не зашитые 500", async () => {
+    let передан = 0;
+    const db = listDb({ onLimit: (n) => { передан = n; } });
+    await new ContractsService(db, noopEvents, noopFinance).list("globerent");
+    assert.equal(передан, MAX_FIND_LIMIT);
+    // Тот же класс дефекта, что резал реестр (аудит 31.08, п. 6): на пределе
+    // в 500 счётчики «закрыто N · всего M» молча застыли бы при росте таблицы —
+    // сегодня договоров 265, запас на умолчании был меньше двух крат.
+    assert.ok(передан >= 500 * 2, "потолок обязан держать кратный запас против 500");
   });
 });

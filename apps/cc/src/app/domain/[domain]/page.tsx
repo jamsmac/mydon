@@ -448,9 +448,25 @@ export default async function DomainPage({
   if (contractorsLoaded) byType["contractor"] = contractors.length;
 
   // GLOBERENT: раскладка договоров по срокам — тот же 14-дневный горизонт и то же
-  // строковое сравнение дат, что в брифинге Core, чтобы панель и бот сходились в цифре.
+  // строковое сравнение дат, что в брифинге Core, поэтому КАРТОЧНАЯ часть цифры
+  // сходится с legacy-слагаемым брифинга (entity.type='contract' с endDate в
+  // горизонте). Второе слагаемое брифинга — typed-договоры таблицы contract со
+  // сроком оплаты по графику (planned money_flow, dueDate в горизонте) — плитка
+  // «Истекают ≤ 14 дней» пока НЕ показывает: dueDate-среза planned-строк у
+  // панели нет (core.contracts отдаёт только счётчики). Пока в горизонте нет
+  // планов оплат, цифры совпадают; первый же план даст тревогу в боте при
+  // спокойной плитке — устранять расхождение нужно typed-слагаемым здесь,
+  // а не правкой брифинга.
   const todayKey = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
   let grContracts: ContractStats | null = null;
+  // Типизированные контуры для плиток дашборда (аудит 31.08, п. 6): техника —
+  // складской конвейер globerent_unit, договоры — таблица contract (та же, что
+  // в разделе «Договоры купли-продажи»). Карточек entity.type='equipment' и
+  // 'contract' в реестре GLOBERENT нет вовсе (на проде 0 при 191 единице и
+  // 265 договорах), поэтому плитки, считавшие по реестру, показывали нули.
+  // Провал запроса — «—», а не ноль: нет ответа ≠ нет техники.
+  let grUnitsTotal: number | null = null;
+  let grLiveContracts: { active: number; closed: number; total: number } | null = null;
   if (domain === "globerent") {
     const horizonDate = new Date();
     horizonDate.setDate(horizonDate.getDate() + 14);
@@ -459,6 +475,24 @@ export default async function DomainPage({
       todayKey,
       horizonDate.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" }),
     );
+    if (isOverview) {
+      const [unitGroups, liveRows] = await Promise.all([
+        // Сводка конвейера вместо полного списка: плитке нужна одна цифра, а
+        // группы UNIT_GROUPS покрывают все статусы без пересечений (тест в
+        // shared) — сумма по ним и есть весь парк единиц.
+        core.unitsSummary(domain).catch(() => null),
+        core.contracts(domain).catch(() => null),
+      ]);
+      grUnitsTotal = unitGroups === null ? null : unitGroups.reduce((s, g) => s + g.n, 0);
+      grLiveContracts =
+        liveRows === null
+          ? null
+          : {
+              active: liveRows.filter((c) => c.status === "active").length,
+              closed: liveRows.filter((c) => c.status === "closed").length,
+              total: liveRows.length,
+            };
+    }
   }
 
   // Финансовый контур GLOBERENT (перенос PROMACH): свод нужен вкладке «Финансы»
@@ -1328,13 +1362,15 @@ export default async function DomainPage({
                     <span className="go">→</span>
                   </div>
                 </Link>
+                {/* Действующие — из таблицы договоров, а не из собранных
+                    карточек: карточек может не быть вовсе, а контур — жить. */}
                 <Link href={href("docs:contract")} className="wt">
                   <div className="wl">Действующие договоры</div>
-                  <div className="wv">{grContracts.active}</div>
+                  <div className="wv">{grLiveContracts === null ? "—" : grLiveContracts.active}</div>
                   <div className="wf">
-                    {grContracts.noDate + grContracts.expired > 0
-                      ? `без даты ${grContracts.noDate} · истекло ${grContracts.expired}`
-                      : "все со сроком"}
+                    {grLiveContracts === null
+                      ? "Core не ответил на договоры"
+                      : `закрыто ${grLiveContracts.closed} · всего ${grLiveContracts.total}`}
                     <span className="go">→</span>
                   </div>
                 </Link>
@@ -1345,11 +1381,17 @@ export default async function DomainPage({
                     ключ сведения — ИНН<span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("catalog:equipment")} className="wt">
+                {/* Единицы — из складского конвейера (globerent_unit), а не из
+                    реестра: карточек type='equipment' в реестре ноль, и плитка
+                    показывала 0 при 191 живой единице. Ведёт в «Склад». */}
+                <Link href={href("units")} className="wt">
                   <div className="wl">Техника HELI</div>
-                  <div className="wv">{byType["equipment"] ?? 0}</div>
+                  <div className="wv">{grUnitsTotal === null ? "—" : grUnitsTotal}</div>
                   <div className="wf">
-                    единиц в каталоге<span className="go">→</span>
+                    {grUnitsTotal === null
+                      ? "Core не ответил на склад"
+                      : "единиц на складском конвейере"}
+                    <span className="go">→</span>
                   </div>
                 </Link>
               </div>

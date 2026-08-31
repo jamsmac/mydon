@@ -9,6 +9,7 @@ import { auditLog, contractAct, entity, grContract, moneyFlow, org } from "@mydo
 import {
   contractTotals,
   installmentSchedule,
+  MAX_FIND_LIMIT,
   trancheAmount,
   TZ,
   type ContractItem,
@@ -131,7 +132,11 @@ export class ContractsService {
       .where(eq(grContract.orgId, orgId))
       .groupBy(grContract.id, entity.name)
       .orderBy(desc(grContract.contractDate))
-      .limit(500);
+      // Потолок — общий MAX_FIND_LIMIT (как у /entities и registry.byType),
+      // а не зашитые 500: на этом списке плитка «Действующие договоры» считает
+      // active/closed/total, и молчаливое усечение застывило бы цифры на 500
+      // (сегодня договоров 265 — запас меньше двух крат).
+      .limit(MAX_FIND_LIMIT);
     return rows.map((r) => ({
       ...r.contract,
       clientName: r.clientName,

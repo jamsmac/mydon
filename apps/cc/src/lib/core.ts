@@ -20,6 +20,7 @@ import type {
   ShrinkReport as VendingShrinkageReport,
   StockCountsReport,
 } from "@mydon/shared";
+import { MAX_FIND_LIMIT } from "@mydon/shared";
 import { collectAllTaskPages } from "./task-pagination";
 
 /**
@@ -2518,9 +2519,18 @@ export const core = {
     if (domain) p.set("domain", domain);
     return get<Entity[]>(`/entities?${p.toString()}`);
   },
-  entitiesOf: (domain: string) => get<Entity[]>(`/entities?domain=${domain}`),
+  /**
+   * Реестр направления целиком: страница направления строит на нём и списки,
+   * и все счётчики плиток. Предел задан явно потолком Core (MAX_FIND_LIMIT),
+   * а не умолчанием в 500: в GLOBERENT 988 registry-строк, и на умолчании
+   * панель молча показывала 500 записей и 459 счетов из 704 (аудит 31.08,
+   * п. 6) — усечение без признака усечения читалось как полный реестр.
+   */
+  entitiesOf: (domain: string) => get<Entity[]>(`/entities?domain=${domain}&limit=${MAX_FIND_LIMIT}`),
   entitiesOfType: (domain: string, type: string) =>
-    get<Entity[]>(`/entities?domain=${domain}&type=${encodeURIComponent(type)}`),
+    get<Entity[]>(
+      `/entities?domain=${domain}&type=${encodeURIComponent(type)}&limit=${MAX_FIND_LIMIT}`,
+    ),
   /**
    * Все контрагенты, без привязки к направлению.
    *
@@ -2533,7 +2543,7 @@ export const core = {
    * контрагентов 233, и на умолчании список начал бы молча обрезаться задолго
    * до того, как это кто-нибудь заметит.
    */
-  contractorsAll: () => get<Entity[]>(`/entities?type=contractor&limit=5000`),
+  contractorsAll: () => get<Entity[]>(`/entities?type=contractor&limit=${MAX_FIND_LIMIT}`),
   entity: (id: string) => get<Entity>(`/entities/${id}`),
   createEntity: (input: Record<string, unknown>) => send<Entity>("/entities", "POST", input),
   /** Вложения записи (фото номенклатуры, чеки) — для галереи карточки. */

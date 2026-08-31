@@ -12,6 +12,10 @@ export default defineConfig({
     alias: {
       "@mydon/shared": path.resolve(root, "../../packages/shared/src/index.ts"),
       "@mydon/assistant": path.resolve(root, "../../packages/assistant/src/index.ts"),
+      // Маркер-пакет Next.js: вне RSC-сборки специфаер не резолвится вовсе,
+      // и любой тест, выполняющий модуль клиента Core (core.test.ts), падал бы
+      // на import-analysis до старта — vi.mock здесь не успевает.
+      "server-only": path.resolve(root, "./src/test/server-only.ts"),
     },
   },
   esbuild: {
