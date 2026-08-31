@@ -42,11 +42,21 @@ describe("Реестр: выборка по типу не режется мол�
 });
 
 /**
- * Стаб под `briefing()`: семь независимых count-запросов, различаем по ссылке
- * на таблицу. Обе договорные выборки по entity идут подряд (сначала endDate в
- * горизонте, затем кривые даты) — их значения подаются очередью. Типизированные
- * договоры — единственный запрос по money_flow с innerJoin.
+ * Стаб под `briefing()`. Тревожные категории теперь выбирают ID (число тревог —
+ * длина списка, состав — сами id), поэтому стаб отдаёт им СТРОКИ-id нужной
+ * длины, а не `[{ n }]`. Не-тревожные счётчики (согласования, кривые даты)
+ * по-прежнему возвращают `[{ n }]`. Обе выборки по entity идут подряд: сначала
+ * договоры-карточки с endDate в горизонте (id-строки), затем кривые даты
+ * (count). Типизированные договоры — запрос по money_flow с innerJoin.
+ *
+ * `ids(n, tag)` даёт n РАЗНЫХ id — важно, чтобы distinct и хеши состава считались
+ * как в бою. `overrideIds` позволяет задать точный набор (для проверки, что при
+ * РОТАЦИИ на том же числе хеш состава меняется).
  */
+function ids(n: number, tag: string): { id: string }[] {
+  return Array.from({ length: n }, (_, i) => ({ id: `${tag}-${i}` }));
+}
+
 function briefingDb(opts: {
   moneyOverdue?: number;
   idle?: number;
@@ -55,21 +65,47 @@ function briefingDb(opts: {
   entityCounts?: number[];
   typedDueSoon?: number;
   tasksOverdue?: number;
+  /** Точные наборы id (перекрывают длины) — для проверки состава/ротации. */
+  overrideIds?: {
+    money?: string[];
+    idle?: string[];
+    legacy?: string[];
+    typed?: string[];
+    tasks?: string[];
+  };
 }) {
   const one = (n: number | undefined) => ({ where: async () => [{ n: n ?? 0 }] });
+  const rows = (n: number | undefined, tag: string, override?: string[]) => ({
+    where: async () => (override ? override.map((id) => ({ id })) : ids(n ?? 0, tag)),
+  });
   const очередьEntity = [...(opts.entityCounts ?? [])];
+  let entityCall = 0;
+  const ov = opts.overrideIds ?? {};
   return {
     select: () => ({
       from: (t: unknown) => {
         if (t === moneyFlow)
           return {
-            where: async () => [{ n: opts.moneyOverdue ?? 0 }],
-            innerJoin: () => ({ where: async () => [{ n: opts.typedDueSoon ?? 0 }] }),
+            // overdueMoney — выбор id.
+            where: async () =>
+              ov.money ? ov.money.map((id) => ({ id })) : ids(opts.moneyOverdue ?? 0, "money"),
+            // contractsDueSoonTyped — выбор contractId с innerJoin.
+            innerJoin: () => ({
+              where: async () =>
+                (ov.typed ?? ids(opts.typedDueSoon ?? 0, "typed").map((r) => r.id)).map(
+                  (contractId) => ({ contractId }),
+                ),
+            }),
           };
-        if (t === machineCard) return one(opts.idle);
+        if (t === machineCard) return rows(opts.idle, "idle", ov.idle);
         if (t === approval) return one(opts.approvals);
-        if (t === entity) return one(очередьEntity.shift());
-        if (t === task) return one(opts.tasksOverdue);
+        if (t === entity) {
+          const call = entityCall++;
+          // Первый entity-запрос — договоры-карточки (id), второй — кривые даты (count).
+          if (call === 0) return rows(очередьEntity[0], "legacy", ov.legacy);
+          return one(очередьEntity[1]);
+        }
+        if (t === task) return rows(opts.tasksOverdue, "task", ov.tasks);
         return one(0);
       },
     }),
@@ -111,5 +147,58 @@ describe("Брифинг: договоры считаются и по типиз
     assert.equal(b.contractsDueSoon, 2);
     assert.equal(b.overdueTasks, 3);
     assert.equal(b.generatedAt, МОМЕНТ.toISOString(), "момент брифинга — параметр, не часы машины");
+  });
+});
+
+describe("Брифинг: различитель состава тревог меняется при РОТАЦИИ на том же числе", () => {
+  it("тот же СОСТАВ id → тот же хеш (детерминизм, дедуп сработает)", async () => {
+    const набор = { money: ["m2", "m1"], idle: ["a1"] };
+    const b1 = await new RegistryService(briefingDb({ overrideIds: набор })).briefing(МОМЕНТ);
+    // Порядок строк из БД не гарантирован — подаём тот же набор в другом порядке.
+    const b2 = await new RegistryService(
+      briefingDb({ overrideIds: { money: ["m1", "m2"], idle: ["a1"] } }),
+    ).briefing(МОМЕНТ);
+    assert.equal(b1.overdueMoney, 2);
+    assert.equal(
+      b1.alarmComposition.overdueMoney,
+      b2.alarmComposition.overdueMoney,
+      "хеш состава не зависит от порядка строк — иначе он «плыл» бы сам по себе",
+    );
+    assert.equal(b1.alarmComposition.idleMachines, b2.alarmComposition.idleMachines);
+  });
+
+  it("РОТАЦИЯ при том же числе → хеш меняется (владелец узнает о новом инциденте)", async () => {
+    // Автомат A починен, встал B: idleMachines по-прежнему 1, но СОСТАВ иной.
+    const было = await new RegistryService(
+      briefingDb({ overrideIds: { idle: ["A"] } }),
+    ).briefing(МОМЕНТ);
+    const стало = await new RegistryService(
+      briefingDb({ overrideIds: { idle: ["B"] } }),
+    ).briefing(МОМЕНТ);
+    assert.equal(было.idleMachines, 1);
+    assert.equal(стало.idleMachines, 1, "число простаивающих не изменилось");
+    assert.notEqual(
+      было.alarmComposition.idleMachines,
+      стало.alarmComposition.idleMachines,
+      "состав сменился — хеш обязан измениться, иначе дельта-память проглотит ротацию",
+    );
+  });
+
+  it("пустая категория → пустой различитель (нечего различать)", async () => {
+    const b = await new RegistryService(briefingDb({})).briefing(МОМЕНТ);
+    assert.equal(b.alarmComposition.overdueMoney, "");
+    assert.equal(b.alarmComposition.idleMachines, "");
+    assert.equal(b.alarmComposition.contractsDueSoon, "");
+    assert.equal(b.alarmComposition.overdueTasks, "");
+  });
+
+  it("договоры «на исходе» из двух источников не сливаются по совпавшему UUID", async () => {
+    // Один и тот же UUID как собранная карточка и как типизированный договор —
+    // это ДВЕ разные тревоги: префикс e:/c: не даёт им схлопнуться.
+    const b = await new RegistryService(
+      briefingDb({ overrideIds: { legacy: ["dup"], typed: ["dup"] } }),
+    ).briefing(МОМЕНТ);
+    assert.equal(b.contractsDueSoon, 2, "карточка dup + договор dup — две позиции, не одна");
+    assert.notEqual(b.alarmComposition.contractsDueSoon, "");
   });
 });

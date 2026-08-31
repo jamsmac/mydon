@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { approval, entity, grContract, machineCard, moneyFlow, org, task } from "@mydon/db";
 import { MAX_FIND_LIMIT, TZ, type Domain } from "@mydon/shared";
@@ -40,6 +41,22 @@ export interface Briefing {
   contractsBadDate: number;
   /** Задачи с прошедшим сроком: заводить задачи и не показывать просрочку бессмысленно. */
   overdueTasks: number;
+  /**
+   * Стабильные различители СОСТАВА тревог — не число, а КАКИЕ ИМЕННО сущности
+   * тревожат. Детерминированный (сортировка id) хеш по каждой категории. Нужен
+   * дельта-памяти агентов: при РОТАЦИИ на том же числе (автомат A починен, встал
+   * B — idleMachines по-прежнему 1) число не меняется, а состав меняется —
+   * значит меняется и хеш, и агент подаёт НОВОЕ предложение, а не глотает его
+   * как «ничего не изменилось». morning-digest кладёт эти хеши в signatureFacts
+   * (ключ дедупа), а НЕ в отображаемые владельцу facts: показывать их незачем.
+   * Пустая категория → пустая строка (нет тревоги — нечего различать).
+   */
+  alarmComposition: {
+    overdueMoney: string;
+    idleMachines: string;
+    contractsDueSoon: string;
+    overdueTasks: string;
+  };
 }
 
 /**
@@ -160,8 +177,10 @@ export class RegistryService {
     // давал бы сразу две тревоги (overdueMoney и contractsDueSoon). Поэтому
     // строки с dueDate считаются просроченными по dueDate < сегодня, и только
     // строки без срока (ручные обязательства, комиссии) — по прежнему признаку.
-    const [overdueMoney] = await this.db
-      .select({ n: count() })
+    // Берём id, а не count(): число — это длина списка, а состав (для различителя
+    // дельта-памяти) — сами id. Один запрос вместо двух даёт и то, и другое.
+    const overdueMoneyRows = await this.db
+      .select({ id: moneyFlow.id })
       .from(moneyFlow)
       .where(
         and(
@@ -181,8 +200,8 @@ export class RegistryService {
     // работают» — включая дни, когда автомат стоял в мастерской. Теперь
     // состояние хранится явно (`machine_card.status`), и вопрос «сколько
     // автоматов не в работе» наконец имеет источник.
-    const [idleMachines] = await this.db
-      .select({ n: count() })
+    const idleMachineRows = await this.db
+      .select({ id: machineCard.entityId })
       .from(machineCard)
       .where(ne(machineCard.status, "in_service"));
 
@@ -191,8 +210,8 @@ export class RegistryService {
       .from(approval)
       .where(eq(approval.decision, "pending"));
 
-    const [contractsDueSoonLegacy] = await this.db
-      .select({ n: count() })
+    const contractsDueSoonLegacyRows = await this.db
+      .select({ id: entity.id })
       .from(entity)
       .where(
         and(
@@ -214,8 +233,8 @@ export class RegistryService {
     // overdueMoney (для строк с dueDate — именно по dueDate < сегодня, см.
     // выше), поэтому границы не пересекаются и двойной тревоги по одной
     // строке нет: dueDate < сегодня — просрочка, ≥ сегодня и < горизонта — «к сроку».
-    const [contractsDueSoonTyped] = await this.db
-      .select({ n: sql<number>`count(distinct ${moneyFlow.contractId})::int` })
+    const contractsDueSoonTypedRows = await this.db
+      .select({ contractId: moneyFlow.contractId })
       .from(moneyFlow)
       .innerJoin(grContract, eq(grContract.id, moneyFlow.contractId))
       .where(
@@ -227,6 +246,13 @@ export class RegistryService {
           lt(moneyFlow.dueDate, horizon),
         ),
       );
+    // distinct по договору: у одного договора может быть несколько planned-строк
+    // графика в горизонте — тревога всё равно про ОДИН договор.
+    const contractsDueSoonTypedIds = [
+      ...new Set(
+        contractsDueSoonTypedRows.map((r) => r.contractId).filter((v): v is string => v !== null),
+      ),
+    ];
 
     // Договоры с датой, которую мы не понимаем (например «31.12.2026»), не должны
     // молча выпадать из тревог — считаем их отдельно и показываем владельцу.
@@ -245,8 +271,8 @@ export class RegistryService {
 
     // Просроченные задачи — наравне с деньгами и автоматами: заводить задачи
     // и не показывать просрочку означало бы, что их можно спокойно не делать.
-    const [overdueTasks] = await this.db
-      .select({ n: count() })
+    const overdueTaskRows = await this.db
+      .select({ id: task.id })
       .from(task)
       .where(
         and(
@@ -257,16 +283,44 @@ export class RegistryService {
         ),
       );
 
+    const overdueMoneyIds = overdueMoneyRows.map((r) => r.id);
+    const idleMachineIds = idleMachineRows.map((r) => r.id);
+    // Договоры «на исходе» — из ДВУХ источников (собранные карточки + типизированная
+    // таблица). Метим префиксом, чтобы совпавший UUID из разных таблиц не слился.
+    const contractsDueSoonIds = [
+      ...contractsDueSoonLegacyRows.map((r) => `e:${r.id}`),
+      ...contractsDueSoonTypedIds.map((id) => `c:${id}`),
+    ];
+    const overdueTaskIds = overdueTaskRows.map((r) => r.id);
+
     return {
       generatedAt: now.toISOString(),
       tz: TZ,
-      overdueMoney: overdueMoney?.n ?? 0,
-      idleMachines: idleMachines?.n ?? 0,
+      overdueMoney: overdueMoneyIds.length,
+      idleMachines: idleMachineIds.length,
       pendingApprovals: pendingApprovals?.n ?? 0,
-      contractsDueSoon: (contractsDueSoonLegacy?.n ?? 0) + (contractsDueSoonTyped?.n ?? 0),
+      contractsDueSoon: contractsDueSoonIds.length,
       contractsBadDate: contractsBadDate?.n ?? 0,
-      overdueTasks: overdueTasks?.n ?? 0,
+      overdueTasks: overdueTaskIds.length,
+      alarmComposition: {
+        overdueMoney: this.composition(overdueMoneyIds),
+        idleMachines: this.composition(idleMachineIds),
+        contractsDueSoon: this.composition(contractsDueSoonIds),
+        overdueTasks: this.composition(overdueTaskIds),
+      },
     };
+  }
+
+  /**
+   * Детерминированный различитель состава: sha256 по ОТСОРТИРОВАННЫМ id.
+   * Сортировка обязательна — без неё порядок строк из БД «плавал» бы и хеш
+   * менялся сам по себе (ложная тревога дельта-памяти). Пусто → пустая строка:
+   * нет тревоги — нечего различать (и сигнатура morning-digest не «застынет» на
+   * несуществующем ключе).
+   */
+  private composition(ids: string[]): string {
+    if (ids.length === 0) return "";
+    return createHash("sha256").update([...ids].sort().join("\n")).digest("hex");
   }
 
   /** Дата в виде YYYY-MM-DD по ташкентскому поясу — ключ для сравнения строк. */

@@ -37,6 +37,17 @@ export interface Proposal {
   action: string;
   /** Факты, на которых построено предложение — для проверки «по следам». */
   facts: Record<string, unknown>;
+  /**
+   * СТАБИЛЬНОЕ подмножество фактов ТОЛЬКО для дельта-памяти (дедупа). Когда
+   * задано — runner считает сигнатуру от него, а не от `facts`. Так владельцу
+   * по-прежнему показываются ПОЛНЫЕ `facts`, а повтор подавляется по
+   * содержательному подмножеству без волатильных полей (excerpt/costUsd/
+   * retrievedAt/stars/сырьё LLM), которые «плывут» каждый прогон и иначе не
+   * давали сигнатуре совпасть — навык слал бы дубли. Не задано → сигнатура
+   * от `facts` целиком (прежнее поведение). Значения должны быть
+   * детерминированы (отсортированы), иначе сигнатура снова «поплывёт».
+   */
+  signatureFacts?: Record<string, unknown>;
   /** Подсказки «что дальше» (follow-up) — платформа их показывает (F0.5). */
   next?: string[];
 }
@@ -142,11 +153,25 @@ const monitorStock: Skill = async (_agent, core) => {
   const b = await core.briefing();
   if (b.idleMachines === 0) return null; // все работают — повода нет
 
+  const facts = { idleMachines: b.idleMachines };
+  // Дедуп — по СОСТАВУ простаивающих, а не только по числу. Тот же различитель,
+  // что закрыл ротацию у morning-digest: A починен, встал B — idleMachines всё
+  // время 1 (обнуления до 0, что сбросило бы память через no_signal, нет), и без
+  // состава сигнатура совпала бы → no_change → владелец через этот навык не
+  // узнал бы, что теперь стоит ДРУГОЙ автомат. alarmComposition.idleMachines из
+  // Core (хеш отсортированного состава) меняется ⟺ меняется состав. Кладём его в
+  // signatureFacts (ключ дедупа), а facts владельцу оставляем прежними (только
+  // счётчик). Старое ядро без alarmComposition → сигнатура по счётчику (прежнее
+  // поведение, без падения).
+  const signatureFacts = b.alarmComposition
+    ? { ...facts, composition: b.alarmComposition.idleMachines }
+    : facts;
   return {
     action:
       `Проверить простаивающие автоматы: ${b.idleMachines} без признака работы. ` +
       `Нужен выезд или пополнение — решает владелец.`,
-    facts: { idleMachines: b.idleMachines },
+    facts,
+    signatureFacts,
   };
 };
 
@@ -164,27 +189,32 @@ const morningDigest: Skill = async (_agent, core) => {
 
   if (alarms.length === 0) return null; // тревог нет — не дёргаем владельца
 
+  // Отображаемые владельцу факты — содержательные счётчики, от которых построены
+  // тревоги (полные, НЕ урезаны). Раньше здесь было `{ ...b }` — spread копировал
+  // ВЕСЬ рантайм-ответ Core, включая generatedAt (уникален каждый запуск) и
+  // pendingApprovals (растёт из-за самих согласований), и сигнатура (тогда — от
+  // facts целиком) не совпадала никогда: одна и та же сводка подавалась заново.
+  const facts = {
+    overdueMoney: b.overdueMoney,
+    idleMachines: b.idleMachines,
+    contractsDueSoon: b.contractsDueSoon,
+    overdueTasks: b.overdueTasks,
+    contractsBadDate: b.contractsBadDate,
+  };
+  // Дедуп — по СОСТАВУ тревог, а не только по числу. Счётчики глотали ротацию:
+  // A оплачен, но просрочился новый C (overdueMoney по-прежнему 2) — та же
+  // сигнатура, владелец не узнавал о новом инциденте. alarmComposition из Core
+  // (детерминированный хеш отсортированных id по каждой категории) меняется ⟺
+  // меняется состав. Кладём различители в signatureFacts (ключ дедупа), а не в
+  // отображаемые facts: владельцу показывать хеши незачем. Старое ядро без
+  // alarmComposition → сигнатура по счётчикам (прежнее поведение, без падения).
+  const signatureFacts = b.alarmComposition
+    ? { ...facts, composition: b.alarmComposition }
+    : facts;
   return {
     action: `Разобрать за день: ${alarms.join("; ")}.`,
-    // Только содержательные счётчики, от которых построены тревоги. Раньше здесь
-    // было `{ ...b }` — spread копировал ВЕСЬ рантайм-ответ Core, включая поля
-    // вне типа AgentsBriefing: generatedAt (уникален каждый запуск) и
-    // pendingApprovals (растёт из-за самих согласований). Дельта-память считает
-    // сигнатуру от facts целиком (runner.ts), поэтому сигнатура не совпадала
-    // никогда — и одна и та же сводка подавалась владельцу каждый день заново.
-    // Ограничение (осознанный компромисс): счётчики не различают состав —
-    // ротация при неизменном числе (A оплачен, но просрочился новый C:
-    // overdueMoney по-прежнему 2) даёт ту же сигнатуру и глотается
-    // дельта-памятью. Точнее не из чего: брифинг Core отдаёт только
-    // количества. Бэклог: добавить в /registry/briefing стабильные
-    // различительные поля (oldestOverdueDate, отсортированные id) и сюда.
-    facts: {
-      overdueMoney: b.overdueMoney,
-      idleMachines: b.idleMachines,
-      contractsDueSoon: b.contractsDueSoon,
-      overdueTasks: b.overdueTasks,
-      contractsBadDate: b.contractsBadDate,
-    },
+    facts,
+    signatureFacts,
   };
 };
 

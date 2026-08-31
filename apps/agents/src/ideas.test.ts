@@ -3,6 +3,7 @@ import { after, before, describe, it } from "node:test";
 import type { ChannelPost } from "@mydon/connectors";
 import type { LlmLedger } from "@mydon/shared";
 import type { EmbeddingGateway } from "./embedding";
+import { signature } from "./memory";
 import {
   assessIdeas,
   buildIdeasProposal,
@@ -269,5 +270,40 @@ describe("assessIdeas — оценка моделью (первый LLM-навы
     // Прошлая идея попала в НЕДОВЕРЕННЫЙ блок под маркером, инструкция — не повторять.
     assert.match(seen[0].prompt, /РАНЕЕ РАЗОБРАННОЕ/);
     assert.match(seen[0].prompt, /claudexor/);
+  });
+
+  it("дедуп по НАБОРУ постов, а не по тексту оценки LLM (П2)", async () => {
+    const digests = [{ channel: "promtjam", posts: [post(420, "claudexor ротация")] }];
+    // Один и тот же вход, но модель даёт РАЗНЫЙ текст оценки (и цену) на каждом вызове.
+    const прогон1 = await assessIdeas(fakeGateway("оценка A\nвнедрить X").gateway, digests, OPTS);
+    const прогон2 = await assessIdeas(fakeGateway("совсем иная оценка B\nдругой вывод").gateway, digests, OPTS);
+    assert.ok(прогон1 && прогон2);
+    // Отображаемые facts РАЗНЫЕ (внутри — сырьё оценки LLM).
+    assert.notEqual(прогон1.facts.assessment, прогон2.facts.assessment);
+    // Ключ дедупа — стабилен: assessment/costUsd/model не «плывут» в сигнатуру.
+    assert.equal(
+      signature(прогон1.signatureFacts!),
+      signature(прогон2.signatureFacts!),
+      "тот же набор постов → та же сигнатура, дубль подавлен",
+    );
+  });
+
+  it("появился новый пост — содержательное изменение, подаётся заново (П2)", async () => {
+    const было = await assessIdeas(
+      fakeGateway("оценка").gateway,
+      [{ channel: "promtjam", posts: [post(420, "claudexor")] }],
+      OPTS,
+    );
+    const стало = await assessIdeas(
+      fakeGateway("оценка").gateway,
+      [{ channel: "promtjam", posts: [post(420, "claudexor"), post(421, "новая фишка")] }],
+      OPTS,
+    );
+    assert.ok(было && стало);
+    assert.notEqual(
+      signature(было.signatureFacts!),
+      signature(стало.signatureFacts!),
+      "новый post-id обязан менять сигнатуру",
+    );
   });
 });

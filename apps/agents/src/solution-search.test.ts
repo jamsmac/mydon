@@ -9,6 +9,7 @@ import {
   type GitHubRepositoryEvidence,
   type GitHubSearchResult,
 } from "@mydon/connectors";
+import { signature } from "./memory";
 import type { ModelGateway, ModelRequest } from "./model-gateway";
 import {
   SOLUTION_SEARCH_COVERAGE_GAPS,
@@ -1287,5 +1288,56 @@ describe("solution-search snapshot validation", () => {
       truncated: false,
     };
     assert.throws(() => parseSolutionSnapshot(hiddenVisibleMatch), /corrupt/);
+  });
+});
+
+describe("find-solution: дедуп по набору репозиториев, не по звёздам/времени/баллам (П2)", () => {
+  // Нейтральный вход (без telegram-crm intent) → relevance-gate неактивен, все
+  // кандидаты ранжируются, набор url и есть содержательный ключ дедупа.
+  const INPUT = { title: "открытый учёт склада и инвентаризация" };
+
+  async function propose(over: {
+    stars?: number;
+    retrievedAt?: string;
+    fullName?: string;
+  }) {
+    const cand = candidateSnapshot(1, over.fullName ?? "owner/warehouse-erp", {
+      stars: over.stars ?? 500,
+    });
+    const snap = snapshot([cand], { retrievedAt: over.retrievedAt ?? NOW });
+    const { gateway } = fakeGateway('{"rankings":[{"id":1,"readiness":4,"cis":3,"relevance":4}]}');
+    return withModel(() =>
+      findSolutions(gateway, fakeConnector(), INPUT, {
+        agentName: "solution-scout",
+        requestKey: "sig-test",
+        snapshotPort: storedPort(snap),
+      }),
+    );
+  }
+
+  it("те же репозитории, но иные stars/retrievedAt — сигнатура та же, дубль подавлен", async () => {
+    const выемка1 = await propose({ stars: 500, retrievedAt: NOW });
+    const выемка2 = await propose({ stars: 999, retrievedAt: "2026-09-01T00:00:00.000Z" });
+    // Отображаемые facts различны (внутри — звёзды/время/баллы).
+    assert.notEqual(
+      (выемка1.facts.snapshot as { retrievedAt: string }).retrievedAt,
+      (выемка2.facts.snapshot as { retrievedAt: string }).retrievedAt,
+    );
+    // Ключ дедупа — стабилен: retrievedAt/stars/баллы не «плывут» в сигнатуру.
+    assert.equal(
+      signature(выемка1.signatureFacts!),
+      signature(выемка2.signatureFacts!),
+      "тот же набор репозиториев → та же сигнатура",
+    );
+  });
+
+  it("GitHub вернул другой репозиторий — содержательное изменение, подаётся заново", async () => {
+    const было = await propose({ fullName: "owner/warehouse-erp" });
+    const стало = await propose({ fullName: "owner/inventory-pro" });
+    assert.notEqual(
+      signature(было.signatureFacts!),
+      signature(стало.signatureFacts!),
+      "другой url кандидата обязан менять сигнатуру",
+    );
   });
 });
