@@ -3241,25 +3241,52 @@ export class VendingService {
    *
    * После закрытия отказом считается СЕРИЯ отказов и, если она дошла до
    * порога, пишется событие тревоги (R-P5b-8) — см. `сериюОтказовВСобытие`.
+   *
+   * «SUCCESS» ПРИ НУЛЕ СОБРАННЫХ АВТОМАТОВ НЕ ПРИНИМАЕТСЯ — вторая линия к
+   * той же проверке в коллекторе (`ourvend-sync.ts`). Прогон, закрытый зелёным
+   * без единого автомата, обнуляет `failedStreak`, и сторож застоя молчит
+   * навсегда при том, что не собрано ничего. Первую линию держит агент, но
+   * статус приезжает по HTTP: старый коллектор, ручной POST или новый клиент
+   * обойдут её, а журнал — единственное свидетельство сбора.
    */
   async finishSyncRun(id: string, input: SyncFinishInput, now = new Date()): Promise<{ ok: boolean }> {
+    // Ноль СОБРАННЫХ — отказ, а не успех. Условие повторяет первую линию
+    // агента (`machines.length === 0 || machinesOk === 0`): одно
+    // `machinesTotal === 0` покрывало лишь половину инварианта, и ручной POST
+    // `{status: "success", machinesTotal: 26, machinesOk: 0}` ложился зелёным —
+    // ровно тот чужой клиент, от которого линия и заявлена. Легитимного
+    // `success` с нулём собранных не существует; `partial` и `failed` приходят
+    // уже честными и не переписываются.
+    const пусто = input.status === "success" && (input.machinesTotal === 0 || input.machinesOk === 0);
+    const status = пусто ? "failed" : input.status;
+    // Причина — В ЗАПИСЬ, а не только в лог: панель читает `error` прогона, и
+    // «failed без объяснения» отправляет искать сетевую ошибку, которой не было.
+    const причина =
+      input.machinesTotal === 0
+        ? "прогон закрыт «success» при нуле автоматов — собрано ничего; статус переведён в failed"
+        : `прогон закрыт «success», но не собран ни один автомат из ${input.machinesTotal}; статус переведён в failed`;
+    const error = пусто ? [причина, ...(input.error ? [input.error] : [])].join(" | ") : (input.error ?? null);
+    if (пусто) this.logger.warn(`Журнал сбора ${id}: ${причина}.`);
+
     const rows = await this.db
       .update(vendingSyncRun)
       .set({
         finishedAt: now,
-        status: input.status,
+        status,
         machinesTotal: input.machinesTotal,
         machinesOk: input.machinesOk,
         durationMs: input.durationMs,
-        error: input.error ?? null,
+        error,
       })
       .where(eq(vendingSyncRun.id, id))
       .returning({ id: vendingSyncRun.id });
 
     if (rows.length === 0) return { ok: false };
     // Тревога считается ТОЛЬКО после отказа: успех и частичный сбор серию
-    // рвут, и лишний запрос к журналу в этом случае не нужен.
-    if (input.status === "failed") await this.сериюОтказовВСобытие(now);
+    // рвут, и лишний запрос к журналу в этом случае не нужен. Считаем по
+    // ИТОГОВОМУ статусу — переведённый в `failed` пустой прогон обязан войти в
+    // серию, иначе вторая линия чинила бы только надпись в панели.
+    if (status === "failed") await this.сериюОтказовВСобытие(now);
     return { ok: true };
   }
 
@@ -3298,9 +3325,19 @@ export class VendingService {
       .limit(1);
     if (было) return;
 
+    // Штамп — СВЕЖИЙ момент прямо перед insert, а не `now` входа в
+    // `finishSyncRun`: между ними UPDATE и два SELECT, и займи они > 5 с
+    // (ровно деградация Core/БД, при которой серия отказов и случается),
+    // событие оседало раньше вотермарки Notifier (`since = until − 5000`,
+    // apps/bot) — немедленная тревога тихо пропадала, а суточный дедуп давил
+    // повтор до следующих суток. Момент процесса, а не `now()` базы, — по той
+    // же причине, что раньше: границу суток дедуп считает от часов процесса
+    // (приём `sync-stale.service` и `retention.service`). Сам дедуп по-прежнему
+    // от `now` — свежий штамп только позже него, и `gte(сутки)` это переживает.
     await this.db.insert(event).values({
       source: "system",
       type: "ourvend.sync_failed_streak",
+      occurredAt: new Date(),
       payload: { streak: серия.streak, lastError: серия.lastError, since: серия.since },
     });
   }

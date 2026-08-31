@@ -290,7 +290,42 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
 
   let status: SyncResult["status"];
   let error: string | undefined;
-  if (failures.length === 0 && machinesOk > 0 && salesFailed) {
+  if (machines.length === 0 || machinesOk === 0) {
+    // НОЛЬ АВТОМАТОВ — ЭТО ОТКАЗ, А НЕ УСПЕХ. Логин и список прошли, список
+    // приехал ПУСТЫМ (сменилась группа, у учётки отобрали права, кабинет отдал
+    // пустой ответ) — и `failures.length === 0` давало `success`: журнал сбора
+    // зелен, `failedStreak` обнулён, сторож застоя молчит навсегда. При этом не
+    // собрано НИЧЕГО. Тот же приговор и когда список непустой, а собрать не
+    // удалось ни один автомат: «успех без данных» — состояние, которого у
+    // прогона сбора быть не может.
+    status = "failed";
+    const причина =
+      machines.length === 0
+        ? "кабинет вернул пустой список автоматов — собирать было нечего"
+        : `ни одного автомата из ${machines.length} не собрано`;
+    error = [
+      причина,
+      ...(failures.length ? [`Автоматы без слотов: ${failures.slice(0, 10).join("; ")}`] : []),
+      ...(skippedNotes.length ? [skippedNotes.slice(0, 10).join("; ")] : []),
+      ...(saleErrors.length ? [saleErrors.slice(0, 10).join("; ")] : []),
+    ].join(" | ");
+  } else if (slots === 0) {
+    // СНЯТО — ЕЩЁ НЕ ПРИНЯТО. `machinesOk` меряет съём коннектором, а не
+    // судьбу данных в Core: когда приём пропустил ВСЕ собранные автоматы
+    // (поехал формат вендора — у каждого «слишком много слотов») или каждый
+    // отдал пустой список слотов, `failures` пусты и прогон закрывался
+    // зелёным, хотя планограмма не обновилась ни строкой. Тот же «успех без
+    // данных», что и в ветви выше, — и приговор тот же: failed, streak растёт,
+    // сторож застоя видит. `collected.length > 0` здесь гарантировано ветвью
+    // выше, значит приём звался и вернул ноль принятых слотов.
+    status = "failed";
+    error = [
+      `приём не принял ни одного слота с ${machinesOk} собранных автоматов — планограмма не обновлена`,
+      ...(skippedNotes.length ? [skippedNotes.slice(0, 10).join("; ")] : []),
+      ...(failures.length ? [`Автоматы без слотов: ${failures.slice(0, 10).join("; ")}`] : []),
+      ...(saleErrors.length ? [saleErrors.slice(0, 10).join("; ")] : []),
+    ].join(" | ");
+  } else if (failures.length === 0 && salesFailed) {
     // Слоты собраны без потерь, а продажи не дошли ни строкой — статус
     // больше не врёт «success»: владелец должен видеть, что окно продаж
     // не обновилось, а не догадываться об этом по пустому графику.
@@ -301,7 +336,10 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
     status = "partial";
     error = [`продажи: ${saleErrors.slice(0, 10).join("; ")}`, ...skippedNotes.slice(0, 10)].join(" · ");
   } else {
-    status = failures.length === 0 ? "success" : machinesOk > 0 ? "partial" : "failed";
+    // `machinesOk > 0` здесь уже гарантировано ветвью выше, поэтому прежняя
+    // третья развилка (`machinesOk > 0 ? "partial" : "failed"`) стала мёртвой:
+    // «ни одного собранного» до этой строки не доходит.
+    status = failures.length === 0 ? "success" : "partial";
     const errParts = [
       ...(failures.length ? [`Автоматы без слотов: ${failures.slice(0, 10).join("; ")}`] : []),
       ...(skippedNotes.length ? [skippedNotes.slice(0, 10).join("; ")] : []),

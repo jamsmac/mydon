@@ -2283,18 +2283,29 @@ describe("Вендинг Core: приём пишет пачками, а не п�
 });
 
 describe("Вендинг Core: журнал сбора — finishSyncRun (§ коллектор)", () => {
-  /** Стаб: update(...).returning() отдаёт строку только если id "существует". */
-  function syncRunDb(existingId: string | null) {
+  /**
+   * Стаб: update(...).returning() отдаёт строку только если id "существует",
+   * а `записано` копит то, что реально уехало в `set` — статус журнала теперь
+   * не обязан совпадать с присланным (пустой прогон переводится в `failed`).
+   *
+   * `select` отдаёт ПУСТОЙ журнал прогонов: подсчёт серии отказов упирается в
+   * первый же порог и до запроса дедупа не доходит — этой цепочки довольно.
+   */
+  function syncRunDb(existingId: string | null, записано: Record<string, unknown>[] = []) {
     const tx = {
       update: () => ({
-        set: () => ({
-          where: () => ({
-            returning: async () => (existingId ? [{ id: existingId }] : []),
-          }),
-        }),
+        set: (v: Record<string, unknown>) => {
+          записано.push(v);
+          return {
+            where: () => ({
+              returning: async () => (existingId ? [{ id: existingId }] : []),
+            }),
+          };
+        },
       }),
+      select: () => ({ from: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
     };
-    return { update: tx.update } as never;
+    return { update: tx.update, select: tx.select } as never;
   }
 
   it("известный id — ok: true", async () => {
@@ -2319,6 +2330,81 @@ describe("Вендинг Core: журнал сбора — finishSyncRun (§ к�
       durationMs: 500,
     });
     assert.deepEqual(res, { ok: false });
+  });
+
+  it("«success» при НУЛЕ АВТОМАТОВ не принимается — в журнал уходит failed с причиной", async () => {
+    // Пустой список автоматов (сменилась группа, у учётки отобрали права) —
+    // и прогон закрывался зелёным: `failedStreak` обнулён, сторож застоя молчит
+    // навсегда, хотя не собрано НИЧЕГО. Первую линию держит коллектор, но
+    // статус приезжает по HTTP — вторая линия обязана быть здесь.
+    const записано: Record<string, unknown>[] = [];
+    const svc = new VendingService(syncRunDb("run-1", записано));
+    const res = await svc.finishSyncRun("run-1", {
+      status: "success",
+      machinesTotal: 0,
+      machinesOk: 0,
+      durationMs: 900,
+    });
+    assert.deepEqual(res, { ok: true });
+    assert.equal(записано[0]!.status, "failed", "зелёный прогон без автоматов — успех без данных");
+    assert.match(String(записано[0]!.error), /нуле автоматов/, "причина обязана быть В ЗАПИСИ: панель читает error");
+  });
+
+  it("«success» при machinesOk = 0 и НЕПУСТОМ списке — тоже failed (ручной POST, чужой клиент)", async () => {
+    // Половина инварианта пропускала обход: `{success, machinesTotal: 26,
+    // machinesOk: 0}` от ручного POST или стороннего клиента ложился зелёным,
+    // обнулял failedStreak и освежал сторож застоя — «успех без данных» снова
+    // молчал. Текущие коллекторы такой формы не шлют, но смысл второй линии —
+    // именно чужие клиенты.
+    const записано: Record<string, unknown>[] = [];
+    const svc = new VendingService(syncRunDb("run-1", записано));
+    const res = await svc.finishSyncRun("run-1", {
+      status: "success",
+      machinesTotal: 26,
+      machinesOk: 0,
+      durationMs: 900,
+    });
+    assert.deepEqual(res, { ok: true });
+    assert.equal(записано[0]!.status, "failed", "зелёный прогон без единого собранного — успех без данных");
+    assert.match(String(записано[0]!.error), /не собран ни один автомат из 26/, "причина обязана быть В ЗАПИСИ");
+  });
+
+  it("прислали причину вместе с пустым прогоном — она не теряется, а дописывается", async () => {
+    const записано: Record<string, unknown>[] = [];
+    const svc = new VendingService(syncRunDb("run-1", записано));
+    await svc.finishSyncRun("run-1", {
+      status: "success",
+      machinesTotal: 0,
+      machinesOk: 0,
+      durationMs: 900,
+      error: "кабинет вернул пустой список автоматов",
+    });
+    assert.match(String(записано[0]!.error), /нуле автоматов/);
+    assert.match(String(записано[0]!.error), /пустой список автоматов/);
+  });
+
+  it("непустой прогон закрывается РОВНО тем статусом, что прислали", async () => {
+    // Вторая линия не должна переписывать честные итоги: 29 автоматов собраны —
+    // это success, и никакой «на всякий случай» здесь не уместен.
+    const записано: Record<string, unknown>[] = [];
+    const svc = new VendingService(syncRunDb("run-1", записано));
+    await svc.finishSyncRun("run-1", { status: "success", machinesTotal: 29, machinesOk: 29, durationMs: 1200 });
+    assert.equal(записано[0]!.status, "success");
+    assert.equal(записано[0]!.error, null);
+  });
+
+  it("partial и failed при нуле автоматов не переписываются — они уже честны", async () => {
+    const записано: Record<string, unknown>[] = [];
+    const svc = new VendingService(syncRunDb("run-1", записано));
+    await svc.finishSyncRun("run-1", {
+      status: "failed",
+      machinesTotal: 0,
+      machinesOk: 0,
+      durationMs: 500,
+      error: "вход не удался",
+    });
+    assert.equal(записано[0]!.status, "failed");
+    assert.equal(записано[0]!.error, "вход не удался", "чужую причину дописка не портит");
   });
 });
 
@@ -3771,6 +3857,8 @@ describe("Серия отказов сбора (R-P5b-8)", () => {
   function мир(runs: RunRow[], events: EvRow[] = []) {
     const прогоны = runs.map((r) => ({ ...r }));
     const журнал = [...events];
+    /** Ровно то, что сервис передал в `insert().values()` — без достроек стенда. */
+    const сырые: Record<string, unknown>[] = [];
     const db = {
       update: () => ({
         set: (v: Record<string, unknown>) => ({
@@ -3806,11 +3894,18 @@ describe("Серия отказов сбора (R-P5b-8)", () => {
       }),
       insert: (t: unknown) => ({
         values: async (v: Record<string, unknown>) => {
-          if (t === event) журнал.push({ ...(v as unknown as EvRow), occurredAt: new Date(СЕЙЧАС) });
+          if (t !== event) return;
+          сырые.push(v);
+          // `occurredAt` СТАВИТ ЗАПИСЬ, а стенд лишь достраивает то, что в
+          // проде поставила бы БД своим `now()`. Пока сервис поля не передавал,
+          // стенд подставлял `СЕЙЧАС` за него — то есть дедуп в тесте всегда
+          // сравнивал сутки с ТЕМ ЖЕ моментом, а в проде часы процесса и часы
+          // базы могли разъехаться.
+          журнал.push({ ...(v as unknown as EvRow), occurredAt: (v.occurredAt as Date | undefined) ?? new Date(СЕЙЧАС) });
         },
       }),
     } as never;
-    return { service: new VendingService(db), events: журнал, прогоны };
+    return { service: new VendingService(db), events: журнал, прогоны, сырые };
   }
 
   /** Полдень Ташкента 25.08.2026: и прогоны, и дедуп считаются от него. */
@@ -3881,5 +3976,45 @@ describe("Серия отказов сбора (R-P5b-8)", () => {
     const м = мир(ДВА_ОТКАЗА());
     assert.deepEqual(await м.service.finishSyncRun("нет-такого", ОТКАЗ_ВХОД, СЕЙЧАС), { ok: false });
     assert.equal(м.events.length, 0);
+  });
+
+  it("событие несёт СВЕЖИЙ `occurredAt` — момент перед insert, а не `now` входа", async () => {
+    // Дедуп сравнивает `occurred_at` с началом ташкентских суток от `now`
+    // ПРОЦЕССА, а сам `occurred_at` ставила БАЗА своим `now()`. Разъехались
+    // часы — и на границе суток получаешь либо двойное сообщение, либо
+    // молчание. Все остальные события срезов (`sync-stale`, `retention`) момент
+    // передают сами.
+    //
+    // При этом штамп — НЕ `now` входа в finishSyncRun: до insert идут UPDATE и
+    // два SELECT, и займи они > 5 с (деградация БД, при которой серия и
+    // случается), событие оседало бы раньше вотермарки Notifier
+    // (`since = until − 5000`) — немедленная тревога тихо пропадала, а суточный
+    // дедуп давил повтор. Штамп берётся прямо перед вставкой.
+    const м = мир([прогон("run-4", "running", "2026-08-25T07:00:00Z"), ...ДВА_ОТКАЗА()]);
+    const до = Date.now();
+    await м.service.finishSyncRun("run-3", ОТКАЗ_ВХОД, СЕЙЧАС);
+    const после = Date.now();
+    assert.equal(м.сырые.length, 1);
+    const штамп = м.сырые[0]!.occurredAt;
+    assert.ok(штамп instanceof Date, "момент обязан ехать в записи, а не оставаться на now() базы");
+    assert.ok(
+      штамп.getTime() >= до && штамп.getTime() <= после,
+      `штамп обязан быть взят прямо перед insert (часы процесса), а не унаследован от входа: ${штамп.toISOString()}`,
+    );
+  });
+
+  it("пустой прогон, переведённый в failed, ВХОДИТ в серию — иначе вторая линия чинила бы одну надпись", async () => {
+    // Коллектор прислал `success` при нуле автоматов: статус переводится в
+    // `failed`, и серия обязана считаться по ИТОГОВОМУ статусу — иначе третий
+    // подряд пустой прогон по-прежнему не будил бы никого.
+    const м = мир([прогон("run-4", "running", "2026-08-25T07:00:00Z"), ...ДВА_ОТКАЗА()]);
+    await м.service.finishSyncRun(
+      "run-3",
+      { status: "success", machinesTotal: 0, machinesOk: 0, durationMs: 800 },
+      СЕЙЧАС,
+    );
+    const тревоги = м.events.filter((e) => e.type === "ourvend.sync_failed_streak");
+    assert.equal(тревоги.length, 1);
+    assert.equal(тревоги[0]!.payload.streak, 3);
   });
 });
