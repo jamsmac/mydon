@@ -3062,3 +3062,67 @@ describe("awaiting/unassigned не утекают personal (R-P5-6)", () => {
     assert.match(text, /personal/);
   });
 });
+
+/**
+ * Кросс-доменные агрегаты (overdue/due-soon/workload/redo-unnotified/
+ * assign-unnotified) — тот же domain-less обход, что и list/by-id, но читаются
+ * ещё и HTTP-контроллером: при ужесточении и не-owner запросе личный контур
+ * обязан вырезаться. Проверяем по сгенерированному WHERE: при false (дефолт —
+ * так зовут внутренние вызыватели: боты/крон/агенты) personal виден как сегодня;
+ * при true — `domain is distinct from 'personal'` (не вычёркивает NULL-domain).
+ * Для workload фильтр стоит ДО группировки — иначе personal попал бы в счётчики.
+ */
+describe("Агрегатные чтения задач не утекают personal (R-P5-7a)", () => {
+  function captureWhereDb() {
+    let where: unknown;
+    const tail = {
+      orderBy: () => ({ limit: async () => [] }),
+      limit: async () => [],
+      groupBy: async () => [],
+    };
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: (condition: unknown) => {
+            where = condition;
+            return tail;
+          },
+        }),
+      }),
+    } as never;
+    return {
+      db,
+      get where() {
+        return where;
+      },
+    };
+  }
+  const render = (node: unknown): string => new PgDialect().sqlToQuery(node as never).sql;
+
+  // [метод, вызов при флаге выключенном, вызов при флаге включённом]
+  const cases: ReadonlyArray<
+    [string, (t: ReturnType<typeof makeTasks>) => Promise<unknown>, (t: ReturnType<typeof makeTasks>) => Promise<unknown>]
+  > = [
+    ["overdue", (t) => t.overdue(), (t) => t.overdue(true)],
+    ["dueSoon", (t) => t.dueSoon(24), (t) => t.dueSoon(24, true)],
+    ["workload", (t) => t.workload(), (t) => t.workload(true)],
+    ["redoUnnotified", (t) => t.redoUnnotified(), (t) => t.redoUnnotified(true)],
+    ["assignUnnotified", (t) => t.assignUnnotified(), (t) => t.assignUnnotified(50, true)],
+  ];
+
+  for (const [name, offCall, onCall] of cases) {
+    it(`${name}: флаг выключен / внутренний вызов — WHERE без personal (как сегодня)`, async () => {
+      const cap = captureWhereDb();
+      await offCall(makeTasks(cap.db));
+      assert.doesNotMatch(render(cap.where), /personal/);
+    });
+
+    it(`${name}: excludePersonal=true — WHERE добавляет \`is distinct from 'personal'\``, async () => {
+      const cap = captureWhereDb();
+      await onCall(makeTasks(cap.db));
+      const text = render(cap.where);
+      assert.match(text, /is distinct from/i);
+      assert.match(text, /personal/);
+    });
+  }
+});
