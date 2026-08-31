@@ -16,7 +16,7 @@ import {
   tashkentDay,
   tashkentDayStartOf,
 } from "@mydon/shared";
-import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
 import { lastSnapshotAt, snapshotIsStale, snapshotStaleThreshold } from "../ourvend/sync-runs";
@@ -90,6 +90,57 @@ export function buildUpserts(
     });
   }
   return { values, quarantined };
+}
+
+/**
+ * Ключи ЗАМЕНЫ зеркала: по каждому `(dt, серийник)`, от которого приехала хоть
+ * одна строка, — набор приехавших товаров.
+ *
+ * Зачем: один `onConflictDoUpdate` умеет только добавлять и править. Строка,
+ * ИСЧЕЗНУВШАЯ у источника (товар переименовали, дневную строку правили руками),
+ * живёт у нас вечно — в режиме `stock` это необъяснимо красный гейт паритета, в
+ * режиме `own` молча завышенная выручка, которую паритет `sale` не сверяет
+ * вовсе. Приём тот же, что у снапшота OurVend (`rewriteKeys`) и
+ * `pruneVanishedSlots`: DELETE лишнего по ПРИЕХАВШИМ ключам.
+ *
+ * ПУСТОЙ НАБОР НЕ УДАЛЯЕТ НИЧЕГО — правило «пустой список не повод стирать»:
+ * ключи берутся из самих строк, поэтому молчание источника (или день, целиком
+ * ушедший в карантин) даёт пустой список, а не пустые сутки в зеркале.
+ *
+ * КАРАНТИННЫЕ СТРОКИ — ТОЖЕ «ПРИЕХАВШИЕ». Товар дня, ушедший в карантин
+ * (нечисловое qty/amount), у источника НЕ исчезал — исчезло только число. Без
+ * него в наборе годная строка того же дня-автомата открывала бы ключ, а
+ * карантинный товар попадал под `NOT IN` — и уборка сносила бы его последнюю
+ * годную копию, то есть делала ровно то, чего карантин не позволяет упсерту
+ * («брак не вливаем нулём» — а тут строка терялась бы целиком, что хуже нуля).
+ * Поэтому вторым аргументом идут карантинные строки: они РАСШИРЯЮТ набор
+ * товаров своего дня, но сами день НЕ ОТКРЫВАЮТ — день без единой годной
+ * строки по-прежнему не трогается (см. правило пустого набора выше: полностью
+ * бракованному дню мы не верим и как перечню «чего больше нет»).
+ *
+ * exported и переиспользуется снабжением (`supply.service`) — правило у обоих
+ * зеркал одно, как и `todayLocal`.
+ */
+export function pruneKeys(
+  values: { dt: string; machineSerial: string; product: string }[],
+  quarantined: { dt: string; machineSerial: string; product: string }[] = [],
+): { dt: string; machineSerial: string; products: string[] }[] {
+  const дни = new Map<string, { dt: string; machineSerial: string; products: Set<string> }>();
+  for (const v of values) {
+    const key = `${v.dt}|${v.machineSerial}`;
+    let день = дни.get(key);
+    if (!день) {
+      день = { dt: v.dt, machineSerial: v.machineSerial, products: new Set<string>() };
+      дни.set(key, день);
+    }
+    день.products.add(v.product);
+  }
+  // Только в УЖЕ открытые дни: карантин защищает свой товар от ножа, но не
+  // даёт полностью бракованному дню права стирать чужие строки.
+  for (const q of quarantined) {
+    дни.get(`${q.dt}|${q.machineSerial}`)?.products.add(q.product);
+  }
+  return [...дни.values()].map((д) => ({ dt: д.dt, machineSerial: д.machineSerial, products: [...д.products] }));
 }
 
 /** Сутки в миллисекундах: у Ташкента нет перехода на летнее время. */
@@ -290,6 +341,37 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
         upserted += chunk.length;
       }
 
+      // УБОРКА ИСЧЕЗНУВШИХ СТРОК — по приехавшим ключам (см. `pruneKeys`).
+      // Идёт ПОСЛЕ upsert-а по той же причине, что уборка слотов у приёма
+      // планограммы: сперва в базе лежит свежий день целиком, и только потом
+      // сносится то, чего в нём нет, — упавшая уборка не оставляет дыру.
+      //
+      // `source` В УСЛОВИИ ОБЯЗАТЕЛЕН: уникальный ключ `sale` включает
+      // источник, и уборка без него сносила бы ручные и любые другие строки
+      // того же дня — то есть чинила бы завышение цифр их потерей.
+      //
+      // КАРАНТИН — ВТОРЫМ АРГУМЕНТОМ: товар дня с бракованным числом у
+      // источника не исчезал, и его прежняя годная строка под нож не идёт
+      // (см. `pruneKeys`).
+      let pruned = 0;
+      for (const k of pruneKeys(values, quarantined)) {
+        const убрано = await this.db
+          .delete(sale)
+          .where(
+            and(
+              eq(sale.source, "ourvend"),
+              eq(sale.dt, k.dt),
+              eq(sale.machineSerial, k.machineSerial),
+              notInArray(sale.product, k.products),
+            ),
+          )
+          .returning({ id: sale.id });
+        pruned += убрано.length;
+      }
+      if (pruned > 0) {
+        this.log.log(`Продажи: убрано ${pruned} строк, исчезнувших у источника.`);
+      }
+
       // Карточка автомата могла появиться ПОЗЖЕ продаж (так и было с тремя
       // снек-автоматами: 10,4 млн сум висели «ничьими»). Привязываем задним
       // числом всё, что теперь узнаётся по серийнику. Обычный синк этого не
@@ -317,6 +399,9 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
         type: "sales.sync",
         payload: {
           upserted,
+          // Убранное — В ЖУРНАЛ: DELETE в зеркале выручки обязан оставлять
+          // след, иначе «вчера было больше» нечем объяснить.
+          убрано_исчезнувших: pruned,
           привязано_задним_числом: linkedCount,
           из:
             (await accountingSource(this.db, now)) === "own" ? "ourvend_sale_snapshot (свой)" : "mydon-stock/ourvend",

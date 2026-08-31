@@ -7,11 +7,11 @@ import {
 } from "@nestjs/common";
 import { entity, event, machineStock, ourvendStockSnapshot, purchase } from "@mydon/db";
 import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, normalizeMachineSerial, strictNumber } from "@mydon/shared";
-import { desc, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, notInArray, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
 import { accountingSource, type AccountingSource } from "../sales/accounting-source";
-import { todayLocal } from "../sales/sales.service";
+import { pruneKeys, todayLocal } from "../sales/sales.service";
 import { VendingService } from "../vending/vending.service";
 import { openStockDb } from "./stock-db";
 
@@ -51,6 +51,19 @@ export interface QuarantinedSupply {
   product: string;
   field: "qty" | "unit_price" | "total";
   value: unknown;
+}
+
+/**
+ * Карантин ОСТАТКОВ: поверх общего карантина — `dt` и серийник РАЗДЕЛЬНЫМИ
+ * полями в тех же нормализованных формах, что у годных строк (`dt` обрезан до
+ * даты, серийник канонический). Их читает уборка `pruneKeys`: без них товар
+ * дня, ушедший в карантин, попадал бы под `NOT IN` — и DELETE сносил бы его
+ * последнюю годную строку зеркала (`key` для этого не годится: там склейка
+ * «серийник|сырой dt»).
+ */
+export interface QuarantinedStock extends QuarantinedSupply {
+  dt: string;
+  machineSerial: string;
 }
 
 /**
@@ -130,7 +143,7 @@ export function buildStockUpserts(
   notInService?: ReadonlySet<string>,
 ): {
   values: (typeof machineStock.$inferInsert)[];
-  quarantined: QuarantinedSupply[];
+  quarantined: QuarantinedStock[];
   skippedNotInService: number;
   /**
    * КАКИЕ ИМЕННО автоматы отброшены — канонические серийники, отсортированы
@@ -143,7 +156,7 @@ export function buildStockUpserts(
   skippedSerials: string[];
 } {
   const values: (typeof machineStock.$inferInsert)[] = [];
-  const quarantined: QuarantinedSupply[] = [];
+  const quarantined: QuarantinedStock[] = [];
   let skippedNotInService = 0;
   const пропущенные = new Set<string>();
   for (const r of rows) {
@@ -162,7 +175,15 @@ export function buildStockUpserts(
     const product = String(r.ourvend_name).slice(0, 512);
     const qty = strictNumber(r.qty);
     if (qty === null) {
-      quarantined.push({ key: `${machineSerial}|${r.dt}`, product, field: "qty", value: r.qty });
+      quarantined.push({
+        key: `${machineSerial}|${r.dt}`,
+        // Для уборки — те же формы, что у values: дата без времени, канон.
+        dt: String(r.dt).slice(0, 10),
+        machineSerial,
+        product,
+        field: "qty",
+        value: r.qty,
+      });
       continue;
     }
     values.push({
@@ -376,6 +397,39 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
           });
       }
 
+      // УБОРКА ИСЧЕЗНУВШИХ ОСТАТКОВ — по приехавшим ключам (`pruneKeys`, там же
+      // причина и правило «пустой набор ничего не стирает»). Без неё строка,
+      // пропавшая у источника за закрытый день, оставалась в `machine_stock`
+      // навсегда — и гейт паритета краснел «лишним товаром», которого в
+      // автомате нет.
+      //
+      // ИСТОЧНИКА В КЛЮЧЕ ЗДЕСЬ НЕТ: у `machine_stock` уникальный ключ —
+      // `(dt, серийник, товар)`, колонки `source` в таблице нет вовсе, и
+      // единственный писатель этих строк — этот синк. Условие ровно по ключу,
+      // ничего шире.
+      //
+      // КАРАНТИН — ВТОРЫМ АРГУМЕНТОМ: товар дня с бракованным qty у источника
+      // не исчезал, и его прежняя годная строка под нож не идёт (см.
+      // `pruneKeys`; ради этого `QuarantinedStock` несёт dt и серийник
+      // раздельно).
+      let prunedStock = 0;
+      for (const k of pruneKeys(sValues, sBad)) {
+        const убрано = await this.db
+          .delete(machineStock)
+          .where(
+            and(
+              eq(machineStock.dt, k.dt),
+              eq(machineStock.machineSerial, k.machineSerial),
+              notInArray(machineStock.product, k.products),
+            ),
+          )
+          .returning({ id: machineStock.id });
+        prunedStock += убрано.length;
+      }
+      if (prunedStock > 0) {
+        this.log.log(`Остатки: убрано ${prunedStock} строк, исчезнувших у источника.`);
+      }
+
       // Одна строка на прогон, и только когда есть что сказать: молчание тут
       // означало бы, что строки исчезают между снапшотом и `machine_stock` без
       // единого следа. СЕРИЙНИКИ В СТРОКЕ (R-FW-S2): «пропущено 34» не отвечает
@@ -456,6 +510,9 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
           payload: {
             приход: pValues.length,
             остатки: sValues.length,
+            // Убранное — В ЖУРНАЛ по той же причине, что у продаж: DELETE в
+            // зеркале обязан оставлять след.
+            убрано_исчезнувших: prunedStock,
             // Пропуск — В ЖУРНАЛ, а не только в лог: журнал переживает ротацию
             // контейнера, а вопрос «куда делись строки автомата» задают через
             // недели.
