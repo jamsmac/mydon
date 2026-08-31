@@ -75,8 +75,13 @@ async function main(): Promise<void> {
   const allowlist = parseAllowlist(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
   const coreUrl = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
   const serviceToken = process.env.SERVICE_TOKEN ?? "";
+  // «Второй пояс» владельца (R-P5-2). Пусто (по умолчанию) → бот шлёт только
+  // service-token, поведение РОВНО как сегодня (merge-safe). Задан → бот
+  // проставляет его АДРЕСНО на owner-плуминг и owner-мутации (см. CoreClient),
+  // чтобы флип OWNER_IDENTITY_ENFORCED=1 не отрезал владельца от его данных.
+  const ownerActionToken = process.env.OWNER_ACTION_TOKEN ?? "";
   const anthropicApiKey = (process.env.ANTHROPIC_API_KEY ?? "").trim();
-  const core = new CoreClient(coreUrl, 10_000, serviceToken);
+  const core = new CoreClient(coreUrl, 10_000, serviceToken, ownerActionToken);
   // Один central ledger для всех metered путей. Producer-side spool обязателен:
   // без него оплаченный ответ мог пережить процесс, а exact accounting — нет.
   const outboxRoot = (process.env.LLM_LEDGER_OUTBOX_ROOT ?? "").trim();
@@ -789,6 +794,13 @@ async function main(): Promise<void> {
   async function sendConfirmRequests(now = new Date()): Promise<void> {
     await разослатьПодтверждения(
       {
+        // БЕЗ owner-scope: этот веер — НЕ owner-канал, а широковещание всем
+        // менеджерам (право tasks.confirm есть у staff-роли manager). Owner-токен
+        // здесь снял бы excludePersonal и разослал бы ЛИЧНЫЕ задачи владельца
+        // staff-менеджерам (+кнопка «принять/вернуть» = мутация чужого личного
+        // контура). В отличие от рассыльщиков сроков/переделок/назначений, которые
+        // адресуют исполнителю задачи, этот путь шлёт каждому менеджеру. Личные
+        // задачи владельца просто не входят в staff-веер приёмки.
         awaitingTasks: () => deps.core.awaitingTasks(),
         people: () => deps.core.people(),
         claimNotification: (key) => deps.core.claimNotification(key),
