@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/common";
 import { person, task } from "@mydon/db";
-import { can, effectiveRoles, normalizeMachineSerial, tashkentDay, tashkentDayStartOf, TZ } from "@mydon/shared";
+import { can, effectiveRoles, normalizeMachineSerial, tashkentDay, tashkentDayStartOf, tashkentInstant, tashkentMinute, TZ } from "@mydon/shared";
 import { Cron } from "croner";
 import { and, asc, eq, isNotNull, isNull, lt, ne, or } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -34,6 +34,42 @@ function list(items: string[]): string {
   return items.length <= DESCRIPTION_ITEMS
     ? items.join(", ")
     : `${items.slice(0, DESCRIPTION_ITEMS).join(", ")} …и ещё ${items.length - DESCRIPTION_ITEMS}`;
+}
+
+function usd(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "?";
+}
+
+function names(value: unknown): string {
+  return Array.isArray(value) && value.length > 0
+    ? value.map((item: unknown) => text(item)).join(", ")
+    : "—";
+}
+
+/** Одна строка LLM-инцидента для описания: называем объект сбоя без жаргона. */
+function llmIncidentItem(p: Payload): string {
+  if (p.kind === "delivery") return `доставка в ${text(p.destination)}`;
+  if (p.kind === "settlement_spool") return `запись журнала AI-расчётов (${text(p.producer)})`;
+  return `вызов ${text(p.provider)} / ${text(p.model)} (${text(p.feature)})`;
+}
+
+function llmStuckItem(p: Payload): string {
+  return p.kind === "settlement_spool"
+    ? `${String(p.count ?? "?")} записей журнала AI-расчётов (${names(p.producers)})`
+    : `${String(p.count ?? "?")} резервов на $${usd(p.reservedUsd)}`;
+}
+
+/**
+ * Момент монитора → ташкентские настенные часы для владельца.
+ *
+ * Монитор шлёт `resetsAt` строго как `Date.toISOString()` (UTC, `…Z`);
+ * вставить его в описание как есть — показать время «на 5 часов раньше»
+ * местного и в жаргонном ISO-формате. Нечитаемое значение возвращается
+ * как есть через `text()` — лучше сырой факт, чем прочерк.
+ */
+function tashkentClock(value: unknown): string {
+  const parsed = typeof value === "string" ? tashkentInstant(value) : null;
+  return parsed ? `${tashkentMinute(parsed).replace("T", " ")} (Ташкент)` : text(value);
 }
 
 export const BRIDGE_SOURCES: readonly BridgeSource[] = [
@@ -80,10 +116,77 @@ export const BRIDGE_SOURCES: readonly BridgeSource[] = [
       return `Отказов подряд: ${String(last.streak ?? "?")}. Последняя ошибка: ${text(last.lastError)}.`;
     },
   },
+  // ── Инциденты LLM-монитора (аудит E): деньги и работоспособность AI ──
+  // llm.incident.recovered сюда сознательно не входит: задача «всё починилось»
+  // владельцу не нужна, а авто-закрытие ранее созданной задачи по recovered —
+  // отдельная механика поиска открытой задачи по source (follow-up). При этом
+  // run() ЧИТАЕТ recovered из того же окна как фильтр: эпизод (circuit/budget/
+  // stuck), закрытый монитором ещё до прогона, задачей не становится — иначе
+  // владелец получал бы утром «аварию» в настоящем времени про давно потухший
+  // инцидент.
+  //
+  // Известное ограничение дедупа «одна задача на тип в сутки»: инцидент того
+  // же типа, случившийся ПОСЛЕ прогона 06:15, отдельной задачей уже не станет —
+  // immutable-событие (clientKey) не переэмитится, а прогон D+1 сгруппирует
+  // его под занятый ключ дня D → skipped. Мгновенный Telegram-алерт rules.ts
+  // его всё же доносит; дополнение открытой задачи новыми записями при skip —
+  // follow-up вместе с авто-резолвом по recovered.
+  {
+    type: "llm.incident.unknown",
+    key: "llm_unknown",
+    scope: "system",
+    priority: () => "normal",
+    title: () => "Проверить AI-операции с неизвестным исходом",
+    description: (_name, payloads) =>
+      `Исход не подтверждён, повтор заблокирован до сверки: ${list(payloads.map(llmIncidentItem))}.`,
+  },
+  {
+    type: "llm.incident.dead",
+    key: "llm_dead",
+    scope: "system",
+    priority: () => "urgent",
+    title: () => "Разобрать вручную потерянные AI-записи",
+    description: (_name, payloads) =>
+      `Повторы исчерпаны, без ручного разбора данные пропадут: ${list(payloads.map(llmIncidentItem))}.`,
+  },
+  {
+    type: "llm.incident.stuck",
+    key: "llm_stuck",
+    scope: "system",
+    priority: () => "high",
+    title: () => "Зависли суммы AI-бюджета",
+    description: (_name, payloads) =>
+      `Дольше ${String(payloads[0]?.thresholdMinutes ?? "?")} мин не рассосалось: ${list(payloads.map(llmStuckItem))}.`,
+  },
+  {
+    type: "llm.incident.circuit_open",
+    key: "llm_circuit",
+    scope: "system",
+    priority: () => "high",
+    title: () => "AI-провайдер отключён защитой",
+    description: (_name, payloads) => {
+      const last = payloads[0] ?? {};
+      return `Вызовы остановлены после серии сбоев: ${names(last.providers)}. До ${tashkentClock(last.resetsAt)} функции AI не работают.`;
+    },
+  },
+  {
+    type: "llm.incident.budget",
+    key: "llm_budget",
+    scope: "system",
+    priority: () => "high",
+    title: () => "Дневной AI-бюджет почти исчерпан",
+    description: (_name, payloads) => {
+      const last = payloads[0] ?? {};
+      return `Израсходовано ${String(last.percent ?? "?")}% лимита: $${usd(last.globalExposureUsd)} из $${usd(last.globalCapUsd)}, остаток $${usd(last.remainingUsd)}. На пределе вызовы AI остановятся сами.`;
+    },
+  },
 ];
 
 export const BRIDGE_EVENT_TYPES = BRIDGE_SOURCES.map((source) => source.type);
+/** «Эпизод закрыт» монитора LLM: мост читает его как фильтр, не как источник задач. */
+export const LLM_RECOVERED_EVENT = "llm.incident.recovered";
 export const BRIDGE_WINDOW_MS = 26 * 3_600_000;
+/** Потолок выборки на ОДИН тип события, не на всю ленту (см. run()). */
 export const BRIDGE_EVENTS_LIMIT = 500;
 export const AUTO_CREATED_EVENT = "task.auto_created";
 export const BRIDGE_RUN_EVENT = "task.bridge_run";
@@ -131,11 +234,42 @@ export class TaskBridgeService implements OnModuleInit, OnApplicationShutdown {
       return { events: 0, created: 0, skipped: 0, capped: false, disabled: true };
     }
 
-    const rows = await this.events.list({
-      types: BRIDGE_EVENT_TYPES,
-      since: new Date(now.getTime() - BRIDGE_WINDOW_MS),
-      limit: BRIDGE_EVENTS_LIMIT,
-    });
+    // Запрос — ПО ТИПУ, а не одним списком на все девять: events.list режет
+    // после сортировки desc(occurredAt), а llm-монитор — единственный массовый
+    // эмиттер моста (immutable-событие на КАЖДУЮ dead/unknown-запись, до 250
+    // в минуту после аварии). В общей выборке свежий llm-поток вытеснял бы
+    // вчерашние vending-события за лимит молча — и к следующему прогону они
+    // выпадали бы из 26-часового окна навсегда (урок «фикстуры прячут масштаб»).
+    const since = new Date(now.getTime() - BRIDGE_WINDOW_MS);
+    const rows: Awaited<ReturnType<EventsService["list"]>> = [];
+    const recoveredFingerprints = new Set<string>();
+    const truncatedTypes: string[] = [];
+    for (const type of [...BRIDGE_EVENT_TYPES, LLM_RECOVERED_EVENT]) {
+      const page = await this.events.list({ type, since, limit: BRIDGE_EVENTS_LIMIT });
+      // У каждой границы — замер настоящего входа: ровно полный лист означает,
+      // что старшие события типа могли быть отрезаны, и молчать об этом нельзя.
+      if (page.length >= BRIDGE_EVENTS_LIMIT) truncatedTypes.push(type);
+      if (type === LLM_RECOVERED_EVENT) {
+        for (const row of page) {
+          const fingerprint = ((row.payload ?? {}) as Payload).fingerprint;
+          if (typeof fingerprint === "string") recoveredFingerprints.add(fingerprint);
+        }
+      } else {
+        rows.push(...page);
+      }
+    }
+    if (truncatedTypes.length > 0) {
+      this.logger.warn(
+        `Выборка моста упёрлась в ${BRIDGE_EVENTS_LIMIT} строк по типам: ${truncatedTypes.join(", ")} — старшие события окна могли быть отрезаны.`,
+      );
+      await this.events.record({
+        source: "task-bridge",
+        type: BRIDGE_RUN_EVENT,
+        occurredAt: now,
+        payload: { eventsTruncated: true, limit: BRIDGE_EVENTS_LIMIT, types: truncatedTypes },
+      });
+    }
+
     const byType = new Map(BRIDGE_SOURCES.map((source) => [source.type, source]));
     const groups = new Map<string, Group>();
 
@@ -143,6 +277,10 @@ export class TaskBridgeService implements OnModuleInit, OnApplicationShutdown {
       const src = byType.get(event.type);
       const payload = (event.payload ?? {}) as Payload;
       if (!src || (src.accept && !src.accept(payload))) continue;
+      // Эпизод, уже закрытый монитором (recovered с тем же fingerprint в окне),
+      // в задачу не идёт: «авария» в настоящем времени была бы ложью.
+      // Вендинговые payload'ы поля fingerprint не несут и фильтром не задеваются.
+      if (typeof payload.fingerprint === "string" && recoveredFingerprints.has(payload.fingerprint)) continue;
       const rawSerial = src.scope === "machine" ? text(payload.serial, "") : "system";
       if (src.scope === "machine" && !rawSerial) {
         this.logger.warn(`Событие ${event.type} (${event.id}) без serial — задачу не создать.`);

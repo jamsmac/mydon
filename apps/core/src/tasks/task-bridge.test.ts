@@ -31,7 +31,11 @@ function fixture(opts: { events: Row[]; settings?: Row[]; people?: Row[]; confli
     },
   } as never;
   const events = {
-    list: async () => opts.events,
+    // Стенд обязан уважать type и limit запроса: мост читает ленту ПО ТИПАМ
+    // с потолком на каждый, и стенд «отдай всё» прятал бы и раздельность,
+    // и обрезку (урок «фикстуры прячут масштаб»).
+    list: async (filter: { type?: string; limit?: number }) =>
+      opts.events.filter((e) => e.type === filter.type).slice(0, filter.limit ?? 100),
     record: async (row: Row) => { recorded.push(row); return row; },
   } as never;
   const vending = {
@@ -183,11 +187,132 @@ describe("Мост событие → задача (П7)", () => {
     );
   });
 
-  it("список типов выводится из единой таблицы четырёх источников", () => {
+  it("список типов выводится из единой таблицы источников", () => {
     assert.deepEqual([...BRIDGE_EVENT_TYPES].sort(), BRIDGE_SOURCES.map((source) => source.type).sort());
     assert.deepEqual(BRIDGE_SOURCES.map((source) => source.key).sort(), [
+      "llm_budget", "llm_circuit", "llm_dead", "llm_stuck", "llm_unknown",
       "refill_unconfirmed", "shrinkage", "sync_failed", "sync_stale",
     ]);
+  });
+
+  it("инциденты LLM создают системные задачи: dead срочнее всех, unknown мягче", async () => {
+    const f = fixture({
+      events: [
+        event("llm.incident.unknown", { kind: "provider_job", provider: "anthropic", model: "claude-sonnet", feature: "brief" }),
+        event("llm.incident.budget", { kind: "budget", percent: 85, globalExposureUsd: 8.5, globalCapUsd: 10, remainingUsd: 1.5 }),
+        event("llm.incident.dead", { kind: "delivery", destination: "telegram", attempts: 8 }),
+      ],
+      people: [{ id: MANAGER }],
+    });
+    const result = await f.service.run(NOW);
+    assert.equal(result.created, 3);
+    // urgent проходит под потолком первым — dead впереди budget и unknown.
+    assert.equal(f.created[0]!.source, "llm_dead:system:2026-08-26");
+    assert.equal(f.created[0]!.priority, "urgent");
+    assert.match(String(f.created[0]!.title), /потерянные AI-записи/);
+    assert.match(String(f.created[0]!.description), /telegram/);
+    // Системная задача адресуется менеджеру существующим механизмом моста.
+    assert.equal(f.created[0]!.ownerRef, MANAGER);
+
+    const budget = f.created.find((t) => String(t.source).startsWith("llm_budget"))!;
+    assert.equal(budget.priority, "high");
+    assert.match(String(budget.title), /бюджет почти исчерпан/);
+    assert.match(String(budget.description), /85% лимита: \$8\.50 из \$10\.00, остаток \$1\.50/);
+
+    const unknown = f.created.find((t) => String(t.source).startsWith("llm_unknown"))!;
+    assert.equal(unknown.priority, "normal");
+    assert.match(String(unknown.description), /anthropic \/ claude-sonnet \(brief\)/);
+  });
+
+  it("circuit_open и stuck дают high-задачи с понятным владельцу описанием", async () => {
+    const f = fixture({
+      events: [
+        // resetsAt приходит от монитора строго как Date.toISOString() (UTC, `…Z`);
+        // фикстура с `+05:00` маскировала бы расхождение формата с продом.
+        event("llm.incident.circuit_open", { kind: "circuit", providers: ["anthropic"], resetsAt: "2026-08-26T02:00:00.000Z" }),
+        event("llm.incident.stuck", { kind: "stuck_reservations", count: 3, reservedUsd: 1.25, thresholdMinutes: 30 }),
+        event("llm.incident.stuck", { kind: "settlement_spool", status: "stuck", count: 2, producers: ["core"], thresholdMinutes: 30 }, "2026-08-26T04:00:00+05:00"),
+      ],
+    });
+    const result = await f.service.run(NOW);
+    assert.equal(result.created, 2);
+
+    const circuit = f.created.find((t) => String(t.source).startsWith("llm_circuit"))!;
+    assert.equal(circuit.priority, "high");
+    assert.match(String(circuit.description), /anthropic/);
+    // Владельцу показываются ташкентские настенные часы, а не UTC-жаргон.
+    assert.match(String(circuit.description), /До 2026-08-26 07:00 \(Ташкент\)/);
+
+    // Оба вида stuck агрегируются в одну задачу за сутки.
+    const stuck = f.created.find((t) => String(t.source).startsWith("llm_stuck"))!;
+    assert.equal(stuck.source, "llm_stuck:system:2026-08-26");
+    assert.equal(stuck.priority, "high");
+    assert.match(String(stuck.description), /3 резервов на \$1\.25/);
+    assert.match(String(stuck.description), /2 записей журнала AI-расчётов \(core\)/);
+  });
+
+  it("повторный LLM-инцидент в те же сутки — skipped, второй задачи нет", async () => {
+    const f = fixture({
+      events: [event("llm.incident.budget", { kind: "budget", percent: 85 })],
+      people: [{ id: MANAGER }],
+      conflicts: new Set(["llm_budget:system:2026-08-26"]),
+    });
+    const result = await f.service.run(NOW);
+    assert.equal(result.created, 0);
+    assert.equal(result.skipped, 1);
+    assert.equal(f.recorded.some((row) => row.type === "task.auto_created"), false);
+  });
+
+  it("llm.incident.recovered — фильтр, не источник: сам по себе задачу не создаёт", async () => {
+    assert.equal(BRIDGE_EVENT_TYPES.includes("llm.incident.recovered"), false);
+    const f = fixture({ events: [event("llm.incident.recovered", { kind: "budget" })] });
+    const result = await f.service.run(NOW);
+    assert.equal(result.created, 0);
+    assert.deepEqual(f.created, []);
+  });
+
+  it("эпизод, закрытый recovered ещё до прогона, задачей не становится", async () => {
+    // Circuit открылся и закрылся вчера днём: заводить утром high-задачу
+    // «функции AI не работают» — ложь в настоящем времени. Budget без
+    // recovered остаётся действующим и задачу получает.
+    const f = fixture({
+      events: [
+        event("llm.incident.circuit_open", { kind: "circuit", providers: ["anthropic"], resetsAt: "2026-08-25T05:30:00.000Z", fingerprint: "f-circuit" }, "2026-08-25T10:00:00+05:00"),
+        event("llm.incident.recovered", { kind: "circuit", fingerprint: "f-circuit" }, "2026-08-25T10:30:00+05:00"),
+        event("llm.incident.budget", { kind: "budget", percent: 85, fingerprint: "f-budget" }),
+      ],
+    });
+    const result = await f.service.run(NOW);
+    assert.equal(result.created, 1);
+    assert.equal(f.created[0]!.source, "llm_budget:system:2026-08-26");
+    assert.equal(f.created.some((t) => String(t.source).startsWith("llm_circuit")), false);
+  });
+
+  it("llm-поток не вытесняет вендинговые события: лента читается по типам, обрезка громкая", async () => {
+    // Ночная авария outbox: сотни dead-событий свежее вчерашней недостачи.
+    // При общей выборке newest-first они съели бы весь лимит и задача по
+    // недостаче молча не родилась бы никогда (к следующему прогону событие
+    // уже вне 26-часового окна).
+    const flood = Array.from({ length: 500 }, (_, i) =>
+      event("llm.incident.dead", { kind: "delivery", destination: `telegram-${i}` }, "2026-08-26T03:00:00+05:00"),
+    );
+    const f = fixture({
+      events: [
+        ...flood,
+        event("vending.shrinkage_alert", { serial: SERIAL, product: "Fanta", left: 1 }, "2026-08-25T12:00:00+05:00"),
+      ],
+    });
+    const result = await f.service.run(NOW);
+    assert.equal(result.events, 501);
+    // Обе задачи на месте: недостача не вытеснена llm-потоком.
+    assert.equal(f.created.some((t) => String(t.source).startsWith("shrinkage")), true);
+    assert.equal(f.created.some((t) => String(t.source).startsWith("llm_dead")), true);
+    // Ровно полный лист одного типа — громкое предупреждение + событие.
+    assert.match(f.warnings[0]!, /llm\.incident\.dead/);
+    const truncated = f.recorded.find((row) => (row.payload as Row | undefined)?.eventsTruncated === true);
+    assert.ok(truncated, "обрезка выборки обязана оставить событие task.bridge_run");
+    assert.equal(truncated.type, "task.bridge_run");
+    assert.deepEqual((truncated.payload as Row).types, ["llm.incident.dead"]);
   });
 });
 

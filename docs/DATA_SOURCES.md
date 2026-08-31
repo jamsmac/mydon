@@ -1187,17 +1187,36 @@ Endpoint `/raw/unify/:aSource/:aReport/vs/:bSource/:bReport` и его `export.c
 сегодняшний список. Мост вызывает `TasksService.ensureForDay` напрямую, без
 HTTP и токена между сервисами одного процесса.
 
-| Тип события | Ключ источника | Заголовок задачи |
-|---|---|---|
-| `vending.refill_detected` с `recorded=false` | `refill_unconfirmed:<серийник>` | `Оформить заливку <автомат>` |
-| `vending.shrinkage_alert` | `shrinkage:<серийник>` | `Разобраться с недостачей: <автомат>` |
-| `ourvend.sync_stale` | `sync_stale:system` | `Сбор OurVend не бежит` |
-| `ourvend.sync_failed_streak` | `sync_failed:system` | `Сбор OurVend падает подряд` |
+| Тип события | Ключ источника | Заголовок задачи | Приоритет |
+|---|---|---|---|
+| `vending.refill_detected` с `recorded=false` | `refill_unconfirmed:<серийник>` | `Оформить заливку <автомат>` | normal |
+| `vending.shrinkage_alert` | `shrinkage:<серийник>` | `Разобраться с недостачей: <автомат>` | high |
+| `ourvend.sync_stale` | `sync_stale:system` | `Сбор OurVend не бежит` | high / urgent |
+| `ourvend.sync_failed_streak` | `sync_failed:system` | `Сбор OurVend падает подряд` | high |
+| `llm.incident.unknown` | `llm_unknown:system` | `Проверить AI-операции с неизвестным исходом` | normal |
+| `llm.incident.dead` | `llm_dead:system` | `Разобрать вручную потерянные AI-записи` | urgent |
+| `llm.incident.stuck` | `llm_stuck:system` | `Зависли суммы AI-бюджета` | high |
+| `llm.incident.circuit_open` | `llm_circuit:system` | `AI-провайдер отключён защитой` | high |
+| `llm.incident.budget` | `llm_budget:system` | `Дневной AI-бюджет почти исчерпан` | high |
+
+Пять источников `llm_*` — инциденты LLM-монитора (аудит E). Событие
+`llm.incident.recovered` задач не рождает, но мост читает его как фильтр:
+эпизод (circuit/budget/stuck), закрытый монитором ещё до прогона 06:15 —
+recovered с тем же `fingerprint` лежит в том же окне, — задачей не становится.
+
+Ленту мост читает **по типу на запрос** с потолком 500 строк на каждый:
+llm-монитор эмитит по событию на каждую dead/unknown-запись, и в общей
+выборке newest-first такой поток вытеснял бы вчерашние вендинговые события
+за лимит молча. Ровно полный лист одного типа — предупреждение в логе и
+событие `task.bridge_run` с `eventsTruncated=true`.
 
 Полный дедуп-ключ имеет вид
 `<источник>:<сущность>:<дата Ташкента события>`. Берётся дата самого события,
 а не дата утреннего прогона: сигнал в 23:50, подобранный следующим утром за
 счёт двухчасового нахлёста, остаётся фактом вчерашнего дня и не рождает дубль.
+Обратная сторона дедупа «одна задача на тип в сутки»: LLM-инцидент того же
+типа, случившийся после прогона 06:15, отдельной задачей не станет — его
+доносит мгновенный Telegram-алерт; дополнение открытой задачи — follow-up.
 
 `machine.low_stock` остаётся событием и Telegram-сигналом, но задачу
 больше не создаёт суточный мост. В 08:35 `ShrinkageService` сверяет
