@@ -91,12 +91,16 @@ export function LlmMonitoring({ monitoring }: { monitoring: LlmLedgerMonitoring 
 
   const {
     budget,
+    catalogPrice,
     failuresToday,
     latestCompleted,
     openCircuits,
     settlementOutbox,
     stuckReservations,
   } = monitoring;
+  // «LLM включён, но у модели нет цены» — молчаливый отказ ledger. Показываем
+  // явно: без этого владелец видит «включено», а каждый вызов отклоняется.
+  const priceMissing = catalogPrice.meteredEnabled && !catalogPrice.hasActivePrice;
   const model = latestCompleted?.resolvedModel ?? latestCompleted?.requestedModel ?? "—";
   const cost = latestCost(latestCompleted);
   const cap = budget.globalCapUsd;
@@ -202,6 +206,15 @@ export function LlmMonitoring({ monitoring }: { monitoring: LlmLedgerMonitoring 
         </div>
       )}
 
+      {priceMissing && (
+        <div className="notice llm-monitoring-config-error" role="alert">
+          <b>LLM включён, но вызовы отклоняются</b>
+          У выбранной модели {catalogPrice.provider}/{catalogPrice.model} нет действующей цены в
+          каталоге Core — каждый платный вызов будет отклонён, пока цену не заведут. Заведите
+          действующую цену в каталоге тарифов.
+        </div>
+      )}
+
       <div className="rows llm-monitoring-diagnostics">
         <div className="row llm-settlement-outbox-row">
           <div className="t">
@@ -296,6 +309,29 @@ export function LlmMonitoring({ monitoring }: { monitoring: LlmLedgerMonitoring 
           </div>
           <span className={`pill ${openCircuits.length === 0 ? "ok" : "bad"}`}>
             {openCircuits.length === 0 ? "закрыт" : `открыт · ${openCircuits.length}`}
+          </span>
+        </div>
+
+        <div className="row llm-catalog-price-row">
+          <div className="t">
+            <b>Цена выбранной модели</b>
+            <small>
+              {catalogPrice.provider}/{catalogPrice.model} ·{" "}
+              {!catalogPrice.meteredEnabled
+                ? "метрируемый маршрут выключен"
+                : catalogPrice.hasActivePrice
+                  ? "действующая цена есть"
+                  : "действующей цены нет — вызовы будут отклонены"}
+            </small>
+          </div>
+          <span
+            className={`pill ${priceMissing ? "bad" : catalogPrice.hasActivePrice ? "ok" : ""}`}
+          >
+            {priceMissing
+              ? "нет цены"
+              : catalogPrice.hasActivePrice
+                ? "есть"
+                : "не требуется"}
           </span>
         </div>
       </div>

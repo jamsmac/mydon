@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { BadRequestException } from "@nestjs/common";
-import { event, systemConfig } from "@mydon/db";
+import { event, llmModelPrice, systemConfig } from "@mydon/db";
 import { accountingSource, resetAccountingSourceCache } from "../sales/accounting-source";
 import { LLM_PROFILE_KEYS } from "./config-spec";
 import { SystemService, validateLlmProfileState } from "./system.service";
@@ -61,7 +61,10 @@ describe("SystemService.set(): валидация тумблеров (§ config-
   });
 });
 
-function стендLlmПрофиля(начальные: Record<string, string> = {}) {
+function стендLlmПрофиля(
+  начальные: Record<string, string> = {},
+  цены: { model: string; validFrom: Date }[] = [],
+) {
   const карта: Record<string, string> = { ...начальные };
   const записи: { key: string; value: string; updatedBy: string | null; через: "tx" | "db" }[] = [];
   const сбросы: { через: "tx" | "db" }[] = [];
@@ -72,8 +75,13 @@ function стендLlmПрофиля(начальные: Record<string, string> 
     execute: async () => {
       замки.push({ через });
     },
+    // `from(llmModelPrice)` даёт chainable `.where()` (как настоящий query
+    // builder ledger); прочие таблицы (system_config) — awaitable список строк.
     select: () => ({
-      from: async () => Object.entries(карта).map(([key, value]) => ({ key, value })),
+      from: (table: unknown) =>
+        table === llmModelPrice
+          ? { where: async () => цены }
+          : Object.entries(карта).map(([key, value]) => ({ key, value })),
     }),
     insert: (table: unknown) => ({
       values: (row: { key: string; value: string; updatedBy: string | null }) => {
@@ -169,9 +177,49 @@ describe("SystemService.setLlmProfile(): атомарный несекретны
       assert.deepEqual(сбросы, [{ через: "tx" }], "пустой fallback сбрасывается в той же tx");
       assert.equal(карта.LLM_ENABLED, "1");
       assert.deepEqual(
-        result.map((item) => item.key),
+        result.profile.map((item) => item.key),
         [...LLM_PROFILE_KEYS],
       );
+      // Каталог пуст → метрируемый маршрут включён без действующей цены:
+      // предупреждение видимое, но профиль всё равно сохранён (writes прошли).
+      assert.match(result.warning ?? "", /нет действующей цены/);
+      assert.match(result.warning ?? "", /openai\/gpt-5\.6-sol/);
+    });
+  });
+
+  it("модель с действующей ценой в каталоге → без предупреждения", async () => {
+    await безLlmEnv(async () => {
+      const { svc } = стендLlmПрофиля({}, [
+        { model: "gpt-5.6-sol", validFrom: new Date("2026-08-29T19:00:00.000Z") },
+      ]);
+      const result = await svc.setLlmProfile([
+        { key: "LLM_ENABLED", value: "1" },
+        { key: "LLM_ROUTE", value: "openai-api" },
+        { key: "LLM_MODEL", value: "gpt-5.6-sol" },
+        { key: "LLM_BASE_URL", value: "https://api.openai.com/v1" },
+        { key: "LLM_PRICE_PROVIDER_ID", value: "openai" },
+        { key: "LLM_GLOBAL_DAILY_BUDGET_USD", value: "10" },
+        { key: "LLM_MAX_RESERVATION_USD", value: "3" },
+      ]);
+      assert.equal(result.warning, undefined);
+      assert.deepEqual(
+        result.profile.map((item) => item.key),
+        [...LLM_PROFILE_KEYS],
+      );
+    });
+  });
+
+  it("выключенный LLM без цены не предупреждает (вызовов нет)", async () => {
+    await безLlmEnv(async () => {
+      const { svc } = стендLlmПрофиля();
+      const result = await svc.setLlmProfile([
+        { key: "LLM_ENABLED", value: "0" },
+        { key: "LLM_ROUTE", value: "openai-api" },
+        { key: "LLM_MODEL", value: "gpt-5.6-sol" },
+        { key: "LLM_BASE_URL", value: "https://api.openai.com/v1" },
+        { key: "LLM_PRICE_PROVIDER_ID", value: "openai" },
+      ]);
+      assert.equal(result.warning, undefined);
     });
   });
 

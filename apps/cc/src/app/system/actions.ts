@@ -7,6 +7,12 @@ import { LLM_PROFILE_KEYS } from "../../lib/llm-profile";
 export interface ActionResult {
   ok: boolean;
   error?: string;
+  /**
+   * Успех с оговоркой: операция прошла, но действующее состояние требует
+   * внимания владельца (например, LLM включён, а цены на модель нет — вызовы
+   * будут отклонены). Показывается отдельно от ошибки.
+   */
+  warning?: string;
 }
 
 /**
@@ -45,12 +51,12 @@ export async function saveLlmProfile(form: FormData): Promise<ActionResult> {
   }
 
   try {
-    await core.saveLlmProfile({
+    const result = await core.saveLlmProfile({
       items: LLM_PROFILE_KEYS.map((key) => ({ key, value: values.get(key) ?? "" })),
       updatedBy: "owner:panel",
     });
     revalidatePath("/system");
-    return { ok: true };
+    return result.warning ? { ok: true, warning: result.warning } : { ok: true };
   } catch (err) {
     if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
     return {

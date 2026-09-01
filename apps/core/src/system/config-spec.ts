@@ -136,6 +136,25 @@ export const LLM_ROUTES = ["codex-subscription", "openai-api"] as const;
 export const OPENAI_LLM_BASE_URL = "https://api.openai.com/v1";
 export const OPENAI_LLM_PRICE_PROVIDER_ID = "openai";
 
+/**
+ * Маршруты, чьи вызовы МЕТРИРУЕМЫ (платные) и потому обязаны иметь
+ * действующую каталожную цену: reserve по ним fail-closed отклоняется, если
+ * цены нет (`llm-ledger.service.ts`). `codex-subscription` сюда не входит — он
+ * и так заблокирован до включения, а его billing до запроса недоказуем.
+ */
+const METERED_LLM_ROUTES: ReadonlySet<string> = new Set(["openai-api"]);
+
+/**
+ * Профиль включает МЕТРИРУЕМЫЙ маршрут: LLM_ENABLED=1 и route из платного
+ * набора. Ровно то состояние, в котором отсутствие каталожной цены превращает
+ * «LLM включён» в «каждый вызов молча отклонён». Аргументы — уже действующие
+ * значения (из `resolveConfigValue`/effective), чтобы вызывающий не резолвил
+ * дважды и обе поверхности (сохранение профиля и статус) считали одинаково.
+ */
+export function meteredLlmRouteEnabled(enabled: string, route: string): boolean {
+  return enabled === "1" && METERED_LLM_ROUTES.has(route);
+}
+
 export const CONFIG_SPECS: ConfigSpec[] = [
   // ── Доступ: ужесточение owner-identity (P5, R-P5-4/5/6) ──
   {
