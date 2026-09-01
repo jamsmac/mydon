@@ -644,6 +644,17 @@ export interface LlmProfileUpdate {
   updatedBy?: string;
 }
 
+/**
+ * Ответ Core на сохранение LLM-профиля. `profile` — действующие поля профиля;
+ * `warning` — видимое, но не блокирующее предупреждение: профиль записан, но
+ * в текущей конфигурации вызовы LLM будут отклонены (метрируемый маршрут
+ * включён, а действующей цены на модель нет).
+ */
+export interface LlmProfileSaveResult {
+  profile: SystemConfigItem[];
+  warning?: string;
+}
+
 export interface Approval {
   id: string;
   agent: string;
@@ -2570,7 +2581,7 @@ export const core = {
    * поэтому под вторым поясом (`SystemOwnerGuard`), как и `saveSystemConfig`.
    */
   saveLlmProfile: (input: LlmProfileUpdate) =>
-    send<SystemConfigItem[]>("/system/config/llm-profile", "PUT", input, { owner: true }),
+    send<LlmProfileSaveResult>("/system/config/llm-profile", "PUT", input, { owner: true }),
   pendingApprovals: () => get<Approval[]>("/approvals/pending"),
   allApprovals: () => get<Approval[]>("/approvals"),
   audit: (limit = 40) => get<AuditEntry[]>(`/audit?limit=${limit}`),

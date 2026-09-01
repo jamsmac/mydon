@@ -85,6 +85,24 @@ describe("атомарная LLM-форма", () => {
     expect(mocks.refresh).toHaveBeenCalledOnce();
   });
 
+  it("при успехе с предупреждением показывает предупреждение, а не «сохранён»", async () => {
+    mocks.saveLlmProfile.mockResolvedValue({
+      ok: true,
+      warning: "LLM включён, но у выбранной модели openai/gpt-5.6-sol нет действующей цены",
+    });
+    const user = userEvent.setup();
+    render(<LlmSettings initial={{ ...DEFAULT_LLM_PROFILE, LLM_ENABLED: "1" }} />);
+
+    await user.click(screen.getByRole("button", { name: "Сохранить настройки" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/нет действующей цены/);
+    expect(alert).toHaveClass("warn-text");
+    expect(screen.queryByText("LLM-профиль сохранён")).toBeNull();
+    // Профиль всё равно сохранён — обновляем данные страницы.
+    expect(mocks.refresh).toHaveBeenCalledOnce();
+  });
+
   it("после отказа Core показывает ошибку и сохраняет введённые поля", async () => {
     mocks.saveLlmProfile.mockResolvedValue({ ok: false, error: "Preflight ещё не пройден" });
     const user = userEvent.setup();

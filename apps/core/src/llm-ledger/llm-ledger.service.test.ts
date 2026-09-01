@@ -285,6 +285,8 @@ interface MonitoringFixture {
   };
   lastFailure?: Record<string, unknown> | null;
   circuits?: Array<Record<string, unknown>>;
+  /** Действующие каталожные цены (для индикатора «цена выбранной модели»). */
+  prices?: Array<{ id?: string; model: string; validFrom: Date }>;
 }
 
 /** Узкий read-only DB double для проверки безопасного monitoring snapshot. */
@@ -296,6 +298,9 @@ function monitoringDb(fixture: MonitoringFixture) {
           return Promise.resolve(
             Object.entries(fixture.config ?? {}).map(([key, value]) => ({ key, value })),
           );
+        }
+        if (table === llmModelPrice) {
+          return { where: async () => fixture.prices ?? [] };
         }
         assert.equal(table, llmSpend);
         const keys = Object.keys(fields ?? {});
@@ -966,6 +971,40 @@ describe("LLM-ledger settlement invariants", () => {
       },
     ]);
     assert.doesNotMatch(JSON.stringify(snapshot), /sk-do-not-return|requestKey|_llmLedger/);
+  });
+
+  it("monitoring: индикатор действующей цены выбранной модели", async () => {
+    await withoutLlmEnabledEnv(async () => {
+      const at = new Date("2026-08-30T12:00:00.000Z");
+      const meteredConfig = { LLM_ENABLED: "1", LLM_ROUTE: "openai-api" };
+
+      // Метрируемый маршрут включён, каталог пуст → цены нет, вызовы отклонятся.
+      const missing = await new LlmLedgerService(
+        monitoringDb({ config: meteredConfig, prices: [] }),
+      ).monitoring(at);
+      assert.deepEqual(missing.catalogPrice, {
+        meteredEnabled: true,
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        hasActivePrice: false,
+      });
+
+      // Та же конфигурация, но у модели есть действующая цена.
+      const present = await new LlmLedgerService(
+        monitoringDb({
+          config: meteredConfig,
+          prices: [{ model: "gpt-5.6-sol", validFrom: new Date("2026-08-29T19:00:00.000Z") }],
+        }),
+      ).monitoring(at);
+      assert.equal(present.catalogPrice.hasActivePrice, true);
+      assert.equal(present.catalogPrice.meteredEnabled, true);
+
+      // LLM выключен → индикатор дремлет, отсутствие цены не тревога.
+      const disabled = await new LlmLedgerService(
+        monitoringDb({ config: { LLM_ENABLED: "0", LLM_ROUTE: "openai-api" }, prices: [] }),
+      ).monitoring(at);
+      assert.equal(disabled.catalogPrice.meteredEnabled, false);
+    });
   });
 
   it("monitoring fail-closed показывает invalid cap и не подменяет unknown cost резервом", async () => {

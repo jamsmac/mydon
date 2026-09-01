@@ -94,6 +94,12 @@ function monitoring(overrides: Partial<LlmLedgerMonitoring> = {}): LlmLedgerMoni
       last: null,
     },
     openCircuits: [],
+    catalogPrice: {
+      meteredEnabled: false,
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      hasActivePrice: true,
+    },
     ...overrides,
   };
 }

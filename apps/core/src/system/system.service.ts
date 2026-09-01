@@ -8,10 +8,12 @@ import {
   resetAccountingSourceCache,
   resolveAccountingSource,
 } from "../sales/accounting-source";
+import { findActiveCatalogPrice } from "../llm-ledger/llm-ledger.service";
 import {
   type EffectiveItem,
   isLlmProfileKey,
   LLM_PROFILE_KEYS,
+  meteredLlmRouteEnabled,
   OPENAI_LLM_BASE_URL,
   OPENAI_LLM_PRICE_PROVIDER_ID,
   resolveAll,
@@ -24,6 +26,17 @@ import {
 export interface LlmProfileUpdate {
   key: string;
   value: string;
+}
+
+/**
+ * Результат сохранения LLM-профиля. `profile` — действующие поля профиля (как
+ * и раньше), `warning` — видимое, но НЕ блокирующее предупреждение: профиль
+ * записан, но в текущей конфигурации Core отклонит все вызовы LLM. Это делает
+ * состояние «включено, но без цены» явным вместо молчаливого отказа ledger.
+ */
+export interface LlmProfileSaveResult {
+  profile: EffectiveItem[];
+  warning?: string;
 }
 
 const LLM_PROFILE_LOCK_KEY = "system-config:llm-profile";
@@ -200,7 +213,7 @@ export class SystemService {
     items: readonly LlmProfileUpdate[],
     updatedBy?: string,
     now: Date = new Date(),
-  ): Promise<EffectiveItem[]> {
+  ): Promise<LlmProfileSaveResult> {
     if (items.length === 0) throw new BadRequestException("LLM-профиль: список items пуст");
 
     const seen = new Set<string>();
@@ -259,7 +272,36 @@ export class SystemService {
     });
 
     const effective = await this.effective();
-    return effective.filter((item) => isLlmProfileKey(item.key));
+    const profile = effective.filter((item) => isLlmProfileKey(item.key));
+    const warning = await this.llmActivePriceWarning(effective, now);
+    return warning === null ? { profile } : { profile, warning };
+  }
+
+  /**
+   * Предупреждение «LLM включён метрируемым маршрутом, но у выбранной модели
+   * нет действующей цены». Возвращает null, если маршрут не метрируемый/не
+   * включён или цена есть.
+   *
+   * Проверяем ДЕЙСТВУЮЩИЕ значения (не сырой ввод) тем же критерием, что и
+   * fail-closed reserve: `meteredLlmRouteEnabled` + `findActiveCatalogPrice`
+   * (переиспользованы из config-spec и llm-ledger). Это предупреждение, а не
+   * отказ: владелец вправе готовить профиль ДО заливки реальной цены (её
+   * нельзя выдумывать — это деньги), но состояние обязано быть видимым.
+   */
+  private async llmActivePriceWarning(
+    effective: EffectiveItem[],
+    now: Date,
+  ): Promise<string | null> {
+    const valueOf = (key: string) => effective.find((i) => i.key === key)?.value ?? "";
+    if (!meteredLlmRouteEnabled(valueOf("LLM_ENABLED"), valueOf("LLM_ROUTE"))) return null;
+    const provider = valueOf("LLM_PRICE_PROVIDER_ID");
+    const model = valueOf("LLM_MODEL");
+    const price = await findActiveCatalogPrice(this.db, provider, model, now);
+    if (price) return null;
+    return (
+      `LLM включён, но у выбранной модели ${provider}/${model} нет действующей цены ` +
+      `в каталоге Core — вызовы LLM будут отклонены, пока цена не заведена. Профиль сохранён.`
+    );
   }
 
   /** Действующее значение одного тумблера (для сравнения «до/после»). */

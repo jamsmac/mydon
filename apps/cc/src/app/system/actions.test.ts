@@ -30,7 +30,7 @@ describe("saveLlmProfile", () => {
   beforeEach(() => vi.resetAllMocks());
 
   it("пишет полный allowlist одним атомарным вызовом", async () => {
-    mocks.saveLlmProfile.mockResolvedValue([]);
+    mocks.saveLlmProfile.mockResolvedValue({ profile: [] });
     const form = profileForm();
     // Даже подделанное лишнее поле не попадает в белый список payload.
     form.set("LLM_API_KEY", "never-send-this-secret");
@@ -53,8 +53,20 @@ describe("saveLlmProfile", () => {
     expect(mocks.revalidatePath).toHaveBeenCalledWith("/system");
   });
 
+  it("прокидывает предупреждение Core наверх (LLM включён, цены нет)", async () => {
+    mocks.saveLlmProfile.mockResolvedValue({
+      profile: [],
+      warning: "LLM включён, но у выбранной модели openai/gpt-5.6-sol нет действующей цены",
+    });
+    await expect(saveLlmProfile(profileForm())).resolves.toEqual({
+      ok: true,
+      warning: "LLM включён, но у выбранной модели openai/gpt-5.6-sol нет действующей цены",
+    });
+    expect(mocks.revalidatePath).toHaveBeenCalledWith("/system");
+  });
+
   it("превращает отсутствующий checkbox в LLM_ENABLED=0", async () => {
-    mocks.saveLlmProfile.mockResolvedValue([]);
+    mocks.saveLlmProfile.mockResolvedValue({ profile: [] });
     await saveLlmProfile(profileForm(false));
     expect(mocks.saveLlmProfile.mock.calls[0]?.[0].items[0]).toEqual({
       key: "LLM_ENABLED",

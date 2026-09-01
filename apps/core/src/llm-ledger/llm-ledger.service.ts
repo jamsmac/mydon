@@ -20,7 +20,7 @@ import {
 } from "@mydon/shared";
 import { and, asc, eq, gt, gte, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
-import { resolveConfigValue } from "../system/config-spec";
+import { meteredLlmRouteEnabled, resolveConfigValue } from "../system/config-spec";
 import type {
   LlmTokenUsageDto,
   RecoverPreDispatchLlmDto,
@@ -228,6 +228,17 @@ export class LlmLedgerService {
 
     const config = rowsToConfig(configRows);
     const globalCap = parseCap(globalCapValue(config, process.env), "глобальный LLM-потолок");
+
+    // Действующая ли цена у выбранной модели. Тот же провайдер/модель и тот же
+    // критерий, что использует reserve: если маршрут метрируемый и цены нет,
+    // ledger молча отклонит все вызовы — статус обязан показать это явно.
+    const priceProvider = resolveConfigValue("LLM_PRICE_PROVIDER_ID", config, process.env);
+    const priceModel = resolveConfigValue("LLM_MODEL", config, process.env);
+    const meteredEnabled = meteredLlmRouteEnabled(
+      resolveConfigValue("LLM_ENABLED", config, process.env),
+      resolveConfigValue("LLM_ROUTE", config, process.env),
+    );
+    const activePrice = await findActiveCatalogPrice(this.db, priceProvider, priceModel, at);
     const daily = dailyRows[0];
     const knownCost = moneyNano(daily?.knownCostUsd);
     const exposure = moneyNano(daily?.globalExposureUsd);
@@ -262,6 +273,12 @@ export class LlmLedgerService {
         last: monitoringLastFailure(lastFailureRows[0]),
       },
       openCircuits: monitoringOpenCircuits(circuitRows, frame.end),
+      catalogPrice: {
+        meteredEnabled,
+        provider: priceProvider,
+        model: priceModel,
+        hasActivePrice: activePrice !== undefined,
+      },
     };
   }
 
@@ -1001,7 +1018,7 @@ async function agentById(tx: Tx, id: string): Promise<AgentRow | undefined> {
   return row;
 }
 
-async function activeProviderPrices(tx: Tx, provider: string, at: Date): Promise<PriceRow[]> {
+async function activeProviderPrices(tx: Tx | Db, provider: string, at: Date): Promise<PriceRow[]> {
   return tx
     .select()
     .from(llmModelPrice)
@@ -1012,6 +1029,23 @@ async function activeProviderPrices(tx: Tx, provider: string, at: Date): Promise
         or(isNull(llmModelPrice.validTo), gt(llmModelPrice.validTo, at)),
       ),
     );
+}
+
+/**
+ * Действующая каталожная цена для `provider/model` на момент `at`, или
+ * `undefined`, если её нет. ЕДИНЫЙ критерий с fail-closed `reserve`
+ * (`activeProviderPrices` + `selectCatalogPrice`): валидация профиля и статус
+ * не должны расходиться с ledger в ответе «есть ли цена». Экспортируется как
+ * чистая функция — потребителю (SystemService) не нужен ни DI, ни импорт
+ * класса сервиса.
+ */
+export async function findActiveCatalogPrice(
+  db: Tx | Db,
+  provider: string,
+  model: string,
+  at: Date,
+): Promise<PriceRow | undefined> {
+  return selectCatalogPrice(await activeProviderPrices(db, provider, at), model);
 }
 
 export function providerCircuitWindow(at: Date): { start: Date; end: Date } {

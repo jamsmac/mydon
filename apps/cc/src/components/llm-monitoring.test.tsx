@@ -64,6 +64,12 @@ const monitoring: LlmLedgerMonitoring = {
       reason: "3 ошибки провайдера за сутки",
     },
   ],
+  catalogPrice: {
+    meteredEnabled: true,
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    hasActivePrice: true,
+  },
 };
 
 describe("LLM-мониторинг", () => {
@@ -269,6 +275,58 @@ describe("LLM-мониторинг", () => {
     expect(screen.getByRole("progressbar", { name: "Дневная экспозиция LLM-бюджета" })).toHaveValue(
       1,
     );
+  });
+
+  it("тревожит, когда LLM включён, но у модели нет действующей цены", () => {
+    const { container } = render(
+      <LlmMonitoring
+        monitoring={{
+          ...monitoring,
+          catalogPrice: {
+            meteredEnabled: true,
+            provider: "openai",
+            model: "gpt-5.6-sol",
+            hasActivePrice: false,
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText("LLM включён, но вызовы отклоняются")).toBeVisible();
+    const row = container.querySelector(".llm-catalog-price-row");
+    expect(row).toHaveTextContent("openai/gpt-5.6-sol");
+    expect(row).toHaveTextContent("действующей цены нет — вызовы будут отклонены");
+    expect(row?.querySelector(".pill.bad")).toHaveTextContent("нет цены");
+  });
+
+  it("не тревожит, когда у выбранной модели есть действующая цена", () => {
+    const { container } = render(<LlmMonitoring monitoring={monitoring} />);
+
+    expect(screen.queryByText("LLM включён, но вызовы отклоняются")).toBeNull();
+    const row = container.querySelector(".llm-catalog-price-row");
+    expect(row).toHaveTextContent("действующая цена есть");
+    expect(row?.querySelector(".pill.ok")).toHaveTextContent("есть");
+  });
+
+  it("при выключенном метрируемом маршруте отсутствие цены не тревога", () => {
+    const { container } = render(
+      <LlmMonitoring
+        monitoring={{
+          ...monitoring,
+          catalogPrice: {
+            meteredEnabled: false,
+            provider: "openai",
+            model: "gpt-5.6-sol",
+            hasActivePrice: false,
+          },
+        }}
+      />,
+    );
+
+    expect(screen.queryByText("LLM включён, но вызовы отклоняются")).toBeNull();
+    const row = container.querySelector(".llm-catalog-price-row");
+    expect(row).toHaveTextContent("метрируемый маршрут выключен");
+    expect(row?.querySelector(".pill")).toHaveTextContent("не требуется");
   });
 
   it("явно сообщает, когда снимок Core получить не удалось", () => {

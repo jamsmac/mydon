@@ -23,7 +23,9 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
   const router = useRouter();
   const [draft, setDraft] = useState<LlmProfileValues>(initial);
   const [pending, startTransition] = useTransition();
-  const [message, setMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [message, setMessage] = useState<{ kind: "ok" | "warn" | "err"; text: string } | null>(
+    null,
+  );
 
   const set = (key: LlmProfileKey, value: string) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -61,7 +63,11 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
             try {
               const result = await saveLlmProfile(form);
               if (result.ok) {
-                setMessage({ kind: "ok", text: "LLM-профиль сохранён" });
+                setMessage(
+                  result.warning
+                    ? { kind: "warn", text: result.warning }
+                    : { kind: "ok", text: "LLM-профиль сохранён" },
+                );
                 router.refresh();
               } else {
                 setMessage({ kind: "err", text: result.error ?? "Не получилось сохранить" });
@@ -232,7 +238,17 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
             {pending ? "Сохраняю…" : "Сохранить настройки"}
           </button>
           {message && (
-            <span className={message.kind === "ok" ? "ok-text" : "err-text"} aria-live="polite">
+            <span
+              className={
+                message.kind === "ok"
+                  ? "ok-text"
+                  : message.kind === "warn"
+                    ? "warn-text"
+                    : "err-text"
+              }
+              role={message.kind === "warn" ? "alert" : undefined}
+              aria-live={message.kind === "warn" ? "assertive" : "polite"}
+            >
               {message.text}
             </span>
           )}

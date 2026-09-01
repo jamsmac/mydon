@@ -124,6 +124,23 @@ export interface LlmLedgerMonitoring {
     /** Fixed safe category, never raw settlement metadata/reason. */
     reason: string | null;
   }>;
+  /**
+   * Есть ли у выбранной метрируемой модели действующая каталожная цена.
+   *
+   * Когда LLM включён метрируемым маршрутом, но цены на `provider/model` в
+   * каталоге нет, `reserve` fail-closed отклоняет КАЖДЫЙ вызов: LLM «включён»,
+   * но молча не работает. Этот блок делает такое состояние видимым в статусе —
+   * а не только в отдельных отказах ledger, которые владелец не видит. Поля
+   * не-секретны: `provider/model` берутся из белого списка настроек.
+   */
+  catalogPrice: {
+    /** Метрируемый (платный) маршрут включён: LLM_ENABLED=1 и route требует цены. */
+    meteredEnabled: boolean;
+    provider: string;
+    model: string;
+    /** false при `meteredEnabled` → все вызовы LLM будут отклонены Core. */
+    hasActivePrice: boolean;
+  };
 }
 
 /** Стабильная идентичность пользовательского запроса, заданная сурфейсом. */
