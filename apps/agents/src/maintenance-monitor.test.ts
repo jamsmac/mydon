@@ -163,6 +163,11 @@ describe("Монитор графиков", () => {
     assert.equal(r.tasks, 0);
     assert.equal(r.unclaimed, 0, "событие привязано к факту создания задачи");
     assert.ok(!events.some((e) => e.type === "maintenance.unclaimed"));
+    // Прод 28.08–02.09.2026: повтор дня ронял ВСЕ 19 планов ежедневно —
+    // старый контракт отдавал пустое тело, клиент падал на разборе. Повтор
+    // дня — штатный исход, ошибок в прогоне быть не должно.
+    assert.equal(r.errors.length, 0, "повтор дня — не сбой прогона");
+    assert.ok(!events.some((e) => e.type === "maintenance.monitor_failed"));
   });
 
   it("сбой на одном нормативе не роняет остальные", async () => {

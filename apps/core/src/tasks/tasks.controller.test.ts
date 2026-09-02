@@ -331,7 +331,7 @@ describe("EnsureForDayDto: dayKey — только голые сутки", () =>
 });
 
 describe("TasksController.ensureForDay: направление", () => {
-  it("пробрасывает validated domain в TasksService", () => {
+  it("пробрасывает validated domain в TasksService", async () => {
     let received: Record<string, unknown> | undefined;
     const controller = new TasksController(
       {
@@ -343,7 +343,7 @@ describe("TasksController.ensureForDay: направление", () => {
       fakeDb(),
     );
 
-    controller.ensureForDay({
+    await controller.ensureForDay({
       title: "Мойка миксера",
       ownerKind: "human",
       domain: "vendhub",
@@ -351,6 +351,39 @@ describe("TasksController.ensureForDay: направление", () => {
     });
 
     assert.equal(received?.domain, "vendhub");
+  });
+});
+
+describe("TasksController.ensureForDay: форма ответа — явный JSON, никогда не пустое тело", () => {
+  const тело = {
+    title: "Мойка миксера",
+    ownerKind: "human" as const,
+    dayKey: "2026-08-26",
+  };
+
+  it("повтор дня → { created: false }, а не null: null Nest отдаёт ПУСТЫМ телом, и клиент агентов падал на res.json() каждый день", async () => {
+    const controller = new TasksController(
+      { ensureForDay: () => Promise.resolve(null) } as never,
+      fakeDb(),
+    );
+
+    const res = await controller.ensureForDay(тело);
+
+    assert.deepEqual(res, { created: false });
+  });
+
+  it("первый прогон дня → { created: true, id, task }; id продублирован на верхнем уровне ради старого клиента (row?.id)", async () => {
+    const созданная = { id: "6a51c3a4-8f7e-4a10-9d40-000000000001", title: "Мойка миксера" };
+    const controller = new TasksController(
+      { ensureForDay: () => Promise.resolve(созданная) } as never,
+      fakeDb(),
+    );
+
+    const res = await controller.ensureForDay(тело);
+
+    assert.ok(res.created, "первый прогон обязан отвечать created: true");
+    assert.equal(res.id, созданная.id, "старый агент различает исходы по row?.id");
+    assert.deepEqual(res.task, созданная);
   });
 });
 

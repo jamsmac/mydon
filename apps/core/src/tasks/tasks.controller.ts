@@ -480,12 +480,23 @@ export class TasksController {
   /**
    * Идемпотентная постановка повторяющейся задачи на конкретный день.
    *
-   * Вызывает монитор графиков. Повтор в тот же день возвращает null — дубль
-   * отсекает уникальный индекс в БД, а не проверка перед вставкой.
+   * Вызывает монитор графиков. Дубль по-прежнему отсекает уникальный индекс в
+   * БД, а не проверка перед вставкой — меняется только форма ответа: повтор в
+   * тот же день (и автомат вне эксплуатации) отвечает `{ created: false }`.
+   *
+   * ПОЧЕМУ НЕ `null`. `return null` из контроллера Nest отдаёт 201 с ПУСТЫМ
+   * телом, и `res.json()` на стороне агентов падал с `SyntaxError: Unexpected
+   * end of JSON input` — монитор графиков валился КАЖДЫЙ ДЕНЬ на всех 19
+   * планах (прод, события `maintenance.monitor_failed` 28.08–02.09.2026).
+   * Явный JSON закрывает это на источнике.
+   *
+   * `id` продублирован на верхнем уровне рядом с `task` сознательно: старый
+   * клиент агентов (до фикса) различал исходы по `row?.id` — при неатомарной
+   * выкатке «новый Core + старый агент» он продолжает верно считать created.
    */
   @Post("ensure-for-day")
-  ensureForDay(@Body() dto: EnsureForDayDto) {
-    return this.tasks.ensureForDay({
+  async ensureForDay(@Body() dto: EnsureForDayDto) {
+    const created = await this.tasks.ensureForDay({
       title: dto.title,
       ownerKind: dto.ownerKind,
       dayKey: dto.dayKey,
@@ -498,6 +509,8 @@ export class TasksController {
       ...(dto.source ? { source: dto.source } : {}),
       ...(dto.createdBy ? { createdBy: dto.createdBy } : {}),
     });
+    if (!created) return { created: false as const };
+    return { created: true as const, id: created.id, task: created };
   }
 
   /** Durable, exact-replay materialization of one metered cron occurrence. */
