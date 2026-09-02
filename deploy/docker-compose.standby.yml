@@ -143,6 +143,8 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
+      # Подложка карты — паритет с production mydon-cc (пусто → тайлы OSM).
+      MAP_TILES_URL: ${MAP_TILES_URL:-}
       LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
     volumes:
       - ${STANDBY_LLM_OUTBOX_DIR:?STANDBY_LLM_OUTBOX_DIR is required (standby-*.sh export it)}/cc:/data/llm-close/cc
