@@ -3,11 +3,13 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { auditLog, entity, globerentUnit, moneyFlow, org, systemConfig, unitReserve } from "@mydon/db";
 import {
   cogsBreakdown,
+  COMMISSION_METHODS,
   computeCommission,
   RESERVE_ALLOWED,
   SALE_START_ALLOWED,
@@ -61,12 +63,30 @@ export interface UnitCost extends CogsBreakdown {
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * Провал шага ПОСЛЕ фактической записи комиссии в money_flow: деньги уже
+ * начислены, и текст «не начислена» в логе/ленте спровоцировал бы ручное
+ * повторное начисление во «Финансах» — двойную выплату. Несёт id уже
+ * созданной строки комиссии, чтобы след не врал про шаг провала.
+ */
+class CommissionTrailError extends Error {
+  constructor(
+    readonly accruedFlowId: string | null,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "CommissionTrailError";
+  }
+}
+
+/**
  * Склад техники GLOBERENT — перенос warehouse_vehicles PROMACH.
  * Все смены статуса идут через applyAction: единая матрица переходов из
  * shared, идемпотентный UPDATE (WHERE status = ANY), аудит и событие.
  */
 @Injectable()
 export class UnitsService {
+  private readonly log = new Logger(UnitsService.name);
+
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly events: EventsService,
@@ -466,12 +486,47 @@ export class UnitsService {
       return updated;
     }).then(async (updated) => {
       // Закрытие сделки — начисление комиссии методом, который выбрал
-      // владелец тумблером «Системы». Провал не роняет закрытие.
+      // владелец тумблером «Системы». Провал не роняет закрытие (осознанный
+      // дизайн: комиссия не блокирует сделку, её можно завести руками во
+      // вкладке «Финансы»), но обязан быть ВИДЕН — лог + событие в ленту,
+      // иначе менеджер останется без комиссии, и никто не узнает.
       if (stage === "CLOSED") {
         try {
           await this.accrueCommission(updated, actorRef);
-        } catch {
-          // комиссию можно завести руками во вкладке «Финансы»
+        } catch (e) {
+          const trail = e instanceof CommissionTrailError ? e : null;
+          const message = e instanceof Error ? e.message : String(e);
+          // Шаг провала различается: если строка комиссии УЖЕ легла в
+          // money_flow (упал только след — audit/событие), текст «не
+          // начислена» врал бы, и оператор завёл бы комиссию руками во
+          // «Финансах» второй раз — двойная выплата.
+          this.log.error(
+            trail !== null
+              ? `Комиссия по сделке ${updated.id} (${updated.code}) НАЧИСЛЕНА (money_flow ${trail.accruedFlowId ?? "без id"}), но след закрытия не записан: ${message} — повторно руками не заводить`
+              : `Комиссия по сделке ${updated.id} (${updated.code}) не начислена: ${message}`,
+          );
+          try {
+            await this.events.record({
+              source: "units",
+              type: "unit.commission_failed",
+              payload: {
+                unitId: updated.id,
+                code: updated.code,
+                salesPrice: updated.salesPrice,
+                error: message,
+                // Признак шага провала: id уже созданной строки комиссии.
+                // null — начисление не дошло до money_flow, можно заводить
+                // руками; не null — строка есть, руками НЕ повторять.
+                accruedFlowId: trail?.accruedFlowId ?? null,
+              },
+            });
+          } catch (evErr) {
+            // Событие — best-effort: его провал тем более не должен ронять
+            // уже закрытую сделку. След остаётся хотя бы в логе.
+            this.log.error(
+              `Событие unit.commission_failed по ${updated.id} не записалось: ${evErr instanceof Error ? evErr.message : String(evErr)}`,
+            );
+          }
         }
       }
       return updated;
@@ -490,7 +545,17 @@ export class UnitsService {
       .from(systemConfig)
       .where(inArray(systemConfig.key, ["GR_COMMISSION_METHOD", "GR_COMMISSION_RATE_PCT"]));
     const byKey = new Map(cfg.map((c) => [c.key, c.value]));
-    const method = (byKey.get("GR_COMMISSION_METHOD") ?? "flat_bonus") as CommissionMethod;
+    // Тумблер валидируется белым списком, не слепым кастом: кривое значение
+    // в system_config считается по дефолту flat_bonus с warn, а не бросает
+    // и не превращается в неведомый метод.
+    const rawMethod = byKey.get("GR_COMMISSION_METHOD") ?? "flat_bonus";
+    let method: CommissionMethod;
+    if ((COMMISSION_METHODS as readonly string[]).includes(rawMethod)) {
+      method = rawMethod as CommissionMethod;
+    } else {
+      this.log.warn(`GR_COMMISSION_METHOD=«${rawMethod}» не из ${COMMISSION_METHODS.join("/")} — считаю по дефолту flat_bonus`);
+      method = "flat_bonus";
+    }
     const ratePct = Number(byKey.get("GR_COMMISSION_RATE_PCT") ?? "8");
 
     const cost = await this.cost(unit.id);
@@ -505,43 +570,56 @@ export class UnitsService {
       qty: 1,
     });
 
-    if (result.commission > 0) {
-      const created = await this.db
-        .insert(moneyFlow)
-        .values({
-          orgId: unit.orgId,
-          domain: unit.domain,
-          direction: "out",
-          amount: String(result.commission),
-          currency: "UZS",
-          source: "manual",
-          category: "commission",
-          isOfficial: false,
-          purpose: `комиссия менеджера по ${unit.code} (метод ${result.method})`,
-          date: new Date(),
-          status: "planned",
+    let accrued = false;
+    let accruedFlowId: string | null = null;
+    try {
+      if (result.commission > 0) {
+        const created = await this.db
+          .insert(moneyFlow)
+          .values({
+            orgId: unit.orgId,
+            domain: unit.domain,
+            direction: "out",
+            amount: String(result.commission),
+            currency: "UZS",
+            source: "manual",
+            category: "commission",
+            isOfficial: false,
+            purpose: `комиссия менеджера по ${unit.code} (метод ${result.method})`,
+            date: new Date(),
+            status: "planned",
+            unitId: unit.id,
+          })
+          .returning();
+        accrued = true;
+        accruedFlowId = created[0]?.id ?? null;
+        await this.db.insert(auditLog).values({
+          actorKind: "system",
+          actorRef,
+          action: "unit.commission_accrued",
+          target: unit.id,
+          after: created[0],
+        });
+      }
+      await this.events.record({
+        source: "units",
+        type: "unit.sale_closed",
+        payload: {
           unitId: unit.id,
-        })
-        .returning();
-      await this.db.insert(auditLog).values({
-        actorKind: "system",
-        actorRef,
-        action: "unit.commission_accrued",
-        target: unit.id,
-        after: created[0],
+          code: unit.code,
+          method: result.method,
+          commission: result.commission,
+          note: result.note,
+        },
       });
+    } catch (e) {
+      // Строка комиссии УЖЕ закоммичена в money_flow — дальше падал только
+      // след (audit_log / unit.sale_closed). Метим шаг провала, иначе catch
+      // в setSalesStage скажет «не начислена» и спровоцирует повторное
+      // ручное начисление.
+      if (accrued) throw new CommissionTrailError(accruedFlowId, e);
+      throw e;
     }
-    await this.events.record({
-      source: "units",
-      type: "unit.sale_closed",
-      payload: {
-        unitId: unit.id,
-        code: unit.code,
-        method: result.method,
-        commission: result.commission,
-        note: result.note,
-      },
-    });
   }
 
   /** Сводка по группам конвейера — плитки дашборда. */
