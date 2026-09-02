@@ -3,6 +3,7 @@ import { PLACE_TYPES, PLACE_TYPE_HINTS, PLACE_TYPE_LABELS, placeTypeLabel } from
 import { core, CoreUnavailable, type CoffeePlacementRow, type Entity } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
 import { NewPlaceForm } from "../../components/place-new";
+import { mapTilesFromEnv } from "../../lib/map-tiles";
 
 export const dynamic = "force-dynamic";
 
@@ -77,7 +78,7 @@ export default async function PlacesPage() {
 
       <section className="group-block">
         <div className="section-title">Новое место</div>
-        <NewPlaceForm />
+        <NewPlaceForm tiles={mapTilesFromEnv()} />
       </section>
 
       {byType.map((g) => (

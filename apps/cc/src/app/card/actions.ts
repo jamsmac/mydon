@@ -197,9 +197,36 @@ export async function saveEntity(id: string, form: FormData): Promise<ActionResu
   try {
     const fresh = await core.entity(id);
     const freshAttrs = fresh.attrs ?? {};
+    // Поле-тёзка через «+ Поле»: плитку объектного поля («поставка») владелец
+    // ВИДИТ в режиме чтения, а в форме её нет (фильтр объектов в
+    // entity-editor.tsx) — добавить его заново руками выглядит логично. Молча
+    // перетереть введённое свежим значением и ответить «Сохранено» — успех-
+    // «пустышка»; отказываем честно, данные целее ввода.
+    if (newKey.length > 0 && newValue.length > 0) {
+      const занято = freshAttrs[newKey];
+      if (
+        MANAGED_ATTR_KEYS.includes(newKey) ||
+        (typeof занято === "object" && занято !== null)
+      ) {
+        return {
+          ok: false,
+          error: `Поле «${newKey}» ведётся импортом или своим редактором — руками его не заменить`,
+        };
+      }
+    }
     for (const k of MANAGED_ATTR_KEYS) {
       if (freshAttrs[k] !== undefined) attrs[k] = freshAttrs[k];
       else delete attrs[k];
+    }
+    // Объектные значения БЕЗ своего редактора (например «поставка» у товаров —
+    // сведения импорта mydon-stock) форма паспорта не возит вовсе (см. фильтр
+    // в entity-editor.tsx): текстовое поле показало бы «[object Object]» и той
+    // же строкой перетёрло бы данные. attrs собираются из формы заново, поэтому
+    // без этой защиты сохранение паспорта молча УДАЛИЛО бы такое поле — берём
+    // из свежей карточки всё объектное, чего форма не прислала. Ключ заранее не
+    // известен, поэтому списком MANAGED_ATTR_KEYS не обойтись.
+    for (const [k, v] of Object.entries(freshAttrs)) {
+      if (typeof v === "object" && v !== null && !form.has(`attr:${k}`)) attrs[k] = v;
     }
   } catch (err) {
     if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition, type ReactNode } from "react";
 import { saveLocation } from "../app/card/actions";
+import type { MapTiles } from "../lib/map-tiles";
 
 // Карта тянет leaflet — грузим только когда владелец её открыл.
 const MapPicker = dynamic(() => import("./map-picker").then((m) => m.MapPicker), {
@@ -35,6 +36,7 @@ export function LocationPanel({
   address,
   sourceStays,
   sourceMoves,
+  tiles,
 }: {
   machineId: string;
   periods: LocationPeriod[];
@@ -44,6 +46,8 @@ export function LocationPanel({
   /** История стоянок, восстановленная из заказов источника (если она есть). */
   sourceStays?: ReactNode;
   sourceMoves?: number;
+  /** Подложка карты с сервера (MAP_TILES_URL); без пропа — бесключевой OSM. */
+  tiles?: MapTiles;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -123,7 +127,7 @@ export function LocationPanel({
                 placeholder="Ташкент, ул. Олмачи, 2 этаж"
               />
             </label>
-            <MapPicker lat={la} lng={ln} onChange={(a, b) => { setLa(a); setLn(b); }} />
+            <MapPicker lat={la} lng={ln} onChange={(a, b) => { setLa(a); setLn(b); }} {...(tiles ? { tiles } : {})} />
             <div className="form-actions">
               <button type="button" className="btn pri" onClick={save} disabled={pending}>
                 {pending ? "Сохраняю…" : "Сохранить"}

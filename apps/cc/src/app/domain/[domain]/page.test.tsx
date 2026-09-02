@@ -11,6 +11,7 @@ const CORE_METHODS = [
   "coffeeBunkerConfig",
   "coffeeFillStatus",
   "coffeeNormFact",
+  "coffeeOrdersStatus",
   "coffeeOrdersSummary",
   "collections",
   "collectionsSummary",
@@ -52,6 +53,7 @@ const mocks = vi.hoisted(() => {
     "coffeeBunkerConfig",
     "coffeeFillStatus",
     "coffeeNormFact",
+    "coffeeOrdersStatus",
     "coffeeOrdersSummary",
     "collections",
     "collectionsSummary",
@@ -281,5 +283,141 @@ describe("VendHub-итоги: недоступный источник не ск�
       t.querySelector(".wl")?.textContent?.includes("Открыто"),
     );
     expect(openKpi).toBeUndefined();
+  });
+});
+
+describe("свежесть кофе-данных: давность видима, а не молчит (аудит 02.09)", () => {
+  const COFFEE_SUMMARY = {
+    всего: { выручка: 3_000_000, чашек: 200, среднийЧек: 15000 },
+    неВыдано: 0,
+    поТоварам: [],
+    поДням: [],
+    поАвтоматам: [],
+  };
+  const ordersStatus = (последний: string | null) => ({
+    всего: 1000,
+    вВыручке: 990,
+    первый: "2026-01-01T00:00:00.000Z",
+    последний,
+  });
+
+  // Копия shortRuDate страницы: «24 июн» по Ташкенту, без точки после месяца —
+  // тест сверяет именно ту дату, которую увидит владелец.
+  const shortRu = (iso: string) =>
+    new Date(iso)
+      .toLocaleDateString("ru-RU", { timeZone: "Asia/Tashkent", day: "numeric", month: "short" })
+      .replace(/\.$/, "");
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    for (const name of CORE_METHODS) mocks.core[name]!.mockResolvedValue(null);
+    mocks.core.entitiesOf!.mockResolvedValue([]);
+    mocks.core.people!.mockResolvedValue([]);
+    mocks.core.tasks!.mockResolvedValue([]);
+    mocks.core.contractorsAll!.mockResolvedValue([]);
+    mocks.core.obligations!.mockResolvedValue({ ...NO_OBLIGATIONS, domain: "vendhub" });
+    mocks.core.salesSummary!.mockResolvedValue({
+      days30: { amount: 5_000_000, qty: 100 },
+      yesterday: { amount: 100_000, qty: 5 },
+      lastSaleDt: "2026-08-30T10:00:00.000Z",
+    });
+    mocks.core.coffeeOrdersSummary!.mockResolvedValue(COFFEE_SUMMARY);
+  });
+
+  it("свежий кофе (последний заказ вчера) → обычная подпись с датой, без тревоги", async () => {
+    // «Вчера» относительно текущего дня: давность 1 сутки — норма, не тревога.
+    const lastAt = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    mocks.core.coffeeOrdersStatus!.mockResolvedValue(ordersStatus(lastAt));
+
+    const { container } = await renderResolved("vendhub", "overview");
+    const text = container.textContent ?? "";
+
+    expect(text).toContain(`кофе: данные до ${shortRu(lastAt)}`);
+    expect(text).not.toContain("импорт стоит");
+    expect(text).not.toContain("свежесть кофе: данные недоступны");
+    // Чип свежести в секции «Кофе» — нейтральный, не тревожный (не .h).
+    const chip = Array.from(container.querySelectorAll(".chip")).find((c) =>
+      c.textContent?.includes("данные до"),
+    );
+    expect(chip).toBeDefined();
+    // classList, а не подстрока: само слово «chip» содержит букву «h».
+    expect(chip!.classList.contains("h")).toBe(false);
+    expect(chip!.classList.contains("g")).toBe(false);
+  });
+
+  it("давность больше суток → заметная (тревожная) пометка с датой и «импорт стоит»", async () => {
+    // Кофе-импорт стоит почти две недели — сценарий аудита (стоял с 20.08).
+    const lastAt = new Date(Date.now() - 13 * 24 * 3600 * 1000).toISOString();
+    mocks.core.coffeeOrdersStatus!.mockResolvedValue(ordersStatus(lastAt));
+
+    const { container } = await renderResolved("vendhub", "overview");
+    const text = container.textContent ?? "";
+
+    expect(text).toContain("импорт стоит");
+    // Пометка — тревожный чип (.chip.h), не зелёный и не нейтральный, с датой
+    // последнего заказа; стоит и у секции «Кофе», и у плитки «Выручка».
+    const hotChips = Array.from(container.querySelectorAll(".chip.h")).filter((c) =>
+      c.textContent?.includes("данные до"),
+    );
+    expect(hotChips.length).toBeGreaterThanOrEqual(2);
+    for (const chip of hotChips) expect(chip.textContent).toContain(shortRu(lastAt));
+  });
+
+  it("провал запроса статуса → «свежесть кофе: данные недоступны», а не молчание", async () => {
+    mocks.core.coffeeOrdersStatus!.mockRejectedValue(new Error("status down"));
+
+    const { container } = await renderResolved("vendhub", "overview");
+    const text = container.textContent ?? "";
+
+    expect(text).toContain("свежесть кофе: данные недоступны");
+    // Неизвестная свежесть ≠ свежо: пометка тревожная, не нейтральная.
+    const hotChip = Array.from(container.querySelectorAll(".chip.h")).find((c) =>
+      c.textContent?.includes("данные недоступны"),
+    );
+    expect(hotChip).toBeDefined();
+  });
+
+  it("пустая таблица заказов (последний === null) → «заказов в базе нет» тревожным чипом", async () => {
+    // Статус ответил, но заказов нет вовсе: импорт никогда не бежал или факт
+    // полностью потерян. Это предельно несвежее состояние — чип тревожный,
+    // а не спокойное нейтральное «заказов нет».
+    mocks.core.coffeeOrdersStatus!.mockResolvedValue(ordersStatus(null));
+
+    const { container } = await renderResolved("vendhub", "overview");
+    const text = container.textContent ?? "";
+
+    expect(text).toContain("кофе: заказов в базе нет");
+    const hotChip = Array.from(container.querySelectorAll(".chip.h")).find((c) =>
+      c.textContent?.includes("заказов в базе нет"),
+    );
+    expect(hotChip).toBeDefined();
+  });
+
+  it("контейнеры с чипом свежести переносят элементы (flex-wrap) — чип не клипается на узких экранах", async () => {
+    // .chip несёт white-space: nowrap, а .sect-h и .wt .wf — flex без
+    // переноса: на min-колонке 260px чип «кофе: данные до … · импорт стоит»
+    // вылезал бы за границу плитки/шапки. Проверяем оба места.
+    const lastAt = new Date(Date.now() - 13 * 24 * 3600 * 1000).toISOString();
+    mocks.core.coffeeOrdersStatus!.mockResolvedValue(ordersStatus(lastAt));
+
+    const { container } = await renderResolved("vendhub", "overview");
+    const chips = Array.from(container.querySelectorAll(".chip.h")).filter((c) =>
+      c.textContent?.includes("данные до"),
+    );
+    // Чип стоит и в шапке «Кофе» (.sect-h), и в подвале «Выручки» (.wf).
+    expect(chips.length).toBeGreaterThanOrEqual(2);
+    for (const chip of chips) {
+      const holder = chip.parentElement as HTMLElement;
+      expect(["sect-h", "wf"].some((cls) => holder.classList.contains(cls))).toBe(true);
+      expect(holder.style.flexWrap).toBe("wrap");
+    }
+  });
+
+  it("снек «Продано вчера» подписан «данные приходят к 08:00» — утренний ноль не тревога", async () => {
+    const { container } = await renderResolved("vendhub", "overview");
+    const tile = Array.from(container.querySelectorAll(".wt")).find((t) =>
+      t.querySelector(".wl")?.textContent?.includes("Продано вчера"),
+    );
+    expect(tile?.querySelector(".wf")?.textContent).toContain("данные приходят к 08:00");
   });
 });
