@@ -346,6 +346,10 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
+      # Подложка карты панели (Leaflet-шаблон с {z}/{x}/{y}, см. .env.example).
+      # Пусто → бесключевые тайлы OSM. Этот env-блок — явный белый список:
+      # без строки здесь значение из серверного .env в контейнер не попадёт.
+      MAP_TILES_URL: ${MAP_TILES_URL:-}
       LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
     volumes:
       # Server actions сначала fsync-ят exact settlement на host.

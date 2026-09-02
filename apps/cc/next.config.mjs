@@ -9,6 +9,16 @@ const nextConfig = {
   // claude-agent-sdk здесь НЕ нужен: он грузится настоящим ESM-import
   // в рантайме (см. packages/assistant/src/llm-subscription.ts).
   serverExternalPackages: ["@anthropic-ai/sdk"],
+  // Короткие адреса направлений из документации (CLAUDE.md, README): реальные
+  // страницы живут под /domain/<имя>. /mydon сюда НЕ входит — это настоящий
+  // роут (src/app/mydon), redirect закрыл бы его собой.
+  async redirects() {
+    return ["vendhub", "globerent", "personal"].map((d) => ({
+      source: `/${d}`,
+      destination: `/domain/${d}`,
+      permanent: true,
+    }));
+  },
 };
 
 export default nextConfig;

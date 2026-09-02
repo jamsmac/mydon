@@ -301,6 +301,24 @@ export class AgentsCoreClient {
     init?: RequestInit,
     timeoutMs = this.timeoutMs,
   ): Promise<T> {
+    const text = await this.requestText(path, init, timeoutMs);
+    return JSON.parse(text) as T;
+  }
+
+  /**
+   * Тот же запрос, но тело отдаётся сырой строкой — без `res.json()`.
+   *
+   * Нужен вызовам, где ПУСТОЕ тело — легальный ответ, а не авария: `return
+   * null` из контроллера Nest уходит как 201 без тела, и `res.json()` на нём
+   * падает с `SyntaxError: Unexpected end of JSON input`. Именно так монитор
+   * графиков ТО падал каждый день на всех 19 планах (прод, события
+   * `maintenance.monitor_failed` 28.08–02.09.2026).
+   */
+  private async requestText(
+    path: string,
+    init?: RequestInit,
+    timeoutMs = this.timeoutMs,
+  ): Promise<string> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -314,7 +332,7 @@ export class AgentsCoreClient {
         },
       });
       if (!res.ok) throw new AgentsCoreHttpError(res.status, path);
-      return (await res.json()) as T;
+      return await res.text();
     } finally {
       clearTimeout(timer);
     }
@@ -976,13 +994,32 @@ export class AgentsCoreClient {
   /**
    * Идемпотентная постановка задачи на день. Повторный прогон монитора
    * в тот же день дубля не создаёт — ставку делает уникальный индекс в БД.
+   *
+   * Разбор ответа обязан переживать ОБЕ версии Core — выкатка не атомарна:
+   * - новый Core: `{ created: true, id, task }` либо `{ created: false }`;
+   * - старый Core: строка задачи при создании, ПУСТОЕ тело при повторе дня
+   *   (`return null` контроллера Nest — 201 без тела; `res.json()` на нём
+   *   и ронял монитор ежедневно на всех планах).
+   * Пустое тело и `null` трактуем как «уже есть», а не как ошибку.
    */
   async ensureTaskForDay(input: EnsureTaskInput): Promise<{ created: boolean; taskId?: string }> {
-    const row = await this.request<{ id?: string } | null>("/tasks/ensure-for-day", {
+    const text = await this.requestText("/tasks/ensure-for-day", {
       method: "POST",
       body: JSON.stringify(input),
     });
-    return row?.id ? { created: true, taskId: row.id } : { created: false };
+    if (text.trim() === "") return { created: false };
+    const row = JSON.parse(text) as {
+      created?: boolean;
+      id?: string;
+      task?: { id?: string };
+    } | null;
+    if (row === null) return { created: false };
+    if (typeof row.created === "boolean") {
+      const taskId = row.id ?? row.task?.id;
+      return row.created ? { created: true, ...(taskId ? { taskId } : {}) } : { created: false };
+    }
+    // Старый Core: тело — сама строка созданной задачи.
+    return row.id ? { created: true, taskId: row.id } : { created: false };
   }
 
   coffeeFillStatus(): Promise<CoffeeFillStatusRow[]> {

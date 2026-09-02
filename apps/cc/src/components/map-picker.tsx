@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { MapContainer, TileLayer, CircleMarker, useMapEvents } from "react-leaflet";
+import { OSM_TILES, type MapTiles } from "../lib/map-tiles";
 import "leaflet/dist/leaflet.css";
 
 // Центр по умолчанию — Ташкент, как и на карте автоматов.
@@ -47,10 +48,13 @@ export function MapPicker({
   lat,
   lng,
   onChange,
+  tiles = OSM_TILES,
 }: {
   lat: string;
   lng: string;
   onChange: (lat: string, lng: string) => void;
+  /** Подложка с сервера (MAP_TILES_URL); без пропа — бесключевой OSM. */
+  tiles?: MapTiles;
 }) {
   const [показать, setПоказать] = useState(false);
 
@@ -92,10 +96,7 @@ export function MapPicker({
             scrollWheelZoom
             style={{ height: 320, width: "100%", borderRadius: 12, background: "#f4f4ee" }}
           >
-            <TileLayer
-              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/attributions">CARTO</a>'
-              url="https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-            />
+            <TileLayer attribution={tiles.attribution} url={tiles.url} />
             <ЛовительКлика onPick={onChange} />
             {точкаЕсть && (
               <CircleMarker

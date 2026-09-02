@@ -57,6 +57,7 @@ import { ListShell, type ListShellKpi } from "../../../components/list-shell";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { RegisterImport } from "../../../components/register-import";
 import { MapPanel } from "../../../components/map-panel";
+import { mapTilesFromEnv } from "../../../lib/map-tiles";
 import { MiniBars } from "../../../components/mini-bars";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
@@ -448,6 +449,13 @@ export default async function DomainPage({
     ];
   }
 
+  // Свежесть кофе-факта (возвращена аудитом 02.09, блок A): импорт заказов из
+  // панели производителя ручной и может стоять днями — без даты последнего
+  // заказа «Выручка · 30 дней» тихо тает, маскируя стоящий импорт под спад
+  // продаж. Статус нужен только дашборду (подписи «данные до …» живут там).
+  // null = сам запрос статуса провалился: плитки говорят «данные недоступны»,
+  // а не молчат — тот же приём, что teamLoaded/obligationsLoaded (#259).
+  let coffeeStatus: Awaited<ReturnType<typeof core.coffeeOrdersStatus>> | null = null;
   if (domain === "vendhub") {
     // Тридцать календарных суток по Ташкенту, а не 720 часов от «сейчас»:
     // скользящее окно смещало бы границу внутрь чужого дня, и утренняя
@@ -455,10 +463,10 @@ export default async function DomainPage({
     const с = new Date(Date.now() - 30 * 24 * 3600 * 1000).toLocaleDateString("en-CA", {
       timeZone: "Asia/Tashkent",
     });
-    // coffeeOrdersStatus (статус синка) читался только снятой секцией
-    // «Кофе-автоматы» и нигде больше не используется — запрос убран вместе
-    // с переменной, а не просто перестал захватываться.
-    coffeeOrders = await core.coffeeOrdersSummary(с).catch(() => null);
+    [coffeeOrders, coffeeStatus] = await Promise.all([
+      core.coffeeOrdersSummary(с).catch(() => null),
+      isOverview ? core.coffeeOrdersStatus().catch(() => null) : Promise.resolve(null),
+    ]);
   }
   const byType = entities.reduce<Record<string, number>>((acc, e) => {
     acc[e.type] = (acc[e.type] ?? 0) + 1;
@@ -1111,6 +1119,37 @@ export default async function DomainPage({
   //    партнёры»/«График» (перекомпоновка overview). Всё best-effort: любой
   //    источник может быть null (провал запроса или эндпоинт ещё не на проде) —
   //    плитка тогда показывает «—», а не роняет остальные секции.
+  // ── Свежесть кофе-факта (аудит 02.09, блок A) ──────────────────────────
+  // Возраст меряем календарными сутками Ташкента, а не часами: заказы приходят
+  // пачками за день, «вчера вечером» — норма (давность 1). Давность больше
+  // суток (последний заказ старше вчерашнего дня) значит «импорт стоит» —
+  // пометка становится тревожной, не зелёной: выручка 30 дней в этот момент
+  // тает с каждым днём, маскируя стоящий импорт под спад продаж.
+  const coffeeLastOrderAt = coffeeStatus?.последний ?? null;
+  const tashkentDay = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+  const coffeeAgeDays =
+    coffeeLastOrderAt === null
+      ? null
+      : Math.round(
+          (Date.parse(tashkentDay(new Date())) -
+            Date.parse(tashkentDay(new Date(coffeeLastOrderAt)))) /
+            86_400_000,
+        );
+  const coffeeStale = coffeeAgeDays !== null && coffeeAgeDays > 1;
+  // Провал самого запроса статуса — честное «данные недоступны», а не
+  // молчание: неизвестная свежесть ≠ свежо, поэтому пометка тоже тревожная.
+  // Пустая таблица (статус получен, но последний === null) — тоже тревога:
+  // импорт никогда не бежал или факт полностью потерян, это предельно
+  // несвежее состояние, а не спокойное «заказов нет».
+  const coffeeFreshnessAlarm =
+    coffeeStale || coffeeStatus === null || coffeeLastOrderAt === null;
+  const coffeeFreshnessNote =
+    coffeeStatus === null
+      ? "свежесть кофе: данные недоступны"
+      : coffeeLastOrderAt === null
+        ? "кофе: заказов в базе нет"
+        : `кофе: данные до ${shortRuDate(coffeeLastOrderAt)}${coffeeStale ? " · импорт стоит" : ""}`;
+
   const coffeeRevenue30 = coffeeOrders?.всего.выручка ?? null;
   const snackRevenue30 = salesSummary?.days30.amount ?? null;
   const hasRevenue30 = coffeeRevenue30 !== null || snackRevenue30 !== null;
@@ -1580,12 +1619,25 @@ export default async function DomainPage({
                       ? "—"
                       : Math.round(revenue30).toLocaleString("ru-RU")}
                   </div>
-                  <div className="wf">
+                  {/* flexWrap: чип свежести не переносится по тексту
+                      (white-space: nowrap у .chip), а .wf — flex без wrap;
+                      на минимальной колонке 260px чип иначе вылезает за
+                      границу плитки. Перенос роняет его на свою строку. */}
+                  <div className="wf" style={{ flexWrap: "wrap" }}>
                     {revenuePartial
                       ? `частично недоступно · ${coffeeRevenue30 === null ? "нет данных кофе" : "нет данных снек"}`
                       : hasRevenue30
                         ? `кофе ${((coffeeRevenue30 ?? 0) / 1_000_000).toFixed(1)} + снек ${((snackRevenue30 ?? 0) / 1_000_000).toFixed(1)} млн`
                         : "нет данных"}
+                    {/* Давность кофе-слагаемого: окно «30 дней» отсчитывается
+                        от сегодня, а кофе-факт заканчивается датой последнего
+                        импорта — без подписи стоящий импорт тает молча. */}
+                    {coffeeRevenue30 !== null &&
+                      (coffeeFreshnessAlarm ? (
+                        <span className="chip h">{coffeeFreshnessNote}</span>
+                      ) : (
+                        <span>· {coffeeFreshnessNote}</span>
+                      ))}
                   </div>
                 </div>
                 <div className={`wt ${coffeeOrders ? "" : "off"}`}>
@@ -1687,8 +1739,19 @@ export default async function DomainPage({
                 }}
               >
                 <div>
-                  <div className="sect-h">
+                  {/* flexWrap: в шапке рядом с h3 могут стоять сразу два
+                      неразрывных чипа (свежесть + «не выдано») — на узком
+                      экране (min-колонка 260px) без переноса они клипаются /
+                      наезжают на соседний контент. */}
+                  <div className="sect-h" style={{ flexWrap: "wrap" }}>
                     <h3 className="h2">Кофе</h3>
+                    {/* Свежесть кофе-факта: импорт ручной, зелёного «живые»
+                        (как у снека из OurVend) здесь не бывает. Свежие данные
+                        (до вчера включительно) — нейтральный чип с датой;
+                        давность больше суток или провал статуса — тревожный. */}
+                    <span className={`chip${coffeeFreshnessAlarm ? " h" : ""}`}>
+                      {coffeeFreshnessNote}
+                    </span>
                     {coffeeOrders !== null && coffeeOrders.неВыдано > 0 && (
                       <span className="chip h">не выдано · {coffeeOrders.неВыдано}</span>
                     )}
@@ -1749,9 +1812,12 @@ export default async function DomainPage({
                           ? `${Number(salesSummary.yesterday.qty).toLocaleString("ru-RU")} шт`
                           : "—"}
                       </div>
+                      {/* Суточный синк OurVend добегает к ~07:50 — до этого
+                          «вчера: 0 шт» под зелёным «живые» читается как провал
+                          продаж. Подпись снимает ложную тревогу утренних нулей. */}
                       <div className="wf">
                         {salesSummary
-                          ? `${Number(salesSummary.yesterday.amount).toLocaleString("ru-RU")} сум`
+                          ? `${Number(salesSummary.yesterday.amount).toLocaleString("ru-RU")} сум · данные приходят к 08:00`
                           : "нет данных"}
                         <span className="go">→</span>
                       </div>
@@ -2023,7 +2089,7 @@ export default async function DomainPage({
                 )}
               </summary>
               <div className="loc-hist-body">
-                <MapPanel machines={machines} />
+                <MapPanel machines={machines} tiles={mapTilesFromEnv()} />
                 {(unknownMachines > 0 || noCoords.length > 0) && (
                   <p className="hint" style={{ marginTop: 8 }}>
                     Данные неполные:{" "}

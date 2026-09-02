@@ -5,6 +5,7 @@ import { useState, useTransition } from "react";
 import { PLACE_TYPES, PLACE_TYPE_HINTS, PLACE_TYPE_LABELS, type PlaceType } from "@mydon/shared";
 import dynamic from "next/dynamic";
 import { createEntity } from "../app/card/actions";
+import type { MapTiles } from "../lib/map-tiles";
 
 // Leaflet трогает window — только на клиенте, как и карта автоматов рядом.
 // `"use client"` серверный рендер не отменяет, а страница объявлена
@@ -28,7 +29,14 @@ const MapPicker = dynamic(() => import("./map-picker").then((m) => m.MapPicker),
  * есть „склад“…») значило бы повторить ошибку, на которой уже дважды
  * обожглись с видом и состоянием автомата.
  */
-export function NewPlaceForm({ domain = "vendhub" }: { domain?: string }) {
+export function NewPlaceForm({
+  domain = "vendhub",
+  tiles,
+}: {
+  domain?: string;
+  /** Подложка карты с сервера (MAP_TILES_URL); без пропа — бесключевой OSM. */
+  tiles?: MapTiles;
+}) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [kind, setKind] = useState<PlaceType>("location");
@@ -128,6 +136,7 @@ export function NewPlaceForm({ domain = "vendhub" }: { domain?: string }) {
           setLat(a);
           setLng(b);
         }}
+        {...(tiles ? { tiles } : {})}
       />
 
       <div className="form-actions" style={{ marginTop: 12 }}>

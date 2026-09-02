@@ -523,3 +523,66 @@ describe("Клиент durable agent-run", () => {
     });
   });
 });
+
+/**
+ * Контракт /tasks/ensure-for-day — разбор терпит ОБЕ версии Core.
+ *
+ * Прод 28.08–02.09.2026: повтор дня старый Core отвечал 201 с ПУСТЫМ телом
+ * (`return null` контроллера Nest), `res.json()` падал с «Unexpected end of
+ * JSON input», и монитор графиков ТО валился каждый день на всех 19 планах.
+ * Выкатка не атомарна, поэтому клиент обязан понимать и старую форму
+ * (строка задачи / пустое тело), и новую ({ created, id, task }).
+ */
+describe("ensureTaskForDay: совместимость со старым и новым Core", () => {
+  const ввод = {
+    title: "ТО: фильтр — Olma",
+    ownerKind: "human" as const,
+    domain: "vendhub" as const,
+    entityId: "e1",
+    due: "2026-08-26T13:00:00.000Z",
+    priority: "normal" as const,
+    source: "maint:p1",
+    dayKey: "2026-08-26",
+    createdBy: "agent:maintenance-monitor",
+  };
+
+  function ответCore(body: string | null): void {
+    globalThis.fetch = (() =>
+      Promise.resolve(
+        new Response(body, {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )) as typeof globalThis.fetch;
+  }
+
+  it("новый Core, повтор дня: { created: false } — монитор считает 0, не падает", async () => {
+    ответCore(JSON.stringify({ created: false }));
+    const core = new AgentsCoreClient("http://core");
+    assert.deepEqual(await core.ensureTaskForDay(ввод), { created: false });
+  });
+
+  it("новый Core, первый прогон: { created: true, id, task } → created + taskId", async () => {
+    ответCore(JSON.stringify({ created: true, id: "t-1", task: { id: "t-1" } }));
+    const core = new AgentsCoreClient("http://core");
+    assert.deepEqual(await core.ensureTaskForDay(ввод), { created: true, taskId: "t-1" });
+  });
+
+  it("СТАРЫЙ Core, повтор дня: пустое тело НЕ роняет агента — это { created: false }", async () => {
+    ответCore(""); // ровно то, что Nest шлёт на return null
+    const core = new AgentsCoreClient("http://core");
+    assert.deepEqual(await core.ensureTaskForDay(ввод), { created: false });
+  });
+
+  it("старый Core, первый прогон: тело — строка задачи → created + taskId", async () => {
+    ответCore(JSON.stringify({ id: "t-2", title: "ТО: фильтр — Olma" }));
+    const core = new AgentsCoreClient("http://core");
+    assert.deepEqual(await core.ensureTaskForDay(ввод), { created: true, taskId: "t-2" });
+  });
+
+  it("литеральный null в теле — тоже { created: false }, а не TypeError", async () => {
+    ответCore("null");
+    const core = new AgentsCoreClient("http://core");
+    assert.deepEqual(await core.ensureTaskForDay(ввод), { created: false });
+  });
+});

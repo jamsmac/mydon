@@ -4,6 +4,7 @@ import { useState } from "react";
 import dynamic from "next/dynamic";
 import type { Entity } from "../lib/core";
 import { machineCounts, KIND_COLOR } from "../lib/machine-points";
+import type { MapTiles } from "../lib/map-tiles";
 import { MachineMap } from "./machine-map";
 
 // Leaflet трогает window — только на клиенте. Пока грузится, показываем схему.
@@ -18,11 +19,12 @@ const LiveMap = dynamic(() => import("./live-map"), {
 
 /**
  * Панель карты автоматов. Два вида одних и тех же точек:
- *  • «Карта» — настоящая карта с дорогами (Leaflet, тёмная подложка);
+ *  • «Карта» — настоящая карта с дорогами (Leaflet; подложка — `tiles`
+ *    с сервера, дефолт OSM, см. lib/map-tiles.ts);
  *  • «Схема» — наша SVG-сетка, работает без интернета (запас на сбой подложки).
  * Переключатель наверху. Ни маршрутов, ни денег — только отображение (этап интерфейса).
  */
-export function MapPanel({ machines }: { machines: Entity[] }) {
+export function MapPanel({ machines, tiles }: { machines: Entity[]; tiles?: MapTiles }) {
   const [mode, setMode] = useState<"live" | "scheme">("live");
   const c = machineCounts(machines);
 
@@ -55,7 +57,11 @@ export function MapPanel({ machines }: { machines: Entity[] }) {
         </div>
       </div>
 
-      {mode === "live" ? <LiveMap machines={machines} /> : <MachineMap machines={machines} />}
+      {mode === "live" ? (
+        <LiveMap machines={machines} {...(tiles ? { tiles } : {})} />
+      ) : (
+        <MachineMap machines={machines} />
+      )}
 
       <div style={{ padding: "8px 6px 2px", fontSize: 11.5, color: "var(--tx-3)", display: "flex", gap: 12, flexWrap: "wrap" }}>
         <span>на карте {c.onMap} из {c.total}</span>

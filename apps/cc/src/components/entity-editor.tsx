@@ -66,6 +66,31 @@ const MANAGED_KEYS = new Set<string>([
 ]);
 
 /**
+ * Значение поля attrs — читаемым текстом. `String()` у объекта печатает
+ * «[object Object]», а такие значения в реестре есть: «поставка» у товаров —
+ * объект сведений импорта mydon-stock (НДС, дата последней закупки, имя в
+ * приходе), roles/«направления» у контрагентов — массивы строк. Объект
+ * разворачиваем в пары «ключ: значение», массив простых значений — через
+ * запятую; массив объектов (снимки вроде «что поставляет») не расплющиваем,
+ * а считаем записи — построчный вид ему даст только свой редактор.
+ */
+export function attrText(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "—";
+    return value.some((v) => typeof v === "object" && v !== null)
+      ? `${value.length} ${plural(value.length, "запись", "записи", "записей")}`
+      : value.map((v) => attrText(v)).join(", ");
+  }
+  if (typeof value === "object") {
+    const pairs = Object.entries(value as Record<string, unknown>);
+    if (pairs.length === 0) return "—";
+    return pairs.map(([k, v]) => `${k}: ${attrText(v)}`).join(" · ");
+  }
+  return String(value);
+}
+
+/**
  * Редактор карточки: как в ПО владельца — поля пополняются и меняются на месте.
  * Пустое значение убирает поле; внизу можно добавить новое.
  */
@@ -94,7 +119,17 @@ export function EntityEditor({ entity }: { entity: Entity }) {
   // цена покупки и единица. Из общего списка их убираем, иначе те же поля
   // появятся дважды.
   const hidden = isProduct ? PRODUCT_KEYS : isIngredient ? INGREDIENT_KEYS : null;
-  const attrs = attrsAll.filter(([k]) => !MANAGED_KEYS.has(k) && !(hidden?.has(k) ?? false));
+  // Объект/массив в текстовое поле формы не кладём: `String()` показал бы
+  // «[object Object]», а сохранение перетёрло бы данные этой строкой (тот же
+  // класс потери, что у MANAGED_KEYS, только ключ заранее не известен —
+  // например «поставка» у товаров). Такие значения форма не возит вовсе,
+  // saveEntity берёт их из свежей карточки (см. actions.ts).
+  const attrs = attrsAll.filter(
+    ([k, v]) =>
+      !MANAGED_KEYS.has(k) &&
+      !(hidden?.has(k) ?? false) &&
+      (typeof v !== "object" || v === null),
+  );
   const [editing, setEditing] = useState(false);
   const initialKind = typeof entity.attrs?.["вид"] === "string" ? String(entity.attrs["вид"]) : "";
   const [kind, setKind] = useState(initialKind);
@@ -124,11 +159,9 @@ export function EntityEditor({ entity }: { entity: Entity }) {
                 : (key === "цена" || key === "цена покупки" || key === "цена продажи") &&
                     typeof value === "number"
                   ? `${Number(value).toLocaleString("ru-RU")} сум`
-                  : // Массив объектов (managed-ключи вроде «закупки сахара») String()
-                    // расплющил бы в «[object Object],…» — считаем записи вместо этого.
-                    Array.isArray(value)
-                    ? `${value.length} ${plural(value.length, "запись", "записи", "записей")}`
-                    : String(value ?? "—");
+                  : // Объекты и массивы — читаемым текстом (см. attrText):
+                    // String() расплющил бы их в «[object Object]».
+                    attrText(value);
             const длинное = текст.length > 40;
             return (
               <div

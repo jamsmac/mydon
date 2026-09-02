@@ -5,6 +5,7 @@ import Link from "next/link";
 import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from "react-leaflet";
 import type { Entity } from "../lib/core";
 import { machinePoints, KIND_COLOR, type MachinePoint } from "../lib/machine-points";
+import { OSM_TILES, type MapTiles } from "../lib/map-tiles";
 import "leaflet/dist/leaflet.css";
 
 // Центр по умолчанию — Ташкент (в VendTripBot была Москва).
@@ -29,13 +30,20 @@ function FitToPoints({ pts }: { pts: MachinePoint[] }) {
  * Настоящая карта автоматов (перенос из VendTripBot, React-Leaflet).
  *
  * Отличия от оригинала — под наши правила:
- *  • тёмная подложка CARTO (дороги серые, не оранжевые: оранжевый = «решение владельца»);
+ *  • подложка настраиваемая (`tiles` приходит с сервера из MAP_TILES_URL),
+ *    дефолт — бесключевой OSM: CARTO закрыл анонимные тайлы, см. lib/map-tiles.ts;
  *  • точки — векторные CircleMarker в нашей палитре, без внешних PNG-иконок;
  *  • центр Ташкент; клик по точке — карточка автомата.
  *
  * Ни денег, ни маршрутов, ни расчётов — только отображение и вид (этап интерфейса).
  */
-export default function LiveMap({ machines }: { machines: Entity[] }) {
+export default function LiveMap({
+  machines,
+  tiles = OSM_TILES,
+}: {
+  machines: Entity[];
+  tiles?: MapTiles;
+}) {
   const pts = machinePoints(machines);
   const center = pts.length > 0 ? ([pts[0].lat, pts[0].lng] as [number, number]) : TASHKENT;
 
@@ -46,12 +54,8 @@ export default function LiveMap({ machines }: { machines: Entity[] }) {
       scrollWheelZoom
       style={{ height: 420, width: "100%", borderRadius: 12, background: "#f4f4ee" }}
     >
-      <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/attributions">CARTO</a>'
-        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-        subdomains="abcd"
-        maxZoom={20}
-      />
+      {/* maxZoom 19 — потолок стандартных тайлов OSM; выше отдаются пустые. */}
+      <TileLayer attribution={tiles.attribution} url={tiles.url} maxZoom={19} />
       <FitToPoints pts={pts} />
       {pts.map((p) => (
         <CircleMarker

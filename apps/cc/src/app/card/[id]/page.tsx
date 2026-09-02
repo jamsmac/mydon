@@ -21,6 +21,7 @@ import {
 import { MachineCard360 } from "../../../components/machine-card-360";
 import { ProductCard360 } from "../../../components/product-card-360";
 import { LocationPanel } from "../../../components/location-panel";
+import { mapTilesFromEnv } from "../../../lib/map-tiles";
 import { BunkerTiles } from "../../../components/bunker-tiles";
 import {
   MenuEditor,
@@ -979,6 +980,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                   address={typeof a["адрес"] === "string" ? a["адрес"] : null}
                   sourceStays={stays ? <StayTimeline stays={stays.stays} /> : undefined}
                   {...(stays ? { sourceMoves: stays.moves } : {})}
+                  tiles={mapTilesFromEnv()}
                 />
               </>
             ),
