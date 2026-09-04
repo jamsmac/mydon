@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { coreDb, reqCore } from "./svc-harness.mjs";
+import { coreDb, reqCore, ENGINE } from "./svc-harness.mjs";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 const { PartsService } = reqCore(path.join(REPO, "apps/core/dist/maintenance/parts.service.js"));
 const { MaintenanceService } = reqCore(path.join(REPO, "apps/core/dist/maintenance/maintenance.service.js"));
@@ -60,7 +60,7 @@ try {
   const r3 = await p.provision({ machineIds: [A] });
   assert.deepEqual(r3.machines[0].created, ["Бункер H-27-1"], "свободный бункер набора — тот же узел");
   assert.equal((await p.list({ kind: "hopper" })).length, 16, "дубля нет");
-  console.log("У2 на pglite: автозаведение по составу работает ✔ создано", r1.createdTotal, "| очередь наклеить:", q.counts.label_pending);
+  console.log(`У2 (${ENGINE}): автозаведение по составу работает ✔ создано`, r1.createdTotal, "| очередь наклеить:", q.counts.label_pending);
 } finally { await close(); }
 // (дополнение) переименование бункера-счётчика при назначении набора, пока наклейки нет
 {
@@ -104,7 +104,7 @@ try {
     const real = await p2.provision({});
     assert.deepEqual(nos(real.machines[0].created), dryA, "боевой прогон повторяет предпросмотр (автомат A)");
     assert.deepEqual(nos(real.machines[1].created), dryB, "боевой прогон повторяет предпросмотр (автомат B)");
-    const dup = await run(`select count(*) c from (select upper(regexp_replace(inventory_no, '\s', '', 'g')) n from part_unit group by 1 having count(*) > 1) x`);
+    const dup = await run(`select count(*)::int c from (select upper(regexp_replace(inventory_no, '\s', '', 'g')) n from part_unit group by 1 having count(*) > 1) x`);
     assert.equal(Number(dup[0].c), 0, "дублей номеров в базе нет");
     console.log("У2: общий набор у двух автоматов — предпросмотр = боевой прогон ✔", dryA[0], dryB[0]);
   } finally { await close(); }
@@ -135,7 +135,7 @@ try {
     const dry = await p3.provision({ dryRun: true });
     assert.equal(dry.createdTotal, 0, "состав полный — заводить нечего");
     assert.equal(dry.numberedTotal, 15, "но все 15 стоящих узлов ждут номер");
-    assert.equal((await run(`select count(*) c from part_unit where inventory_no is null`))[0].c, 15, "предпросмотр не пишет");
+    assert.equal((await run(`select count(*)::int c from part_unit where inventory_no is null`))[0].c, 15, "предпросмотр не пишет");
     const real = await p3.provision({ actorRef: "owner" });
     assert.equal(real.createdTotal, 0);
     assert.deepEqual(real.machines[0].numbered, dry.machines[0].numbered, "боевой прогон повторяет предпросмотр");
@@ -143,15 +143,15 @@ try {
     assert.deepEqual(mix, ["M-003","M-004","M-005","M-006"], "серия миксеров перешагнула чужой M-002");
     const hop = (await run(`select inventory_no from part_unit where part_kind='hopper' and origin='backfill' order by inventory_no`)).map((r) => r.inventory_no);
     assert.deepEqual(hop, ["H-001","H-002","H-003","H-004","H-005","H-006","H-007","H-008"], "бункеры без набора — серия-счётчик подряд");
-    const pend = (await run(`select count(*) c from part_unit where label_pending and inventory_no is not null`))[0];
+    const pend = (await run(`select count(*)::int c from part_unit where label_pending and inventory_no is not null`))[0];
     assert.equal(Number(pend.c), 15, "все пронумерованные встали в очередь наклеек");
-    const audit = (await run(`select count(*) c from audit_log where action='parts.number_assigned'`))[0];
+    const audit = (await run(`select count(*)::int c from audit_log where action='parts.number_assigned'`))[0];
     assert.equal(Number(audit.c), 15, "аудит — на каждый номер, внутри транзакции автомата");
     const prov = (await run(`select after::text t from audit_log where action='parts.provisioned'`))[0];
     assert.match(prov.t, /"numberedTotal":\s*15/, "сводная запись называет присвоенные номера");
     const again = await p3.provision({});
     assert.equal(again.numberedTotal, 0, "второй прогон номера не переписывает");
-    assert.equal((await run(`select count(*) c from audit_log where action='parts.number_assigned'`))[0].c, 15, "и не плодит аудит");
+    assert.equal((await run(`select count(*)::int c from audit_log where action='parts.number_assigned'`))[0].c, 15, "и не плодит аудит");
     console.log("У2: нумерация стоящих узлов бэкфилла ✔ 15 номеров, чужой номер серии обойдён");
   } finally { await close(); }
 }
@@ -178,7 +178,7 @@ try {
     const h = (await run(`select inventory_no, set_number, note from part_unit where part_kind='hopper' and retired_at is null and hopper_position is null and inventory_no like 'H-0%' order by inventory_no`));
     assert.equal(h.length, 8, "все восемь бункеров заведены");
     assert.match(h[0].note, /бункер набора 9 списан/, "примечание объясняет, почему набор не присвоен");
-    assert.equal((await run(`select count(*) c from part_unit where set_number=9 and hopper_position=1`))[0].c, 1, "второй бункер набора 9·1 не заведён");
+    assert.equal((await run(`select count(*)::int c from part_unit where set_number=9 and hopper_position=1`))[0].c, 1, "второй бункер набора 9·1 не заведён");
     console.log("У2: набор у списанного бункера — счётчик вместо падения ✔", h[0].inventory_no);
   } finally { await close(); }
 }

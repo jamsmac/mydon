@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { coreDb, reqCore } from "./svc-harness.mjs";
+import { coreDb, reqCore, ENGINE } from "./svc-harness.mjs";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 const { StockService } = reqCore(path.join(REPO, "apps/core/dist/stock/stock.service.js"));
 const { VendingLedgerService } = reqCore(path.join(REPO, "apps/core/dist/stock/vending-ledger.js"));
@@ -61,5 +61,5 @@ try {
   assert.equal((await vending.stockLevels()).find((r) => r.product === "Snickers").quantity, 42, "после катовера — леджер");
   const r3 = await refill.create({ machineSerial: "M1", productName: "Snickers", qty: 2, clientKey: "rf-2" });
   assert.equal(r3.stockLeft, 40, "остаток в ответе — по леджеру");
-  console.log("У6 на pglite: карточки для прайса, товары в леджере, двойная запись (пересчёт, заливка), сверка, катовер ✔");
+  console.log(`У6 (${ENGINE}): карточки для прайса, товары в леджере, двойная запись (пересчёт, заливка), сверка, катовер ✔`);
 } finally { await close(); }

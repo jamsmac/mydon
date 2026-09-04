@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { coreDb, reqCore } from "./svc-harness.mjs";
+import { coreDb, reqCore, ENGINE } from "./svc-harness.mjs";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 const { PartsService } = reqCore(path.join(REPO, "apps/core/dist/maintenance/parts.service.js"));
 const { MaintenanceService } = reqCore(path.join(REPO, "apps/core/dist/maintenance/maintenance.service.js"));
@@ -57,5 +57,5 @@ try {
   // Настройка PARTS_DRYING_STAGE=0 → после мойки сразу склад
   await run(`insert into system_config (key, value) values ('PARTS_DRYING_STAGE','0')`);
   assert.equal(await p.afterWashLocation(), "warehouse");
-  console.log("У3 на pglite: замена по узлам, мойка→сушка→склад, ремонт, повтор по clientKey ✔ журнал:", logs.length);
+  console.log(`У3 (${ENGINE}): замена по узлам, мойка→сушка→склад, ремонт, повтор по clientKey ✔ журнал:`, logs.length);
 } finally { await close(); }

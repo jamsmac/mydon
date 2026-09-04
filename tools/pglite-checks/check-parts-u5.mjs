@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { coreDb, reqCore } from "./svc-harness.mjs";
+import { coreDb, reqCore, ENGINE } from "./svc-harness.mjs";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 const { PartsService } = reqCore(path.join(REPO, "apps/core/dist/maintenance/parts.service.js"));
 const { StockService } = reqCore(path.join(REPO, "apps/core/dist/stock/stock.service.js"));
@@ -79,5 +79,5 @@ try {
   const c5 = await ledger.consumeRefill(r5);
   assert.equal(c5.consumed, false); assert.match(c5.reason, /выключено/);
   assert.equal((await run(`select part_unit_id from coffee_refill where id = $1`, [r5]))[0].part_unit_id, h271.id);
-  console.log("У5 на pglite: возврат → приход return (нетто по таре узла, партия открыта), заливка → списание по точным данным, дубли, удаление ✔");
+  console.log(`У5 (${ENGINE}): возврат → приход return (нетто по таре узла, партия открыта), заливка → списание по точным данным, дубли, удаление ✔`);
 } finally { await close(); }

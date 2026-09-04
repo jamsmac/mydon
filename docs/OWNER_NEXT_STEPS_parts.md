@@ -97,4 +97,5 @@
 
 - Убрать теневую запись `vending_stock` после катовера отдельным срезом.
 - Панель: список «мойка/сушка» одним экраном (сейчас фильтр `/parts?location=washing` и кнопки на карточке).
-- `pglite`-сценарии в CI (`tools/pglite-checks/README.md`) — сейчас запускаются руками.
+- ~~`pglite`-сценарии в CI~~ — СДЕЛАНО: шаг «Scenarios on real SQL (parts U1-U6)» гоняет их
+  на сервисе `postgres:17` в CI, без добавления WASM-пакета в lockfile.
