@@ -69,5 +69,29 @@ try {
   assert.equal(snick.countedAt.toISOString().slice(0, 10), "2026-09-01", "дата пересчёта — 01.09, тот же день по ISO");
   assert.equal(gs.asOf.toISOString().slice(0, 10), "2026-09-01");
 
+  // ── Срез 05.09: чтения — через одну дверь (R-GS-1…7) ─────────────────────
+  // (а) Все активные позиции прайса, включая ноль и «неизвестно»: Pulpy без карточки → null
+  await run(`insert into vending_product (name, purchase_price) values ('Pulpy', 5000)`);
+  const levels = await vending.stockLevels();
+  assert.deepEqual(levels.map((r) => [r.product, r.quantity]), [["Bounty", 20], ["Pulpy", null], ["Snickers", 40]], "ledger: список — прайс, без карточки — null, не 0");
+  assert.equal(levels.find((r) => r.product === "Snickers").countedAt.slice(0, 10), "2026-09-01", "дата — из истории пересчётов");
+  // (б) Повтор заливки по clientKey — остаток леджера, таблица не при чём
+  const r4 = await refill.create({ machineSerial: "M1", productName: "Snickers", qty: 2, clientKey: "rf-2" });
+  assert.equal(r4.duplicate, true); assert.equal(r4.stockLeft, 40);
+  // (в) Пустая таблица при заполненном леджере → сверка НЕ зелёная
+  await run(`delete from vending_stock`);
+  parity = await ledger.parity();
+  assert.equal(parity.missingRows, 2, "Snickers и Bounty без строки; Pulpy без карточки — это no_card, не no_row");
+  assert.equal(parity.mismatched, 2, "Snickers 40 и Bounty 20 в леджере — расхождения; Pulpy без карточки — нет");
+  assert.equal(parity.products, 3, "все три позиции прайса в сверке");
+  assert.equal(parity.rows.find((r) => r.productName === "Snickers").status, "no_row");
+  assert.equal(parity.rows.find((r) => r.productName === "Pulpy").status, "no_card");
+  // (г) В режиме ledger список остатков и план не зависят от таблицы
+  assert.equal((await vending.stockLevels()).find((r) => r.product === "Snickers").quantity, 40, "таблица пуста, остаток из леджера");
+  // (д) Режим table — прежние числа: таблица пуста → пусто
+  await run(`update system_config set value = 'table' where key = 'VENDING_STOCK_SOURCE'`);
+  assert.deepEqual(await vending.stockLevels(), [], "table: читается таблица, она пуста");
+  await run(`update system_config set value = 'ledger' where key = 'VENDING_STOCK_SOURCE'`);
+
   console.log(`У6 (${ENGINE}): карточки для прайса, товары в леджере, двойная запись (пересчёт, заливка), сверка, катовер ✔`);
 } finally { await close(); }
