@@ -1,8 +1,11 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { auditLog, entity, stockMovement, vendingProduct, vendingStock } from "@mydon/db";
-import { and, eq, sql } from "drizzle-orm";
+import { auditLog, entity, stockMovement, vendingAlias, vendingProduct, vendingStock, vendingStockCount } from "@mydon/db";
+import { normalizeProductName, productIndex, resolveCatalogName } from "@mydon/shared";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { settingValue } from "../system/settings";
+import { assembleGoodsStock, parityRows, type GoodsStock, type VendingParityRow } from "./goods-stock";
+export type { GoodsStock, GoodsStockRow, VendingParityRow, VendingParityStatus } from "./goods-stock";
 
 /**
  * `vending_stock` как проекция складского леджера (R-PU-10, У6).
@@ -84,6 +87,98 @@ export async function ledgerQty(tx: Writer, warehouseId: string, cardId: string)
 }
 
 /**
+ * Остатки по МНОГИМ карточкам одним запросом (R-GS-7): план закупа зовёт
+ * выдачу на каждую сводку, и 52 запроса по одной карточке — это 52 обращения
+ * к базе там, где хватает одного `group by`. Арифметика та же, что у `ledgerQty`.
+ */
+export async function ledgerQtyMany(tx: Writer, warehouseId: string, cardIds: readonly string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (cardIds.length === 0) return out;
+  const rows = await tx
+    .select({
+      cardId: stockMovement.ingredientId,
+      q: sql<string>`coalesce(sum(case
+        when ${stockMovement.kind} in ('intake','return') then ${stockMovement.qty}
+        when ${stockMovement.kind} = 'consumption' then -${stockMovement.qty}
+        when ${stockMovement.kind} = 'adjustment' then ${stockMovement.qty}
+        when ${stockMovement.kind} = 'transfer' and ${stockMovement.warehouseId} = ${warehouseId} then -${stockMovement.qty}
+        when ${stockMovement.kind} = 'transfer' and ${stockMovement.counterpartyId} = ${warehouseId} then ${stockMovement.qty}
+        else 0 end), 0)`,
+    })
+    .from(stockMovement)
+    .where(
+      and(
+        inArray(stockMovement.ingredientId, [...cardIds]),
+        sql`(${stockMovement.warehouseId} = ${warehouseId} or ${stockMovement.counterpartyId} = ${warehouseId})`,
+      ),
+    )
+    .groupBy(stockMovement.ingredientId);
+  for (const r of rows) if (r.cardId) out.set(r.cardId, Number(r.q ?? 0));
+  return out;
+}
+
+/**
+ * Последний пересчёт по товару — из истории `vending_stock_count` (R-GS-6):
+ * без сторно и без отменённых сторно строк (то же условие «видимой строки», что у
+ * `GET /vending/stock-counts`). По `product_id`, и отдельно по имени — для строк
+ * истории до бэкфилла П4, у которых `product_id` пуст.
+ */
+export async function lastCountedByProduct(tx: Writer): Promise<{ byId: Map<string, Date>; byName: Map<string, Date> }> {
+  const видимая = and(
+    ne(vendingStockCount.source, "storno"),
+    sql`not exists (select 1 from ${vendingStockCount} s2 where s2.source = 'storno' and s2.reverses_id = ${vendingStockCount.id})`,
+  );
+  const rows = await tx
+    .select({
+      productId: vendingStockCount.productId,
+      productName: vendingStockCount.productName,
+      last: sql<string>`max(${vendingStockCount.dt})`,
+    })
+    .from(vendingStockCount)
+    .where(видимая)
+    .groupBy(vendingStockCount.productId, vendingStockCount.productName);
+  const byId = new Map<string, Date>();
+  const byName = new Map<string, Date>();
+  const later = (m: Map<string, Date>, k: string, d: Date) => {
+    const prev = m.get(k);
+    if (!prev || d > prev) m.set(k, d);
+  };
+  for (const r of rows) {
+    // `dt` — ташкентские сутки. Берём ПОЛДЕНЬ этих суток по Ташкенту (07:00Z):
+    // полночь +05:00 — это 19:00Z предыдущего дня, и `toISOString().slice(0, 10)`
+    // у панели и смоука показывал бы «вчера». Для сторожа давности (дни) разницы нет.
+    const d = new Date(`${String(r.last).slice(0, 10)}T12:00:00+05:00`);
+    if (r.productId) later(byId, r.productId, d);
+    later(byName, normalizeProductName(r.productName), d);
+  }
+  return { byId, byName };
+}
+
+/**
+ * Одна дверь к остаткам товаров (R-GS-1): список — прайс, остаток — леджер по
+ * центральному складу, дата — история пересчётов. Три запроса на выдачу.
+ */
+export async function goodsStock(tx: Writer, opts: { includeInactive?: boolean } = {}): Promise<GoodsStock> {
+  const warehouseId = await centralWarehouseId(tx);
+  const products = await tx
+    .select({ id: vendingProduct.id, name: vendingProduct.name, entityId: vendingProduct.entityId, isActive: vendingProduct.isActive })
+    .from(vendingProduct);
+  const cardIds = products.map((p) => p.entityId).filter((x): x is string => x !== null);
+  const [qtyByCard, counted] = await Promise.all([
+    warehouseId ? ledgerQtyMany(tx, warehouseId, cardIds) : Promise.resolve(new Map<string, number>()),
+    lastCountedByProduct(tx),
+  ]);
+  return assembleGoodsStock({
+    warehouseId,
+    products,
+    qtyByCard,
+    countedById: counted.byId,
+    countedByName: counted.byName,
+    ...(opts.includeInactive ? { includeInactive: true } : {}),
+  });
+}
+
+/**
  * Двойная запись одного изменения проекции. Без карточки товара или без
  * центрального склада — ничего не пишет и возвращает причину: строка
  * `vending_stock` ключуется именем, а леджер — карточкой, и без связи
@@ -151,38 +246,45 @@ export async function projectVendingCount(
   return { written: res.written, delta, reason: res.reason };
 }
 
-export interface VendingParityRow {
-  productName: string;
-  productId: string | null;
-  cardId: string | null;
-  table: number;
-  ledger: number | null;
-  diff: number | null;
+export interface VendingParityReport {
+  warehouseId: string | null;
+  rows: VendingParityRow[];
+  /** Расхождений по правилу §6 спеки: mismatch, inactive_with_stock, no_row с ненулевым леджером. */
+  mismatched: number;
+  /** Строк без карточки реестра (как раньше). */
+  unlinked: number;
+  /** Позиций прайса без строки в таблице — факт о таблице, виден всегда. */
+  missingRows: number;
+  /** Позиций прайса в сверке. */
+  products: number;
 }
 
-/** Сверка проекции с леджером — по каждому товару; `mismatched` — сколько разошлось, `unlinked` — без карточки. */
-export async function vendingParity(db: Writer): Promise<{ warehouseId: string | null; rows: VendingParityRow[]; mismatched: number; unlinked: number }> {
-  const warehouseId = await centralWarehouseId(db);
-  const table = await db.select().from(vendingStock);
-  const rows: VendingParityRow[] = [];
-  for (const r of table) {
-    const cardId = r.productId ? await cardIdOf(db, r.productId) : null;
-    const ledger = warehouseId && cardId ? await ledgerQty(db, warehouseId, cardId) : null;
-    rows.push({
-      productName: r.productName,
-      productId: r.productId,
-      cardId,
-      table: r.quantity,
-      ledger,
-      diff: ledger === null ? null : Math.round((r.quantity - ledger) * 1000) / 1000,
-    });
-  }
-  rows.sort((a, b) => a.productName.localeCompare(b.productName, "ru"));
+/**
+ * Сверка проекции с леджером по ОБЪЕДИНЕНИЮ прайса и таблицы (R-GS-5): пустая
+ * таблица при непустом леджере даёт расхождения, а не «0 из 0».
+ */
+export async function vendingParity(db: Writer): Promise<VendingParityReport> {
+  const [goods, table, products, aliases] = await Promise.all([
+    goodsStock(db, { includeInactive: true }),
+    db.select({ productName: vendingStock.productName, productId: vendingStock.productId, quantity: vendingStock.quantity }).from(vendingStock),
+    db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct),
+    db.select({ productId: vendingAlias.productId, alias: vendingAlias.alias }).from(vendingAlias),
+  ]);
+  // Канон имени — тот же индекс, что у закупа и импорта (R-G-1): строка таблицы
+  // без product_id должна найти свою позицию тем же правилом, что и везде.
+  const index = productIndex(products, aliases);
+  const canon = (raw: string) => {
+    const r = resolveCatalogName(index, raw);
+    return r.kind === "hit" ? r.canon : r.kind === "conflict" ? r.byName : raw;
+  };
+  const rows = parityRows(goods, table, canon);
   return {
-    warehouseId,
+    warehouseId: goods.warehouseId,
     rows,
-    mismatched: rows.filter((r) => r.diff !== null && r.diff !== 0).length,
-    unlinked: rows.filter((r) => r.cardId === null).length,
+    mismatched: rows.filter((r) => r.isMismatch).length,
+    unlinked: rows.filter((r) => r.status === "no_card").length,
+    missingRows: rows.filter((r) => r.status === "no_row").length,
+    products: rows.filter((r) => r.productId !== null).length,
   };
 }
 
@@ -286,6 +388,11 @@ export class VendingLedgerService {
 
   centralWarehouseId(tx: Writer) {
     return centralWarehouseId(tx);
+  }
+
+  /** Одна дверь к остаткам товаров (R-GS-1). Внутри транзакции — передавать её `tx`. */
+  goodsStock(tx: Writer = this.db, opts: { includeInactive?: boolean } = {}) {
+    return goodsStock(tx, opts);
   }
 
   /**
