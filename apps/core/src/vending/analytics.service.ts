@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { and, eq, gt, gte, inArray, lte, notInArray } from "drizzle-orm";
 import { event, machineStock, sale, vendingPurchaseOrder, vendingRefillEvent, vendingStock } from "@mydon/db";
 import {
@@ -26,6 +26,7 @@ import {
   type StockPosition,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
+import { VendingLedgerService } from "../stock/vending-ledger";
 import { readIntSetting } from "../system/settings";
 import { ReportCache, clamp, listInline } from "./report-cache";
 import {
@@ -167,6 +168,8 @@ export class AnalyticsService {
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly vending: VendingService,
+    /** Проекция `vending_stock` → леджер (У6). В тестах отсутствует — читаем таблицу. */
+    @Optional() @Inject(VendingLedgerService) private readonly ledger?: VendingLedgerService,
   ) {}
 
   /**
@@ -293,11 +296,20 @@ export class AnalyticsService {
     const since = tashkentDay(new Date(сегодня - (days - 1) * DAY_MS));
     const начало = tashkentDayStart(since) ?? new Date(сегодня - (days - 1) * DAY_MS);
 
-    const [склад, остатки, продажи, заливки, накладные, { cost }] = await Promise.all([
-      this.db
+    // Склад — одной дверью в режиме ledger (R-GS-1); таблица — в table, как раньше.
+    let склад: { productName: string; quantity: number }[];
+    let неизвестно = 0;
+    if (this.ledger && (await this.ledger.source()) === "ledger") {
+      const g = await this.ledger.goodsStock(this.db);
+      склад = g.rows.flatMap((r) => (r.quantity !== null && r.quantity > 0 ? [{ productName: r.productName, quantity: r.quantity }] : []));
+      неизвестно = g.rows.filter((r) => r.quantity === null).length;
+    } else {
+      склад = await this.db
         .select({ productName: vendingStock.productName, quantity: vendingStock.quantity })
         .from(vendingStock)
-        .where(gt(vendingStock.quantity, 0)),
+        .where(gt(vendingStock.quantity, 0));
+    }
+    const [остатки, продажи, заливки, накладные, { cost }] = await Promise.all([
       // Остатки автоматов читаются ОКНОМ, а последний день выбирается в
       // памяти: строк тут десятки в сутки (SKU × 2 автомата), а коррелированный
       // подзапрос `max(dt)` — это ещё один кусок сырого SQL, который юнит-тест
@@ -398,6 +410,9 @@ export class AnalyticsService {
         code: "unknown_cost",
         message: `Без закупочной цены ${отчёт.noPriceCount} позиц. — они в отчёте есть, но в сумму ${отчёт.totalValue} сум не входят.`,
       });
+    }
+    if (неизвестно > 0) {
+      warnings.push({ code: "stock_unknown_card", message: `Без карточки склада: ${неизвестно} поз. — в отчёте по складу их нет` });
     }
     return { ...отчёт, warnings };
   }

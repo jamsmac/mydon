@@ -867,7 +867,9 @@ export type AnalyticsWarningCode =
    * Чинится это не починкой сбора, а ожиданием, и читателю (бот, панель) надо
    * отличать одно от другого КОДОМ, а не разбором предложения.
    */
-  | "journal_short";
+  | "journal_short"
+  /** Позиция леджера без карточки товара — остаток «неизвестно», в отчёте по складу её нет. */
+  | "stock_unknown_card";
 
 export interface AnalyticsWarning {
   code: AnalyticsWarningCode;

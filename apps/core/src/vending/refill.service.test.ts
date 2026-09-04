@@ -254,3 +254,22 @@ describe("Заливка автомата", () => {
     assert.ok(at.getTime() >= before);
   });
 });
+
+describe("Повтор заливки в режиме ledger — остаток по леджеру, а не по таблице (R-GS-4)", () => {
+  it("повтор по clientKey отдаёт остаток леджера и не читает vending_stock", async () => {
+    // В очереди select — только сама заливка. Если бы повтор читал таблицу, следующий select
+    // отдал бы [] и stockLeft стал бы null; 37 доказывает, что остаток пришёл из леджера.
+    const selects: Record<string, unknown>[][] = [[{ id: "r1", clientKey: "rf-1" }]];
+    const db = stubDb({ refillInsert: [], selects, inserted: [] });
+    const ledger = {
+      source: async () => "ledger",
+      centralWarehouseId: async () => "wh-1",
+      cardIdOf: async () => "c-s",
+      qty: async () => 37,
+      movement: async () => ({ ok: true }),
+    } as never;
+    const res = await new RefillService(db, vendingStub, ledger).create({ machineSerial: "M1", productName: "кола", qty: 3, clientKey: "rf-1" });
+    assert.equal(res.duplicate, true);
+    assert.equal(res.stockLeft, 37);
+  });
+});

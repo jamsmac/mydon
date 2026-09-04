@@ -103,12 +103,21 @@ export class RefillService {
           .from(vendingRefill)
           .where(eq(vendingRefill.clientKey, input.clientKey))
           .limit(1);
-        const [stock] = await tx
-          .select({ quantity: vendingStock.quantity })
-          .from(vendingStock)
-          .where(eq(vendingStock.productName, productName))
-          .limit(1);
-        return { refill: existing, stockLeft: stock?.quantity ?? null, duplicate: true };
+        // Остаток — тем же источником, что и у свежей заливки: в режиме ledger
+        // таблица не читается (R-GS-4), без карточки — «неизвестно».
+        let stockLeft: number | null = null;
+        if (this.ledger && (await this.ledger.source(tx)) === "ledger") {
+          const [warehouseId, cardId] = await Promise.all([this.ledger.centralWarehouseId(tx), productId ? this.ledger.cardIdOf(tx, productId) : Promise.resolve(null)]);
+          stockLeft = warehouseId && cardId ? await this.ledger.qty(tx, warehouseId, cardId) : null;
+        } else {
+          const [stock] = await tx
+            .select({ quantity: vendingStock.quantity })
+            .from(vendingStock)
+            .where(eq(vendingStock.productName, productName))
+            .limit(1);
+          stockLeft = stock?.quantity ?? null;
+        }
+        return { refill: existing, stockLeft, duplicate: true };
       }
 
       // Заливка — перемещение «центральный склад → автомат». Если строки
