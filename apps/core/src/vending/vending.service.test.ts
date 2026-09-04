@@ -707,8 +707,6 @@ describe("Вендинг Core: сводный закуп (§5.4–5.5)", () => {
     const montella = s.items.find((i) => i.product === "Montella")!;
     assert.equal(montella.stock, 1, "остаток из леджера вычтен");
     assert.equal(montella.buy, 3, "need 4 − stock 1");
-    const pulpy = [...s.items, ...s.excludedNoSales, ...s.excludedByRule].find((i) => i.product === "Pulpy");
-    assert.equal(pulpy?.stock ?? 0, 0, "неизвестный остаток в расчёт не входит");
   });
 
   it("план в ledger: quantity null не вычитается и даёт предупреждение stock_unknown_card; asOf — из одной двери (R-GS-3)", async () => {
@@ -717,6 +715,10 @@ describe("Вендинг Core: сводный закуп (§5.4–5.5)", () => {
     assert.equal(plan.stock.unknown, 1);
     assert.ok(plan.warnings.some((w) => w.code === "stock_unknown_card" && /Pulpy/.test(w.message)));
     assert.equal(plan.stock.asOf, "2026-09-01T01:00:00.000Z");
+    assert.ok(
+      !plan.warnings.some((w) => w.code === "stock_unknown_product"),
+      "неизвестный остаток — не «строка без карточки прайса»: в unmatchedStock он не попадает",
+    );
   });
 });
 
