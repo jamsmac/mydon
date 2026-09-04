@@ -210,6 +210,15 @@ jobs:
           DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
         run: node packages/db/dist/migration-0064.integration.js
 
+      # 0084 заводит карточки физических узлов и восстанавливает их нить из
+      # периодов machine_part plpgsql-блоком. Правило бэкфилла (install/remove
+      # связывают, replace — нет, серийник — тот же узел, один открытый период)
+      # проверяется только настоящим постгресом на намеренно запутанных цепочках.
+      - name: Migration part_unit backfill (0083 to 0084)
+        env:
+          DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
+        run: node packages/db/dist/migration-0084.integration.js
+
       # Раньше continue-on-error:true молча прятал 5 high-уязвимостей —
       # шаг всегда зеленел, даже когда pnpm audit падал кодом 1 (найдено
       # внешним аудитом, P1). Теперь high/critical реально блокируют CI;

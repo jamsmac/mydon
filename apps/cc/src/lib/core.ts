@@ -2239,6 +2239,8 @@ export interface MaintenanceLogRow {
  */
 export interface MachinePart {
   id: string;
+  /** Карточка физического узла (R-PU-1). */
+  partUnitId: string;
   machineId: string | null;
   location: string;
   partKind: string;
@@ -2250,6 +2252,8 @@ export interface MachinePart {
   warrantyUntil: string | null;
   reason: string | null;
   note: string | null;
+  /** Номер и наклейка — из карточки узла; null у истории до 0084 не бывает, но поле честно nullable. */
+  unit?: { id: string; inventoryNo: string | null; labelPending: boolean; retiredAt: string | null } | null;
 }
 
 /** Период истории экземпляра (по серийнику) с именем автомата. */

@@ -130,6 +130,10 @@ const REGISTRY: Record<string, { category: Category; reason: string }> = {
     category: "NON_PERSONAL_TABLES",
     reason: "обслуживание: entity — автоматы/техника vendhub, не личный контур",
   },
+  "maintenance/parts.service.ts": {
+    category: "NON_PERSONAL_TABLES",
+    reason: "узлы автоматов: entity читается только как имя автомата по machine_id периода (vendhub), не личный контур",
+  },
   "vending/vending.service.ts": {
     category: "NON_PERSONAL_TABLES",
     reason: "снек-контур: entity как справочник автоматов/товаров vendhub",

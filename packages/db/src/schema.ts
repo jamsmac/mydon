@@ -625,6 +625,7 @@ export const stockMovementKindEnum = pgEnum("stock_movement_kind", [
   "consumption", // расход: списание по продажам (−)
   "transfer", // перемещение между складами (− со склада, + на встречный)
   "adjustment", // корректировка инвентаризации: подписанная дельта «стало − было»
+  "return", // возврат остатка со снятого бункера на склад (+), нетто по взвешиванию (R-PU-9)
 ]);
 
 /**
@@ -2681,6 +2682,10 @@ export const coffeeRefill = pgTable(
      * настоящих единиц никто назвать не может.
      */
     packageCount: integer("package_count"),
+    /** Узел-бункер, если набор записан (набор, позиция) — срез У5. */
+    partUnitId: uuid("part_unit_id").references((): AnyPgColumn => partUnit.id),
+    /** Движение склада `consumption`, которым заливка списана (тумблер vendhub.coffeeRefillConsumes). */
+    stockMovementId: uuid("stock_movement_id").references(() => stockMovement.id),
     /** «Дата» из формы — календарная дата обхода, без времени. */
     enteredDate: date("entered_date").notNull(),
     createdBy: text("created_by"),
@@ -2715,6 +2720,15 @@ export const coffeeContainerReturn = pgTable(
     weight: integer("weight").notNull(),
     returnedDate: date("returned_date").notNull(),
     locationNote: text("location_note"),
+    // ── Приход на склад (R-PU-9, срез У5). NULL у записей до среза и у возвратов без тары. ──
+    /** Узел-бункер (набор, позиция) — карточка с тарой. */
+    partUnitId: uuid("part_unit_id").references((): AnyPgColumn => partUnit.id),
+    /** Что было в бункере — из парной заливки набора. */
+    ingredientId: uuid("ingredient_id").references(() => coffeeIngredient.id),
+    /** Нетто = брутто − тара узла, г. NULL — тара неизвестна, приход не проведён. */
+    netWeight: integer("net_weight"),
+    /** Движение склада `return`, которым остаток оприходован. */
+    stockMovementId: uuid("stock_movement_id").references(() => stockMovement.id),
     createdBy: text("created_by"),
     createdAt: createdAt(),
   },
@@ -3118,6 +3132,7 @@ export const partLocationEnum = pgEnum("part_location", [
   "washing", // на мойке
   "drying", // на сушке
   "repair", // в ремонте
+  "unknown", // не найден при инвентаризации — узел есть, где он, никто не знает (R-PU-7)
 ]);
 
 /**
@@ -3139,6 +3154,8 @@ export const maintenanceLog = pgTable(
     kind: maintenanceKindEnum("kind").notNull(),
     /** Какой узел трогали. NULL для работ по автомату целиком. */
     partKind: partKindEnum("part_kind"),
+    /** Какой именно экземпляр (R-PU-8): мойка миксера M-017 на базе, снятие H-27-3. NULL — по автомату целиком. */
+    partUnitId: uuid("part_unit_id").references((): AnyPgColumn => partUnit.id),
     /** Кто делал. NULL у записей, внесённых владельцем задним числом. */
     personId: uuid("person_id").references(() => person.id),
     /** Задача, в рамках которой сделано, если была. */
@@ -3191,6 +3208,76 @@ export const maintenanceLog = pgTable(
   ],
 );
 
+/** Как заведена карточка узла: по составу автомата, руками, инвентаризацией, бэкфиллом истории. */
+export const partUnitOriginEnum = pgEnum("part_unit_origin", ["auto", "manual", "count", "backfill"]);
+
+/**
+ * Физический узел — постоянная карточка (R-PU-1).
+ *
+ * `machine_part` живёт один период («стоит на автомате 12 с марта», «лежит на
+ * мойке с четверга»), а деталь — годы. До этой таблицы нитью узла был только
+ * серийник, и узел без серийника после снятия и установки был неотличим от
+ * другого. Здесь — сама деталь: инвентарный номер с наклейки, серийник, тара
+ * бункера, списание. Где узел сейчас — НЕ хранится: это открытый период
+ * `machine_part` (R-PU-5), хранимое поле разъехалось бы с реальностью.
+ *
+ * `inventory_no` присваивает система при заведении (слово владельца 04.09.2026),
+ * а `label_pending` держит правду о наклейке: пока сотрудник не подтвердил, что
+ * номер на детали, карточка остаётся в очереди «Наклеить номер».
+ */
+export const partUnit = pgTable(
+  "part_unit",
+  {
+    id: id(),
+    partKind: partKindEnum("part_kind").notNull(),
+    /** Инвентарный номер (M-001, G-001, B-001, H-<набор>-<позиция>). NULL — ещё не присвоен. */
+    inventoryNo: text("inventory_no"),
+    /** Номер есть в системе, но наклейка на детали ещё не подтверждена сотрудником. */
+    labelPending: boolean("label_pending").default(false).notNull(),
+    serialNumber: text("serial_number"),
+    model: text("model"),
+    manufacturer: text("manufacturer"),
+    /** Набор бункеров 1..27 (как в coffee_container_tare) — только для hopper. */
+    setNumber: integer("set_number"),
+    /** Позиция бункера 1..8 внутри набора — только для hopper. */
+    hopperPosition: integer("hopper_position"),
+    /** Тара, г — для бункеров/контейнеров; нетто возврата = брутто − тара (R-PU-9). */
+    tareWeight: integer("tare_weight"),
+    purchaseDate: date("purchase_date"),
+    purchasePrice: numeric("purchase_price", { precision: 14, scale: 2 }),
+    warrantyUntil: date("warranty_until"),
+    /** Списан: дата и причина. Периоды остаются — история не переписывается. */
+    retiredAt: date("retired_at"),
+    retiredReason: text("retired_reason"),
+    origin: partUnitOriginEnum("origin").default("manual").notNull(),
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // Номер уникален без учёта регистра и пробелов: «m-001» и «M-001 » — одна наклейка.
+    uniqueIndex("part_unit_inventory_no_key")
+      .on(sql`upper(regexp_replace(${t.inventoryNo}, '\\s', '', 'g'))`)
+      .where(sql`inventory_no is not null`),
+    index("part_unit_kind_idx").on(t.partKind),
+    index("part_unit_serial_idx")
+      .on(t.serialNumber)
+      .where(sql`serial_number is not null`),
+    // Один бункер набора на позицию: тара матрицы 27×8 привязывается однозначно.
+    uniqueIndex("part_unit_hopper_set_key")
+      .on(t.setNumber, t.hopperPosition)
+      .where(sql`set_number is not null and hopper_position is not null`),
+    check("part_unit_set_range", sql`${t.setNumber} is null or ${t.setNumber} between 1 and 99`),
+    check("part_unit_position_range", sql`${t.hopperPosition} is null or ${t.hopperPosition} between 1 and 8`),
+    check(
+      "part_unit_hopper_fields",
+      sql`(${t.setNumber} is null and ${t.hopperPosition} is null) or ${t.partKind} = 'hopper'`,
+    ),
+    check("part_unit_tare_nonneg", sql`${t.tareWeight} is null or ${t.tareWeight} >= 0`),
+  ],
+);
+
 /**
  * Экземпляр узла на автомате — периодами, как `coffee_machine_placement`.
  *
@@ -3202,6 +3289,10 @@ export const machinePart = pgTable(
   "machine_part",
   {
     id: id(),
+    /** Физический узел (R-PU-1). Заполнен бэкфиллом миграции 0084; новые периоды — всегда с узлом. */
+    partUnitId: uuid("part_unit_id")
+      .references(() => partUnit.id)
+      .notNull(),
     /** NULL — открытый период «узел вне автомата» (см. `location`). */
     machineId: uuid("machine_id").references(() => entity.id),
     /**
@@ -3242,6 +3333,13 @@ export const machinePart = pgTable(
     index("machine_part_serial_idx")
       .on(t.serialNumber)
       .where(sql`serial_number is not null`),
+    // Один узел — не больше одного открытого периода: деталь не может лежать на
+    // складе и стоять на автомате одновременно (R-PU-5). Ноль открытых — законно:
+    // снятый заменой до 0084 узел «пропадал», его местонахождение неизвестно.
+    uniqueIndex("machine_part_unit_open_key")
+      .on(t.partUnitId)
+      .where(sql`removed_on is null`),
+    index("machine_part_unit_idx").on(t.partUnitId, t.installedOn),
     check("machine_part_slot_positive", sql`${t.slot} is null or ${t.slot} > 0`),
     check("machine_part_dates", sql`${t.removedOn} is null or ${t.removedOn} >= ${t.installedOn}`),
     // machine ⟺ на автомате: строка «в мойке, но с автоматом» и «на автомате,
@@ -3484,6 +3582,7 @@ export const schema = {
   coffeeStock,
   // Обслуживание: журнал работ и узлы автоматов.
   maintenanceLog,
+  partUnit,
   machinePart,
   maintenancePlan,
   // Доступ сотрудников: приглашения.

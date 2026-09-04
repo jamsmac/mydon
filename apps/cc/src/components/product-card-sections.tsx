@@ -457,6 +457,7 @@ const ДВИЖЕНИЕ: Record<string, string> = {
   consumption: "расход",
   transfer: "перемещение",
   adjustment: "инвентаризация",
+  return: "возврат из бункера",
 };
 
 export function WarehouseMovements({

@@ -606,6 +606,8 @@ a.rowlink:hover { background: var(--surf-2); }
 .pill.bad { color: var(--hot); border-color: var(--hot-line); background: var(--hot-soft); }
 .pill.human { color: var(--tx-2); }
 .pill.agent { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+/* Действие, которого ждут от человека («наклеить номер», «без тары»): оранжевое = нажми. */
+.pill.act { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); text-decoration: none; }
 
 .notice { background: var(--hot-soft); border: 1px solid var(--hot-line); border-radius: var(--r); padding: 13px 15px; font-size: 13px; color: var(--tx-2); margin-bottom: 14px; }
 .notice b { display: block; color: var(--tx); margin-bottom: 3px; }
