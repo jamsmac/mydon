@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { coreDb, reqCore } from "./svc-harness.mjs";
+import { coreDb, reqCore, ENGINE } from "./svc-harness.mjs";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 const { PartsService } = reqCore(path.join(REPO, "apps/core/dist/maintenance/parts.service.js"));
 const { PartCountService } = reqCore(path.join(REPO, "apps/core/dist/maintenance/part-count.service.js"));
@@ -95,5 +95,5 @@ try {
   await run(`insert into system_config (key, value) values ('PARTS_COUNT_PHOTO_REQUIRED','0')`);
   assert.equal(await c.photoRequired(), false);
   await assert.rejects(c.start({ location: "machine" }), /Считать можно/);
-  console.log("У4 на pglite: сессия → строки → применение (найдено/новые/перемещены/не найдены) → откат ✔");
+  console.log(`У4 (${ENGINE}): сессия → строки → применение (найдено/новые/перемещены/не найдены) → откат ✔`);
 } finally { await close(); }

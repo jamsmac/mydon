@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { coreDb, reqCore } from "./svc-harness.mjs";
+import { coreDb, reqCore, ENGINE } from "./svc-harness.mjs";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 const { MaintenanceService } = reqCore(path.join(REPO, "apps/core/dist/maintenance/maintenance.service.js"));
 const { PartsService } = reqCore(path.join(REPO, "apps/core/dist/maintenance/parts.service.js"));
@@ -54,5 +54,5 @@ try {
   const all = await p.list({}); assert.equal(all.length, 2, "списанный скрыт");
   assert.equal((await p.list({ machineId: B })).length, 1);
   assert.equal((await p.list({ location: "washing" })).length, 1);
-  console.log("У1 на pglite: сервисы узлов работают на настоящем SQL ✔", all.map(u => `${u.label} · ${u.where?.location ?? "—"}`).join(" | "));
+  console.log(`У1 (${ENGINE}): сервисы узлов работают на настоящем SQL ✔`, all.map(u => `${u.label} · ${u.where?.location ?? "—"}`).join(" | "));
 } finally { await close(); }

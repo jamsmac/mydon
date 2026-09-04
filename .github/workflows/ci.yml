@@ -219,6 +219,28 @@ jobs:
           DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
         run: node packages/db/dist/migration-0084.integration.js
 
+      # СЦЕНАРИИ УЗЛОВ (спека vendhub-parts, У1–У6) НА НАСТОЯЩЕМ SQL. Между
+      # «юнит-тесты зелёные» и «работает» лежит весь сырой SQL сервисов и все
+      # ограничения базы: заглушка drizzle запросы не исполняет, а уникальные
+      # индексы исполняет только Postgres. Именно эти сценарии 04.09 поймали два
+      # дефекта нумерации, которых юнит-тесты не видели: номер, занятый узлом
+      # другого вида, и набор, который держит СПИСАННЫЙ бункер (уникальность
+      # (set_number, hopper_position) списанные не исключает — вставка падала).
+      #
+      # Гоняются на сервисе postgres:17 этой же джобы, каждый сценарий — в своей
+      # свежей базе из шаблона (тяжёлый WASM-пакет pglite в lockfile НЕ нужен;
+      # локально те же сценарии идут на нём, см. tools/pglite-checks/README.md).
+      # Шаг идёт ПОСЛЕ смоуков: он создаёт и удаляет свои базы и в базу `mydon`
+      # не пишет, но порядок делает вывод читаемым.
+      - name: Scenarios on real SQL (parts U1-U6)
+        env:
+          CHECKS_DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
+        run: |
+          node tools/pglite-checks/run-migrations.mjs
+          for c in check-0084 check-parts-u1 check-parts-u2 check-parts-u3 check-parts-u4 check-parts-u5 check-parts-u6; do
+            node tools/pglite-checks/$c.mjs
+          done
+
       # Раньше continue-on-error:true молча прятал 5 high-уязвимостей —
       # шаг всегда зеленел, даже когда pnpm audit падал кодом 1 (найдено
       # внешним аудитом, P1). Теперь high/critical реально блокируют CI;
