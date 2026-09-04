@@ -11,7 +11,9 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { isKbPagePath } from "./registry";
 import { loadSkillMeta } from "./skill-loader";
+import { hasCodeSkill } from "./skills";
 
 /** «shared» — кросс-доменный агент: рантайм подставляет это значение по умолчанию. */
 const DOMAINS = ["globerent", "vendhub", "personal", "mydon", "shared"];
@@ -26,6 +28,7 @@ interface Passport {
   status?: string;
   mission?: string;
   non_goals?: string[];
+  kb_pages?: string[];
   schedule: ScheduleEntry[];
 }
 
@@ -114,17 +117,62 @@ export function checkPassport(name: string, cfg: Passport, skills: string[]): Pa
   return { name, status: cfg.status ?? "—", schedules: cfg.schedule.length, skills: skills.length, problems };
 }
 
+/**
+ * Проверки, связывающие паспорт с навыками и файлами (спека llm-skill):
+ *  • llm-навык в расписании — cron для executor: llm закрыт до допуска (R-LS-11);
+ *  • executor: llm при наличии кода в SKILLS — двусмысленность, исполнится код;
+ *  • kb_pages — каждая страница существует внутри shared/ (R-LS-8: иначе агент
+ *    пойдёт к модели без знаний, и никто этого не заметит).
+ */
+export function checkLinks(
+  cfg: Passport,
+  metas: readonly { name: string; executor: string }[],
+  sharedDir: string,
+  hasCode: (name: string) => boolean,
+): string[] {
+  const problems: string[] = [];
+  const executorOf = new Map(metas.map((m) => [m.name, m.executor]));
+  for (const s of cfg.schedule) {
+    if (s.skill && executorOf.get(s.skill) === "llm") {
+      problems.push(
+        `расписание зовёт llm-навык «${s.skill}» — cron для executor: llm закрыт до допуска в DURABLE_SCHEDULED_SKILLS (R-LS-11)`,
+      );
+    }
+  }
+  for (const m of metas) {
+    if (m.executor === "llm" && hasCode(m.name)) {
+      problems.push(`навык ${m.name}: executor: llm, но есть код в SKILLS — исполняться будет код`);
+    }
+  }
+  for (const raw of cfg.kb_pages ?? []) {
+    const page = raw.split("#")[0].trim();
+    if (!isKbPagePath(page)) {
+      problems.push(`kb_pages: «${page}» — путь должен быть вида shared/kb/<dir>/<page>.md без ..`);
+      continue;
+    }
+    if (!fs.existsSync(path.join(sharedDir, page.slice("shared/".length)))) {
+      problems.push(`kb_pages: страницы «${page}» нет на диске`);
+    }
+  }
+  return problems;
+}
+
 export function checkAll(dir: string): PassportCheck[] {
   // Замечания к frontmatter навыков (нет тира, name ≠ файла и т.п.) — по
   // каталогу агента. Раньше рантайм молча выбрасывал битый frontmatter; теперь
   // это видно в проверке паспортов рядом с остальными замечаниями.
   const skillProblems = new Map<string, string[]>();
+  const metasByAgent = new Map<string, { name: string; executor: string }[]>();
   for (const m of loadSkillMeta(dir)) {
+    const metas = metasByAgent.get(m.agent) ?? [];
+    metas.push({ name: m.name, executor: m.executor });
+    metasByAgent.set(m.agent, metas);
     if (m.problems.length === 0) continue;
     const list = skillProblems.get(m.agent) ?? [];
     for (const p of m.problems) list.push(`навык ${m.name}: ${p}`);
     skillProblems.set(m.agent, list);
   }
+  const sharedDir = path.resolve(dir, "..", "shared");
 
   return fs
     .readdirSync(dir)
@@ -139,8 +187,10 @@ export function checkAll(dir: string): PassportCheck[] {
       const skills = fs.existsSync(skillsDir)
         ? fs.readdirSync(skillsDir).map((f) => f.replace(/\.md$/, ""))
         : [];
-      const check = checkPassport(name, parsePassport(fs.readFileSync(cfgPath, "utf8")), skills);
+      const cfg = parsePassport(fs.readFileSync(cfgPath, "utf8"));
+      const check = checkPassport(name, cfg, skills);
       check.problems.push(...(skillProblems.get(name) ?? []));
+      check.problems.push(...checkLinks(cfg, metasByAgent.get(name) ?? [], sharedDir, hasCodeSkill));
       return check;
     });
 }

@@ -48,6 +48,7 @@ Tailscale**; официальный OpenAI API вызывается напрям
 | **Порученные задачи**               | `AGENTS_TASKS_PAUSED=0`                                                                  | `1` — task-worker на паузе                       | Agents забирает и выполняет задачи, порученные через Core; cron остаётся под отдельной паузой                                                         |
 | **Бюджет**                          | `LLM_GLOBAL_DAILY_BUDGET_USD`, `LLM_MAX_RESERVATION_USD`, `AGENT_DAILY_BUDGET_USD`       | `$10`/сутки глобально, `$3` на один reserve      | Core атомарно учитывает все metered-поверхности; `$3` — предел **каждого физического provider-вызова**, а не накопительный предел многошаговой задачи |
 | **Потолок автономии**               | `AGENT_AUTONOMY_MAX`                                                                     | `T0` — только предлагает                         | Выше → часть действий без согласования (осторожно)                                                                                                    |
+| **llm-навыки** (`executor: llm`)    | те же, что у сценария 1б/1в, плюс `AGENTS_TASKS_PAUSED=0`                                | Спят: task-worker на паузе                       | Markdown-навык исполняется моделью по порученной задаче (один metered-вызов `llm-skill:<навык>`); cron для него закрыт — см. сценарий 1г               |
 
 ---
 
@@ -171,6 +172,67 @@ README-ссылкам или редиректам. Для public-вызова н
    вернуть `AGENTS_TASKS_PAUSED=1`, не менять зафиксированное значение
    `AGENTS_SCHEDULES_PAUSED` и разобрать
    сохранённые evidence. Пауза task-worker не стирает snapshot/job/spend/outbox.
+
+## Сценарий 1г — llm-навык (`executor: llm`): первый прогон `qualify-lead`
+
+Навык без кода: исполнитель берёт тело `SKILL.md` паспорта, устав
+`apps/agents/shared/COMPANY.md`, `ROLE.md` агента и страницы знаний из
+`kb_pages` карточки, делает **ровно один** metered-вызов модели
+(feature `llm-skill:<навык>`, тот же ledger и durable session, что у
+`find-solution`) и превращает JSON-ответ в предложение во Входящих. Первый
+такой навык — `globerent-sales/qualify-lead`. Спека и инварианты R-LS-1…12:
+[`superpowers/specs/2026-09-04-llm-skill-executor-design.md`](superpowers/specs/2026-09-04-llm-skill-executor-design.md).
+
+Что должно быть включено (сверх сценария 1в):
+
+- Миграция `0083_agent_kb_pages` применена (`pnpm --filter @mydon/db db:migrate`).
+- `AGENTS_TASKS_PAUSED=0`. llm-навык работает **только по порученной задаче**:
+  в `schedule:` паспорта его не пустит `check:passports`, а cron-допуск
+  (`DURABLE_SCHEDULED_SKILLS`) — отдельный срез, не этот.
+- Карточка агента в базе знает страницы знаний и границы роли. Seed при
+  старте существующих агентов не трогает, поэтому один раз после деплоя:
+  `docker compose … exec -T mydon-core node tools/apply-passport-fields.mjs --dry-run`,
+  затем без `--dry-run`. Скрипт заполняет пустое и добавляет навыки, заданное
+  владельцем не переписывает (`--overwrite=<поле>` — осознанно).
+- Агент `globerent-sales` включён кнопкой в панели `/agents/globerent-sales`
+  (в паспорте он `paused`; база — истина). Поле «Страницы знаний (KB)» в той же
+  карточке должно содержать `heli-models.md`, `pricelist.md`, `lead-criteria.md`.
+
+Порядок одного canary:
+
+1. `pnpm --filter @mydon/agents check:passports` → «ИТОГ: все паспорта целые».
+2. Поручить `globerent-sales` одну задачу, заголовок которой попадает в
+   `triggers` навыка (`квалифиц…`, слово «лид», `lead`, «запрос на погрузчик»,
+   «тендер», «выставк…»), например «Квалифицируй лид: OLMA, 3× CPD25, срочно».
+   Подробности лида — в описании задачи: оно идёт модели **недоверенным
+   блоком** (`untrustedContext`), инструкции внутри него не исполняются.
+3. Ожидаемо: один immutable план с единственным шагом `llm-skill:qualify-lead`,
+   один provider job, во Входящих — предложение T1 (пол тира считается как у
+   любого навыка: `requires-approval` × `allowed-tools`). В `facts`: `details`
+   (разбор по формату навыка), `model`, `costUsd`, `kbPages` (что реально
+   прочитано, с пометкой «(обрезана)» при превышении `LLM_SKILL_KB_PAGE_CHARS`,
+   по умолчанию 12 000 символов на страницу), `kbMissing`, `toolsIgnored`,
+   `promptChars`, `contextMissing` (если нет COMPANY.md/ROLE.md в образе).
+4. Модель ответила `summary: "нет повода"` → предложения нет, задача закрыта
+   пометкой «повода нет» — как у кодовых навыков.
+5. Ответ не по контракту или провайдер отклонил вызов → задача **блокируется**
+   (`skill_failed`): в карточке задачи «Агент ждёт решения владельца» и текст
+   причины с началом ответа модели. Повторной оплаты не будет — durable
+   результат воспроизводится тем же, поэтому Core не даёт задаче крутиться
+   claim→replay→release. Дальше: owner retry (одна новая платная попытка)
+   или переназначение.
+6. В `Система · LLM-мониторинг` сверить стоимость и модель, как в 1в п. 5.
+
+Откат: выключить агента в панели (задачи ему не поручаются) или вернуть
+`AGENTS_TASKS_PAUSED=1`. Убрать `executor: llm` из frontmatter навыка → он
+снова `not_implemented`, как до этого среза. Колонка `kb_pages` имеет default
+и откат кода не ломает; убирать её (`drop column`) — только после отката кода.
+
+Следующий llm-навык: frontmatter (`executor: llm`, `requires-approval`,
+`triggers`, `model-effort`, при необходимости `max-tokens`), `kb_pages` в
+паспорте, `check:passports`, обновить список ожидаемых llm-навыков в
+`skill-loader.test.ts` («qualify-lead — единственный executor: llm»), после
+деплоя — `apply-passport-fields.mjs`.
 
 ## Preflight перед включением Bot / CC / Documents
 

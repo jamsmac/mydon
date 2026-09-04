@@ -582,6 +582,34 @@
       "when": 1788300800000,
       "tag": "0082_maintenance_task_domain",
       "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1788504498421,
+      "tag": "0083_agent_kb_pages",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1788530371394,
+      "tag": "0084_part_unit",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1788536528030,
+      "tag": "0085_part_count",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1788538519123,
+      "tag": "0086_vending_product_entity",
+      "breakpoints": true
     }
   ]
 }

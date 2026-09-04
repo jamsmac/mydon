@@ -43,6 +43,10 @@ export const PERMISSIONS = [
   "tasks.confirm", // принимать выполненное и возвращать в работу
   "maintenance.view", // графики и осмотры
   "parts.replace", // замена узлов
+  // Узлы с инвентарными номерами (спека vendhub-parts, R-PU-12).
+  "parts.number", // наклеить/подтвердить/исправить номер узла
+  "parts.move", // снять на мойку/ремонт, помыть, вернуть на склад
+  "parts.count", // инвентаризация узлов с фото
   "coffee.wash", // мойка бункеров и чистка автоматов
   "coffee.refill", // заливка бункеров
   "coffee.consumable", // расходники точки
@@ -73,23 +77,32 @@ export const ROLE_PERMISSIONS: Record<StaffRole, readonly Permission[]> = {
     "coffee.consumable",
     "refill.create",
     "registry.propose",
+    // Оператор меняет миксеры и бункеры на точке — номера и движения узлов его.
+    "parts.number",
+    "parts.move",
   ],
   technician: [
     "tasks.own",
     "maintenance.view",
     "parts.replace",
+    "parts.number",
+    "parts.move",
+    "parts.count",
     "coffee.wash",
     "refill.create",
     "registry.propose",
   ],
   collector: ["tasks.own", "cash.collect"],
-  storekeeper: ["tasks.own", "stock.intake", "stock.count", "registry.propose"],
+  storekeeper: ["tasks.own", "stock.intake", "stock.count", "registry.propose", "parts.number", "parts.count"],
   manager: [
     "tasks.own",
     "tasks.assign",
     "tasks.confirm",
     "maintenance.view",
     "parts.replace",
+    "parts.number",
+    "parts.move",
+    "parts.count",
     "coffee.wash",
     "coffee.refill",
     "coffee.consumable",

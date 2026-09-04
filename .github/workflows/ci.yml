@@ -52,6 +52,13 @@ jobs:
           node --test tools/check-env-example.test.mjs
           node tools/check-env-example.mjs
 
+      # Операционные скрипты без зависимостей проверяются до установки: разбор
+      # паспортов и правило «заполнить пустое, не переписывать заданное» у
+      # tools/apply-passport-fields.mjs — иначе ошибка в нём всплыла бы только
+      # на сервере, на живых карточках агентов.
+      - name: Tools (unit)
+        run: node --test tools/apply-passport-fields.test.mjs
+
       - uses: pnpm/action-setup@v4
         with:
           version: 10.19.0
@@ -76,6 +83,16 @@ jobs:
       # Тесты гоняются по собранному dist/**/*.test.js, поэтому строго после build.
       - name: Test
         run: pnpm -r --if-present test
+
+      # Паспорта агентов (apps/agents/agents/*/config.yaml + skills/*.md) как
+      # гейт, а не как ручная команда: расписание не зовёт несуществующий навык
+      # или llm-навык без допуска в DURABLE_SCHEDULED_SKILLS, у каждого паспорта
+      # есть mission/non_goals, kb_pages существуют внутри shared/, frontmatter
+      # навыков цел (тир, executor, triggers). До этого шага битый паспорт
+      # обнаруживался только в рантайме — молчаливым пропуском задания.
+      # Скрипт собранный (dist/check-passports.js), поэтому после build.
+      - name: Passports (агенты)
+        run: pnpm --filter @mydon/agents check:passports
 
       # Дымовой прогон Core против НАСТОЯЩЕГО постгреса.
       #
@@ -192,6 +209,15 @@ jobs:
         env:
           DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
         run: node packages/db/dist/migration-0064.integration.js
+
+      # 0084 заводит карточки физических узлов и восстанавливает их нить из
+      # периодов machine_part plpgsql-блоком. Правило бэкфилла (install/remove
+      # связывают, replace — нет, серийник — тот же узел, один открытый период)
+      # проверяется только настоящим постгресом на намеренно запутанных цепочках.
+      - name: Migration part_unit backfill (0083 to 0084)
+        env:
+          DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
+        run: node packages/db/dist/migration-0084.integration.js
 
       # Раньше continue-on-error:true молча прятал 5 high-уязвимостей —
       # шаг всегда зеленел, даже когда pnpm audit падал кодом 1 (найдено

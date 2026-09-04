@@ -1250,6 +1250,76 @@ async function проверитьУзлы() {
 }
 
 /**
+ * Спека vendhub-parts (У1–У6): узел заведён системой с номером → наклейка
+ * подтверждена → снят на мойку по узлу → помыт → на складе → инвентаризация
+ * находит его и «теряет» второй → применение → возврат бункера приходует
+ * нетто на склад.
+ */
+async function проверитьУзлыСНомерами() {
+  const post = async (path, body) => {
+    const { r, text, json } = await jsonRequest("POST", path, body);
+    if (!r.ok) throw new Error(`POST ${path} → ${r.status}: ${text.slice(0, 200)}`);
+    return json;
+  };
+  const get = async (path) => {
+    const { r, text, json } = await jsonRequest("GET", path, undefined, true);
+    if (!r.ok) throw new Error(`GET ${path} → ${r.status}: ${text.slice(0, 200)}`);
+    return json;
+  };
+  const stamp = Date.now();
+  const машина = await post("/entities", { domain: "vendhub", type: "machine", name: `Дымовой кофейный ${stamp}` });
+
+  // Карточка узла: номер даёт система, наклейка ждёт
+  const миксер = await post("/parts", { partKind: "mixer", location: "warehouse", serialNumber: `SMOKE-MX-${stamp}` });
+  if (!/^M-\d{3}$/.test(миксер.inventoryNo) || миксер.labelPending !== true) {
+    throw new Error(`узел без системного номера/ожидания наклейки: ${JSON.stringify({ no: миксер.inventoryNo, pending: миксер.labelPending })}`);
+  }
+  const подтверждён = await post(`/parts/${миксер.id}/number`, { confirmLabel: true, actorRef: "smoke" });
+  if (подтверждён.labelPending !== false) throw new Error("наклейка не подтвердилась");
+
+  // Ставим на автомат, снимаем заменой по узлу на мойку, запасной — новый
+  await post("/maintenance/part-install", { machineId: машина.id, partKind: "mixer", slot: 1, partUnitId: миксер.id });
+  const замена = await post("/maintenance/part-swap", { machineId: машина.id, partKind: "mixer", slot: 1, removedTo: "washing", reason: "preventive" });
+  if (замена.stored?.location !== "washing") throw new Error(`снятый узел не на мойке: ${JSON.stringify(замена.stored)}`);
+  const наМойке = await get("/parts/at?location=washing");
+  if (!наМойке.some((u) => u.id === миксер.id)) throw new Error("снятый узел не виден в /parts/at?location=washing");
+
+  // Помыт → сушка (или склад) → склад
+  const помыт = await post(`/parts/${миксер.id}/washed`, { actorRef: "smoke" });
+  const после = помыт.unit.where?.location;
+  if (после !== "drying" && после !== "warehouse") throw new Error(`после мойки узел не на сушке/складе: ${после}`);
+  if (после === "drying") await post(`/parts/${миксер.id}/move`, { to: "warehouse", actorRef: "smoke" });
+  const повтор = await post(`/parts/${миксер.id}/move`, { to: "repair", clientKey: `smoke-move-${stamp}`, actorRef: "smoke" });
+  const повтор2 = await post(`/parts/${миксер.id}/move`, { to: "repair", clientKey: `smoke-move-${stamp}`, actorRef: "smoke" });
+  if (повтор.logId !== повтор2.logId) throw new Error("повтор перемещения по clientKey дал второе движение");
+  await post(`/parts/${миксер.id}/move`, { to: "warehouse", actorRef: "smoke" });
+
+  // Инвентаризация склада: миксер найден, «второй» узел заведён и потерян
+  const потерянный = await post("/parts", { partKind: "grinder", location: "warehouse" });
+  const сессия = await post("/parts/count/sessions", { location: "warehouse", actorRef: "smoke" });
+  const строка = await post(`/parts/count/sessions/${сессия.session.id}/lines`, { partKind: "mixer", inventoryNo: миксер.inventoryNo, photoSkippedReason: "дымовой прогон", actorRef: "smoke" });
+  if (строка.status !== "found") throw new Error(`миксер по номеру не опознан: ${строка.status}`);
+  const отчёт = await post(`/parts/count/sessions/${сессия.session.id}/apply`, { actorRef: "smoke" });
+  if (!отчёт.missing.some((l) => l.includes(потерянный.inventoryNo))) throw new Error(`не найденный узел не попал в отчёт: ${JSON.stringify(отчёт)}`);
+  const пропавший = await get(`/parts/${потерянный.id}`);
+  if (пропавший.where?.location !== "unknown") throw new Error(`не найденный узел не в «неизвестно где»: ${пропавший.where?.location}`);
+  const очередь = await get("/parts/queue");
+  if (!очередь.items.some((u) => u.id === потерянный.id)) throw new Error("узел «неизвестно где» не попал в очередь внимания");
+  await post(`/parts/count/sessions/${сессия.session.id}/reverse`, { actorRef: "smoke" });
+  if ((await get(`/parts/${потерянный.id}`)).where?.location !== "warehouse") throw new Error("откат инвентаризации не вернул узел на склад");
+
+  // Возврат бункера: без тары — записан, не оприходован, причина названа
+  const бункер = await post("/parts", { partKind: "hopper", setNumber: 27, hopperPosition: 8, location: "warehouse" });
+  if (бункер.inventoryNo !== "H-27-8") throw new Error(`бункер набора получил не свой номер: ${бункер.inventoryNo}`);
+  const возврат = await post("/coffee/container-return", { position: 8, containerNumber: 27, weight: 900, returnedDate: new Date().toISOString().slice(0, 10) });
+  if (возврат.partUnitId !== бункер.id) throw new Error("возврат не привязался к узлу-бункеру");
+  if (возврат.reason !== "нет тары" && возврат.stockMovementId === null) throw new Error(`без тары ожидали причину «нет тары», получили: ${возврат.reason}`);
+  const безПрихода = await get("/coffee/container-return/unposted");
+  if (!безПрихода.some((r) => r.id === возврат.id)) throw new Error("возврат без тары не виден в /coffee/container-return/unposted");
+  await jsonRequest("DELETE", `/coffee/container-return/${возврат.id}?actor=smoke`);
+}
+
+/**
  * Срез Г: продажи по имени товара — карточка товара зовёт /sales/by-product.
  *
  * Таблицу `sale` наполняет только синк из mydon-stock (STOCK_DATABASE_URL),
@@ -1888,6 +1958,55 @@ async function проверитьСогласование() {
     decision: "approved",
   });
   if (repeated.r.ok) throw new Error("повторное решение прошло, хотя запрос уже закрыт");
+}
+
+/**
+ * Карточка агента: kb_pages (миграция 0083) и границы роли доезжают до базы и
+ * обратно, а путь наружу (`..`, не shared/) отсекается валидатором. Заглушка
+ * drizzle этого не доказывает: jsonb-колонка с default '[]' и её чтение — SQL.
+ */
+async function проверитьКарточкуАгента() {
+  const name = `smoke-kb-${Date.now()}`;
+  const kbPages = ["shared/kb/globerent/heli-models.md", "shared/kb/globerent/pricelist.md"];
+  const created = await jsonRequest("POST", "/agents", {
+    name,
+    business: "globerent",
+    status: "paused",
+    mission: "Проверка round-trip карточки агента",
+    nonGoals: ["НЕ пишет клиентам"],
+    skills: ["qualify-lead"],
+    kbPages,
+  });
+  if (!created.r.ok) throw new Error(`создание → ${created.r.status}: ${created.text.slice(0, 200)}`);
+
+  const read = await jsonRequest("GET", `/agents/${name}`);
+  if (!read.r.ok) throw new Error(`чтение → ${read.r.status}`);
+  if (JSON.stringify(read.json.kbPages) !== JSON.stringify(kbPages)) {
+    throw new Error(`kbPages не доехали до базы и обратно: ${JSON.stringify(read.json.kbPages)}`);
+  }
+  if (read.json.mission !== "Проверка round-trip карточки агента" || read.json.nonGoals?.length !== 1) {
+    throw new Error("mission/nonGoals потерялись при создании");
+  }
+
+  const escape = await jsonRequest("PATCH", `/agents/${name}`, { kbPages: ["shared/kb/../../.env"] });
+  if (escape.r.ok) throw new Error("путь с .. в kbPages принят — контекст модели можно увести наружу");
+  const outside = await jsonRequest("PATCH", `/agents/${name}`, { kbPages: ["kb/globerent/faq.md"] });
+  if (outside.r.ok) throw new Error("путь не из shared/ в kbPages принят");
+
+  const patched = await jsonRequest("PATCH", `/agents/${name}`, { kbPages: [kbPages[0]] });
+  if (!patched.r.ok) throw new Error(`правка → ${patched.r.status}: ${patched.text.slice(0, 200)}`);
+  const after = await jsonRequest("GET", `/agents/${name}`);
+  if (JSON.stringify(after.json.kbPages) !== JSON.stringify([kbPages[0]])) {
+    throw new Error(`patch kbPages не применился: ${JSON.stringify(after.json.kbPages)}`);
+  }
+  if (after.json.mission !== "Проверка round-trip карточки агента") {
+    throw new Error("patch kbPages затёр mission — частичная правка должна оставлять остальное");
+  }
+
+  const archived = await jsonRequest("DELETE", `/agents/${name}`);
+  if (!archived.r.ok) throw new Error(`архивация → ${archived.r.status}`);
+  const list = await jsonRequest("GET", "/agents");
+  if (list.json.some((row) => row.name === name)) throw new Error("архивный агент остался в списке активных");
 }
 
 /** Два этапа инкассации и защита от повторного приёма на живом SQL. */
@@ -2884,6 +3003,13 @@ try {
   }
 
   try {
+    await проверитьУзлыСНомерами();
+    console.log("  ok  сценарий: узел с номером — наклейка, замена по узлу, мойка, инвентаризация, возврат бункера");
+  } catch (e) {
+    провалы.push(`узлы с номерами: ${e.message}`);
+  }
+
+  try {
     await проверитьПродажиТовара();
     console.log("  ok  сценарий: продажи товара — имя, алиасы, несвязанные");
   } catch (e) {
@@ -2895,6 +3021,13 @@ try {
     console.log("  ok  сценарий: согласование → исполнение → утверждённая карточка");
   } catch (e) {
     провалы.push(`согласование: ${e.message}`);
+  }
+
+  try {
+    await проверитьКарточкуАгента();
+    console.log("  ok  сценарий: карточка агента — kb_pages/mission round-trip, путь наружу отсечён");
+  } catch (e) {
+    провалы.push(`карточка агента: ${e.message}`);
   }
 
   try {

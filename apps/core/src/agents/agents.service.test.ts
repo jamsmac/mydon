@@ -38,7 +38,22 @@ describe("Настройки агента: конфиг-поля навыков 
     assert.deepEqual(v.webSources, []);
     assert.deepEqual(v.breakGlass, []);
     assert.deepEqual(v.ideaChannels, []);
+    assert.deepEqual(v.kbPages, [], "kb_pages по умолчанию пусты — иначе NOT NULL колонка упала бы на insert");
     assert.equal(v.budgetOnExceeded, null);
+  });
+
+  it("update пишет страницы знаний (kbPages) и не трогает их, когда поле не передано", async () => {
+    const { db, captured } = stub({ existing: { id: "a1", name: "globerent-sales" } });
+    const svc = new AgentsService(db);
+    await svc.update("globerent-sales", {
+      kbPages: ["shared/kb/globerent/heli-models.md", "shared/kb/globerent/pricelist.md"],
+    });
+    assert.deepEqual(captured.update[0].kbPages, [
+      "shared/kb/globerent/heli-models.md",
+      "shared/kb/globerent/pricelist.md",
+    ]);
+    await svc.update("globerent-sales", { description: "только описание" });
+    assert.equal("kbPages" in captured.update[1], false, "непереданные kbPages не затираются");
   });
 
   it("update переносит каналы идей, break-glass и стратегию бюджета", async () => {

@@ -16,7 +16,8 @@ import { checkLimit, dailyCap, startOfTashkentDay } from "./limits";
 import { NO_SIGNAL_SIGNATURE, matchesSignature, signature } from "./memory";
 import { effectiveActionTier, explainPolicy, requiresApproval } from "./policy";
 import type { AgentDefinition } from "./registry";
-import { SKILLS, type SkillRunContext } from "./skills";
+import { LlmSkillFailedError, LlmSkillInvalidOutputError } from "./llm-skill";
+import { resolveSkill, type SkillRunContext } from "./skills";
 import { TaskLlmWorkflowChangedError } from "./task-llm-session";
 
 /** Everything Core needs to atomically fence and commit a task outcome. */
@@ -47,7 +48,11 @@ export interface RunResult {
     | "budget_denied"
     | "execution_unknown"
     | "workflow_changed"
-    | "ledger_unavailable";
+    | "ledger_unavailable"
+    /** llm-навык: провайдер не дал ответа (не путать с «повода нет»). */
+    | "llm_failed"
+    /** llm-навык: ответ модели не по контракту — предложение не создаётся (R-LS-5). */
+    | "llm_invalid_output";
   /** Предложение навыка (текст и факты) — чтобы отчёт по задаче не звал навык
    *  повторно (иначе первый прогон и отчёт могут разойтись). */
   action?: string;
@@ -161,7 +166,8 @@ export async function runSkill(
   }
 
   // Навык ещё не реализован — честно говорим об этом, а не изображаем работу.
-  const impl = SKILLS[skill];
+  // Реализация — код из SKILLS или llm-исполнитель markdown-паспорта (executor: llm).
+  const impl = resolveSkill(skill);
   if (impl === undefined && existingCheckpoint === undefined) {
     return {
       agent: agent.name,
@@ -205,6 +211,26 @@ export async function runSkill(
         outcome: "skipped",
         skipReason: "workflow_changed",
         reason: `LLM workflow изменился после старта execution: ${error.message}`,
+      };
+    }
+    // llm-навык: сбой провайдера и ответ не по контракту — не «повода нет», а
+    // отдельные исходы: владелец видит, что навык не сработал, и почему.
+    if (error instanceof LlmSkillInvalidOutputError) {
+      return {
+        agent: agent.name,
+        skill,
+        outcome: "skipped",
+        skipReason: "llm_invalid_output",
+        reason: `${error.message}; начало ответа: ${error.raw.slice(0, 200)}`,
+      };
+    }
+    if (error instanceof LlmSkillFailedError) {
+      return {
+        agent: agent.name,
+        skill,
+        outcome: "skipped",
+        skipReason: "llm_failed",
+        reason: error.message,
       };
     }
     if (!isLlmLedgerBlockingError(error)) throw error;

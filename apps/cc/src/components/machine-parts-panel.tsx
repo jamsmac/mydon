@@ -37,6 +37,8 @@ export interface PartRow {
   installedOn: string;
   removedOn: string | null;
   note: string | null;
+  /** Карточка узла: номер и наклейка (R-PU-1). */
+  unit?: { id: string; inventoryNo: string | null; labelPending: boolean; retiredAt: string | null } | null;
 }
 
 type Mode =
@@ -49,6 +51,36 @@ const дата = (d: string | null): string => (d ? d.split("-").reverse().join(
 
 const место = (p: PartRow): string =>
   `${partLabel(p.partKind)}${p.slot !== null ? ` №${p.slot}` : ""}`;
+
+/**
+ * Инвентарный номер узла и состояние наклейки (R-PU-2, R-PU-4). Карточка узла —
+ * по ссылке; «наклеить» и «без номера» — оранжевым, потому что это действие
+ * сотрудника, а не справка.
+ */
+function НомерУзла({ p }: { p: PartRow }) {
+  const u = p.unit;
+  if (!u) return null;
+  const href = `/parts/${u.id}`;
+  if (!u.inventoryNo) {
+    return (
+      <a className="pill act" href={href}>
+        без номера
+      </a>
+    );
+  }
+  return (
+    <>
+      <a className="pill mono" href={href}>
+        {u.inventoryNo}
+      </a>
+      {u.labelPending && (
+        <a className="pill act" href={href} title="Номер присвоен системой — наклейте его на деталь и подтвердите">
+          наклеить
+        </a>
+      )}
+    </>
+  );
+}
 
 export function MachinePartsPanel({
   machineId,
@@ -169,6 +201,7 @@ export function MachinePartsPanel({
             <div className="row" key={p.id}>
               <div className="t">
                 {место(p)}
+                <НомерУзла p={p} />
                 {p.serialNumber && <span className="pill mono"> {p.serialNumber}</span>}
                 {p.model && <span className="pill">{p.model}</span>}
               </div>

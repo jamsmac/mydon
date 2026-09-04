@@ -16,6 +16,8 @@ schedule:
 budget:
   per_day_usd: 2.0
   on_exceeded: pause
+# ВНИМАНИЕ (04.09.2026): поле рантаймом НЕ читается — модель задаёт LLM_MODEL/LLM_FALLBACK_MODELS,
+# усилие — `model-effort` во frontmatter llm-навыка. Оставлено как заметка о замысле.
 model_routing:
   simple: reasoning-strong
   complex: reasoning-strong

@@ -3,6 +3,7 @@ import type { Conversations } from "./conversation";
 import { applyPress, NUMPAD_MAX_DIGITS, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
 import { newRunId } from "./staff-refill";
 import type { StaffReply } from "./staff";
+import { parseStockTab, stockTabItems, stockTabNoun, stockTabRow, type StockTab } from "./stock-tabs";
 import { fmtQty, parseQty } from "./staff-inventory";
 
 /**
@@ -28,9 +29,11 @@ export function isIntakeTrigger(text: string): boolean {
 }
 
 /** Клавиатура выбора (склад/ингредиент). Префикс «n:» — своё пространство. */
-function pickKeyboard(items: EntityRow[], kind: "wh" | "ing"): NonNullable<StaffReply["keyboard"]> {
+function pickKeyboard(items: EntityRow[], kind: "wh" | "ing", tab?: StockTab): NonNullable<StaffReply["keyboard"]> {
   return {
     inline_keyboard: [
+      // Вкладки — только на шаге карточки: у складов вкладок нет.
+      ...(tab ? [stockTabRow("n", tab)] : []),
       ...items.slice(0, 30).map((it) => [{ text: it.name.slice(0, 40), callback_data: `n:${kind}:${it.id}` }]),
       [{ text: "✖️ Отмена", callback_data: "n:cancel" }],
     ],
@@ -40,12 +43,16 @@ function pickKeyboard(items: EntityRow[], kind: "wh" | "ing"): NonNullable<Staff
 export type IntakeCallback =
   | { kind: "warehouse"; id: string }
   | { kind: "ingredient"; id: string }
+  /** Вкладка «Сырьё / Товары» (У6): тот же список, другой тип карточек. */
+  | { kind: "tab"; tab: StockTab }
   | { kind: "num"; press: NumpadPress }
   | { kind: "cancel" };
 
 /** Строгий разбор нажатия. Данные кнопки приходят снаружи — доверять нельзя. */
 export function parseIntakeCallback(data: string): IntakeCallback | null {
   if (data === "n:cancel") return { kind: "cancel" };
+  const tab = parseStockTab("n", data);
+  if (tab) return { kind: "tab", tab };
   const wh = /^n:wh:([0-9a-f-]{36})$/.exec(data);
   if (wh) return { kind: "warehouse", id: wh[1] };
   const ing = /^n:ing:([0-9a-f-]{36})$/.exec(data);
@@ -83,14 +90,14 @@ export async function startIntake(chatId: number, deps: IntakeDeps): Promise<Sta
   return { text: "На какой склад пришло?", keyboard: pickKeyboard(whs, "wh") };
 }
 
-async function ingredientStep(chatId: number, deps: IntakeDeps, warehouseName: string): Promise<StaffReply> {
-  const ings = await deps.core.ingredients();
-  if (ings.length === 0) {
+async function ingredientStep(chatId: number, deps: IntakeDeps, warehouseName: string, tab: StockTab = "ing"): Promise<StaffReply> {
+  const items = await stockTabItems(deps.core, tab);
+  if (items.length === 0 && tab === "ing") {
     deps.conversations.clear(chatId);
     return { text: "Ингредиентов в реестре пока нет — сначала заведи их («новый ингредиент»)." };
   }
-  const note = ings.length > 30 ? "\n(показаны первые 30)" : "";
-  return { text: `Склад «${warehouseName}». Что пришло?${note}`, keyboard: pickKeyboard(ings, "ing") };
+  const note = items.length > 30 ? "\n(показаны первые 30)" : items.length === 0 ? "\nТоваров на перепродажу в реестре нет — владелец заводит их в панели (POST /stock/vending-cards)." : "";
+  return { text: `Склад «${warehouseName}». Что пришло?${note}`, keyboard: pickKeyboard(items, "ing", tab) };
 }
 
 /** Нажатие кнопки прихода: склад, ингредиент, нумпад, отмена. */
@@ -156,6 +163,12 @@ export async function handleIntakeCallback(
     if (!wh) return { answer: "Склад не найден", message: { text: "Этого склада уже нет — начни заново." } };
     deps.conversations.advance(chatId, "ingredient", { warehouseId: wh.id, warehouseName: wh.name });
     return { answer: wh.name, message: await ingredientStep(chatId, deps, wh.name) };
+  }
+
+  if (cb.kind === "tab") {
+    if (conv.step !== "ingredient") return { answer: "Не сейчас" };
+    deps.conversations.advance(chatId, "ingredient", { tab: cb.tab });
+    return { answer: stockTabNoun(cb.tab), edit: await ingredientStep(chatId, deps, String(conv.data.warehouseName ?? "склад"), cb.tab) };
   }
 
   // cb.kind === "ingredient": показываем остаток и ждём количество.

@@ -11,6 +11,7 @@ import type {
   OurvendHealth,
   OurvendSyncRun,
   ParityStreak,
+  PartLocation,
   PriceChangesReport,
   PriceGapReport,
   ProductFiscal,
@@ -485,6 +486,9 @@ export interface CoffeeContainerReturnRow {
   returnedDate: string;
   locationNote: string | null;
   createdBy: string | null;
+  /** Узел-бункер и приход на склад (У5); старый Core полей не отдаёт. */
+  partUnitId?: string | null;
+  stockMovementId?: string | null;
 }
 
 /** Расход по наборам: сводка точки за период (заливка − возврат через тару). */
@@ -1165,6 +1169,8 @@ export interface AgentCard {
   webSources: { name: string; url: string }[];
   breakGlass: string[];
   ideaChannels: string[];
+  /** Страницы знаний — пути внутри apps/agents/shared (например shared/kb/globerent/heli-models.md). */
+  kbPages: string[];
   archivedAt: string | null;
   updatedAt: string;
 }
@@ -1948,6 +1954,8 @@ export interface WarehouseStock {
   items: {
     ingredientId: string;
     ingredientName: string;
+    /** `ingredient` — сырьё, `product` — товар на перепродажу (У6). Старый Core поля не отдаёт. */
+    cardType?: "ingredient" | "product";
     baseUnit: string | null;
     qty: number | null;
     unconvertible: number;
@@ -2218,6 +2226,130 @@ export interface MaintenancePlan {
   isActive: boolean;
 }
 
+// ── Узлы автоматов: карточки part_unit (спека vendhub-parts, У1–У2) ──
+
+export type PartAttention = "no_number" | "label_pending" | "unknown_location" | "no_tare" | "no_photo";
+
+export interface PartUnit {
+  id: string;
+  partKind: string;
+  inventoryNo: string | null;
+  labelPending: boolean;
+  serialNumber: string | null;
+  model: string | null;
+  manufacturer: string | null;
+  setNumber: number | null;
+  hopperPosition: number | null;
+  tareWeight: number | null;
+  purchaseDate: string | null;
+  purchasePrice: string | null;
+  warrantyUntil: string | null;
+  retiredAt: string | null;
+  retiredReason: string | null;
+  origin: "auto" | "manual" | "count" | "backfill";
+  note: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Где узел сейчас — открытый период; null — местонахождение неизвестно. */
+  where: {
+    location: string;
+    machineId: string | null;
+    machineName: string | null;
+    slot: number | null;
+    since: string;
+    periodId: string;
+  } | null;
+  attention: PartAttention[];
+  label: string;
+  photoCount: number;
+}
+
+export interface PartsQueue {
+  counts: Record<PartAttention, number>;
+  items: PartUnit[];
+}
+
+/** Сверка `vending_stock` с леджером по товарам (У6). */
+export interface VendingParity {
+  warehouseId: string | null;
+  rows: { productName: string; productId: string | null; cardId: string | null; table: number; ledger: number | null; diff: number | null }[];
+  mismatched: number;
+  unlinked: number;
+}
+
+/** Инвентаризация узлов (У4): сессия по месту и строки. */
+export interface PartCountSession {
+  id: string;
+  location: string;
+  warehouseId: string | null;
+  personId: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  appliedAt: string | null;
+  appliedBy: string | null;
+  reversesId: string | null;
+  note: string | null;
+  createdBy: string;
+}
+
+export interface PartCountSessionListRow extends PartCountSession {
+  lines: number;
+  personName: string | null;
+}
+
+export interface PartCountLine {
+  id: string;
+  sessionId: string;
+  partUnitId: string | null;
+  partKind: string;
+  inventoryNoEntered: string | null;
+  serialEntered: string | null;
+  setNumberEntered: number | null;
+  hopperPositionEntered: number | null;
+  photoSkippedReason: string | null;
+  result: "found" | "new" | "missing" | "reversed" | null;
+  prevLocation: string | null;
+  prevMachineId: string | null;
+  prevSlot: number | null;
+  createdBy: string | null;
+  createdAt: string;
+  label: string;
+  unit: PartUnit | null;
+  photoCount: number;
+  registeredAt: string | null;
+}
+
+export interface PartCountSummary {
+  session: PartCountSession;
+  lines: PartCountLine[];
+  expected: PartUnit[];
+  found: number;
+  fresh: number;
+  moved: number;
+  missing: PartUnit[];
+  photoRequired: boolean;
+}
+
+export interface PartCountApplyReport {
+  sessionId: string;
+  found: number;
+  created: string[];
+  moved: string[];
+  missing: string[];
+}
+
+export interface PartUnitPeriod extends MachinePart {
+  machineName: string | null;
+}
+
+export interface PartsProvisionReport {
+  dryRun: boolean;
+  template: { kind: string; count: number }[];
+  machines: { machineId: string; machineName: string; created: string[]; existing: number; hopperSetsFound: number }[];
+  createdTotal: number;
+}
+
 export interface MaintenanceLogRow {
   id: string;
   entityId: string;
@@ -2237,6 +2369,8 @@ export interface MaintenanceLogRow {
  */
 export interface MachinePart {
   id: string;
+  /** Карточка физического узла (R-PU-1). */
+  partUnitId: string;
   machineId: string | null;
   location: string;
   partKind: string;
@@ -2248,6 +2382,8 @@ export interface MachinePart {
   warrantyUntil: string | null;
   reason: string | null;
   note: string | null;
+  /** Номер и наклейка — из карточки узла; null у истории до 0084 не бывает, но поле честно nullable. */
+  unit?: { id: string; inventoryNo: string | null; labelPending: boolean; retiredAt: string | null } | null;
 }
 
 /** Период истории экземпляра (по серийнику) с именем автомата. */
@@ -2319,6 +2455,52 @@ export const core = {
     get<MachinePart[]>(`/maintenance/parts?machineId=${machineId}`),
   /** Узлы вне автоматов: склад, мойка, сушка, ремонт. */
   machinePartsStorage: () => get<MachinePart[]>("/maintenance/parts/storage"),
+  // ── Узлы: карточки, очередь, номера ──
+  parts: (q: { kind?: string; location?: string; machineId?: string; attention?: boolean; retired?: boolean; q?: string } = {}) => {
+    const p = new URLSearchParams();
+    if (q.kind) p.set("kind", q.kind);
+    if (q.location) p.set("location", q.location);
+    if (q.machineId) p.set("machineId", q.machineId);
+    if (q.attention) p.set("attention", "1");
+    if (q.retired) p.set("retired", "1");
+    if (q.q) p.set("q", q.q);
+    const s = p.toString();
+    return get<PartUnit[]>(`/parts${s ? `?${s}` : ""}`);
+  },
+  partsQueue: () => get<PartsQueue>("/parts/queue"),
+  part: (id: string) => get<PartUnit>(`/parts/${id}`),
+  partUnitHistory: (id: string) => get<PartUnitPeriod[]>(`/parts/${id}/history`),
+  partLogs: (id: string) => get<MaintenanceLogRow[]>(`/parts/${id}/logs`),
+  partsInstalled: (machineId: string) => get<PartUnit[]>(`/parts/installed?machineId=${machineId}`),
+  partsSpares: (kind: string) => get<PartUnit[]>(`/parts/spares?kind=${encodeURIComponent(kind)}`),
+  partsTemplate: () => get<{ kind: string; count: number }[]>("/parts/template"),
+  partSetNumber: (id: string, input: { inventoryNo?: string; confirmLabel?: boolean; actorRef?: string }) =>
+    send<PartUnit>(`/parts/${id}/number`, "POST", input),
+  partUpdate: (id: string, patch: Record<string, unknown>) => send<PartUnit>(`/parts/${id}`, "PATCH", patch),
+  partRetire: (id: string, reason: string, actorRef = "owner") =>
+    send<PartUnit>(`/parts/${id}/retire`, "POST", { reason, actorRef }),
+  /** Перемещение узла вне автомата (У3): мойка → сушка → склад, склад ↔ ремонт. */
+  partMove: (id: string, input: { to: PartLocation; note?: string; actorRef?: string }) =>
+    send<{ unit: PartUnit; from: string | null; logId: string | null }>(`/parts/${id}/move`, "POST", input),
+  /** «Помыт»: с мойки на сушку или сразу на склад — по настройке Core. */
+  partWashed: (id: string, actorRef = "owner") =>
+    send<{ unit: PartUnit; from: string | null; logId: string | null }>(`/parts/${id}/washed`, "POST", { actorRef }),
+  partsProvision: (input: { dryRun?: boolean; machineIds?: string[]; actorRef?: string }) =>
+    send<PartsProvisionReport>("/parts/provision", "POST", input),
+  /** Сверка проекции товаров с леджером (У6). */
+  vendingParity: () => get<VendingParity>("/stock/vending-parity"),
+  /** Карточки реестра для товаров прайса (У6): связать или завести; dryRun — только план. */
+  vendingCards: (dryRun: boolean) =>
+    send<{ linked: string[]; created: string[]; ambiguous: string[]; already: number }>(`/stock/vending-cards?dryRun=${dryRun ? "1" : "0"}&actor=owner`, "POST", {}),
+  /** Инвентаризация узлов (У4): сессии, сводка, применение, откат. */
+  partCountSessions: (limit = 50) => get<PartCountSessionListRow[]>(`/parts/count/sessions?limit=${limit}`),
+  partCountSummary: (id: string) => get<PartCountSummary>(`/parts/count/sessions/${id}`),
+  partCountStart: (input: { location: string; personId?: string; note?: string; actorRef?: string }) =>
+    send<{ session: PartCountSession; resumed: boolean; photoRequired: boolean; expected: number }>("/parts/count/sessions", "POST", input),
+  partCountApply: (id: string, actorRef = "owner") => send<PartCountApplyReport>(`/parts/count/sessions/${id}/apply`, "POST", { actorRef }),
+  partCountReverse: (id: string, actorRef = "owner") =>
+    send<{ session: PartCountSession; restored: string[]; skipped: string[] }>(`/parts/count/sessions/${id}/reverse`, "POST", { actorRef }),
+  partCountRemoveLine: (lineId: string, actorRef = "owner") => send<{ ok: boolean }>(`/parts/count/lines/${lineId}/remove`, "POST", { actorRef }),
   /** История экземпляров по серийнику и/или модели — все периоды в обе стороны. */
   partHistory: (q: { serial?: string; model?: string }) => {
     const qs = new URLSearchParams();

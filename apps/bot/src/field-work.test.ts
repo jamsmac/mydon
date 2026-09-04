@@ -78,6 +78,9 @@ function stubCore(over: Record<string, unknown> = {}) {
       calls.push(`remove:${String(i.partKind)}:${String(i.slot ?? "-")}:${String(i.toLocation)}`);
       return { log: { id: "log-4" }, removed: { serialNumber: "HOP-33" } };
     },
+    // Карточек узлов на автомате нет (автомат до автозаведения) — замена идёт прежним путём.
+    partsInstalled: async () => [],
+    partsSpares: async () => [],
     ...over,
   } as never;
   return { core, calls };
@@ -635,5 +638,142 @@ describe("Снятие и установка узла", () => {
     const res = await handlePartReplaceCallback(1, { kind: "slot", slot: null }, ME, deps);
     assert.match(res.message!.text, /Место занято/);
     assert.equal(conversations.get(1), null);
+  });
+});
+
+// ── Замена по узлам (У3): узлы автомата заведены карточками ────────────────
+
+const U_OLD = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+const U_OLD2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+const U_SPARE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
+
+function unitRow(id: string, no: string, slot: number | null, location = "machine") {
+  return {
+    id,
+    partKind: "mixer",
+    inventoryNo: no,
+    labelPending: false,
+    serialNumber: null,
+    setNumber: null,
+    hopperPosition: null,
+    tareWeight: null,
+    retiredAt: null,
+    where: { location, machineId: location === "machine" ? MACHINE : null, machineName: null, slot, since: "2026-09-01" },
+    attention: [],
+    label: `Миксер ${no}`,
+    photoCount: 0,
+  };
+}
+
+function stubUnits(over: Record<string, unknown> = {}) {
+  const swaps: Record<string, unknown>[] = [];
+  const base = stubCore({
+    partsInstalled: async () => [unitRow(U_OLD, "M-017", 1), unitRow(U_OLD2, "M-018", 2)],
+    partsSpares: async () => [unitRow(U_SPARE, "M-031", null, "warehouse")],
+    swapPart: async (i: Record<string, unknown>) => {
+      swaps.push(i);
+      return { log: { id: "log-1" }, removed: { serialNumber: null, partUnitId: U_OLD }, installed: { partUnitId: U_SPARE, serialNumber: null } };
+    },
+    ...over,
+  });
+  return { ...base, swaps };
+}
+
+describe("Замена по узлам (У3): снятый по номеру, запасной со склада", () => {
+  it("парсер узнаёт pt:old / pt:sp и «нет в списке»", () => {
+    assert.deepEqual(parsePartReplaceCallback(`pt:old:${U_OLD}`), { kind: "swapOld", unitId: U_OLD });
+    assert.deepEqual(parsePartReplaceCallback("pt:old:0"), { kind: "swapOld", unitId: null });
+    assert.deepEqual(parsePartReplaceCallback(`pt:sp:${U_SPARE}`), { kind: "swapSpare", unitId: U_SPARE });
+    assert.equal(parsePartReplaceCallback("pt:old:xyz"), null);
+  });
+
+  it("узел → какой снял (по номеру) → куда увёз (мойка первой) → запасной → причина → запись с partUnitId/slot/removedTo", async () => {
+    const conversations = new Conversations();
+    const { core, swaps } = stubUnits();
+    const deps = { core, conversations };
+    await startPartReplace(1, ME, deps);
+    await onObjectPicked(1, MACHINE, deps);
+    await handlePartReplaceCallback(1, { kind: "action", action: "swap" }, ME, deps);
+
+    const pick = await handlePartReplaceCallback(1, { kind: "part", part: "mixer" }, ME, deps);
+    assert.equal(conversations.get(1)?.step, "swapold", "карточки есть — серийник старого не нужен");
+    const oldLabels = pick.message!.keyboard!.inline_keyboard.flat().map((b) => b.text);
+    assert.deepEqual(oldLabels.slice(0, 2), ["M-017 · №1", "M-018 · №2"]);
+    assert.ok(oldLabels.includes("Нет в списке"));
+
+    const to = await handlePartReplaceCallback(1, { kind: "swapOld", unitId: U_OLD }, ME, deps);
+    assert.match(to.message!.text, /Снят Миксер M-017. Куда увёз\?/);
+    const toLabels = to.message!.keyboard!.inline_keyboard.flat().map((b) => b.text);
+    assert.equal(toLabels[0], "Мойка", "миксер моют — мойка первой");
+    assert.equal(conversations.get(1)?.step, "swapto");
+
+    const spare = await handlePartReplaceCallback(1, { kind: "removeTo", to: "washing" }, ME, deps);
+    assert.equal(conversations.get(1)?.step, "swapnew");
+    const spareLabels = spare.message!.keyboard!.inline_keyboard.flat().map((b) => b.text);
+    assert.equal(spareLabels[0], "M-031 · склад");
+    assert.ok(spareLabels.some((l) => l.includes("Новый узел")));
+
+    const reason = await handlePartReplaceCallback(1, { kind: "swapSpare", unitId: U_SPARE }, ME, deps);
+    assert.equal(conversations.get(1)?.step, "reason", "запасной выбран — серийник не спрашиваем");
+    assert.match(reason.message!.text, /Поставлен Миксер M-031/);
+
+    const done = await handlePartReplaceCallback(1, { kind: "reason", reason: "preventive" }, ME, deps);
+    assert.equal(swaps.length, 1);
+    assert.equal(swaps[0].slot, 1);
+    assert.equal(swaps[0].partUnitId, U_SPARE);
+    assert.equal(swaps[0].removedTo, "washing");
+    assert.equal(swaps[0].newSerial, undefined);
+    assert.match(done.message!.text, /Миксер №1/);
+    assert.match(done.message!.text, /Снят: Миксер M-017 → мойка/);
+    assert.match(done.message!.text, /Поставлен: Миксер M-031 \(со склада\)/);
+  });
+
+  it("«Новый узел» при замене по узлам: серийник → причина; Core заведёт карточку", async () => {
+    const conversations = new Conversations();
+    const { core, swaps } = stubUnits({ partsSpares: async () => [] });
+    const deps = { core, conversations };
+    await startPartReplace(1, ME, deps);
+    await onObjectPicked(1, MACHINE, deps);
+    await handlePartReplaceCallback(1, { kind: "part", part: "mixer" }, ME, deps);
+    await handlePartReplaceCallback(1, { kind: "swapOld", unitId: U_OLD2 }, ME, deps);
+    const spare = await handlePartReplaceCallback(1, { kind: "removeTo", to: "repair" }, ME, deps);
+    assert.match(spare.message!.text, /Запасных миксер.* на складе не числится/);
+    await handlePartReplaceCallback(1, { kind: "installNew" }, ME, deps);
+    assert.equal(conversations.get(1)?.step, "serial");
+    handlePartSerial(1, "MX-NEW", deps);
+    const done = await handlePartReplaceCallback(1, { kind: "reason", reason: "failure" }, ME, deps);
+    assert.equal(swaps[0].slot, 2);
+    assert.equal(swaps[0].removedTo, "repair");
+    assert.equal(swaps[0].newSerial, "MX-NEW");
+    assert.equal(swaps[0].partUnitId, undefined);
+    assert.match(done.message!.text, /Снят: Миксер M-018 → ремонт/);
+    assert.match(done.message!.text, /Новый: MX-NEW/);
+  });
+
+  it("«Нет в списке» — прежний путь без узла: серийник → причина, без slot и removedTo", async () => {
+    const conversations = new Conversations();
+    const { core, swaps } = stubUnits();
+    const deps = { core, conversations };
+    await startPartReplace(1, ME, deps);
+    await onObjectPicked(1, MACHINE, deps);
+    await handlePartReplaceCallback(1, { kind: "part", part: "mixer" }, ME, deps);
+    await handlePartReplaceCallback(1, { kind: "swapOld", unitId: null }, ME, deps);
+    assert.equal(conversations.get(1)?.step, "serial");
+    await handlePartReplaceCallback(1, { kind: "noSerial" }, ME, deps);
+    await handlePartReplaceCallback(1, { kind: "reason", reason: "upgrade" }, ME, deps);
+    assert.equal(swaps[0].slot, undefined);
+    assert.equal(swaps[0].removedTo, undefined);
+  });
+
+  it("кнопка узла с устаревшего экрана не действует и не пишет", async () => {
+    const conversations = new Conversations();
+    const { core, swaps } = stubUnits();
+    const deps = { core, conversations };
+    await startPartReplace(1, ME, deps);
+    await onObjectPicked(1, MACHINE, deps);
+    const res = await handlePartReplaceCallback(1, { kind: "swapOld", unitId: U_OLD }, ME, deps);
+    assert.equal(res.answer, "Кнопка устарела");
+    assert.equal(conversations.get(1)?.step, "action", "мастер остался на своём шаге");
+    assert.deepEqual(swaps, []);
   });
 });

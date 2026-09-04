@@ -7,6 +7,7 @@ import {
   machinePart,
   maintenanceLog,
   maintenancePlan,
+  partUnit,
 } from "@mydon/db";
 import {
   actorKindOf,
@@ -19,8 +20,10 @@ import {
   normKey,
   normsFor,
   partLabel,
+  suggestInventoryNo,
   TZ,
   type DueStatus,
+  type PartKind,
 } from "@mydon/shared";
 import { and, desc, eq, gte, inArray, isNull, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -31,6 +34,21 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type LogRow = typeof maintenanceLog.$inferSelect;
 type PartRow = typeof machinePart.$inferSelect;
 type PlanRow = typeof maintenancePlan.$inferSelect;
+type UnitRow = typeof partUnit.$inferSelect;
+
+/** Период + карточка узла: номер и наклейка видны там же, где серийник (R-PU-1). */
+export type PartWithUnit = PartRow & {
+  unit: { id: string; inventoryNo: string | null; labelPending: boolean; retiredAt: string | null } | null;
+};
+
+function withUnit(r: { period: PartRow; unit: UnitRow | null }): PartWithUnit {
+  return {
+    ...r.period,
+    unit: r.unit
+      ? { id: r.unit.id, inventoryNo: r.unit.inventoryNo, labelPending: r.unit.labelPending, retiredAt: r.unit.retiredAt }
+      : null,
+  };
+}
 
 export type MaintenanceKind =
   | "cleaning"
@@ -72,6 +90,8 @@ export interface InstallPartInput {
   slot?: number;
   /** Открытый период «узел вне автомата» — если ставим существующий экземпляр. */
   partId?: string;
+  /** Карточка узла (R-PU-1) — если ставим существующий экземпляр по карточке, а не по периоду. */
+  partUnitId?: string;
   serialNumber?: string;
   model?: string;
   warrantyUntil?: string;
@@ -106,6 +126,13 @@ export interface SwapPartInput {
   slot?: number;
   oldSerial?: string;
   newSerial?: string;
+  /** Карточка запасного узла, который ставим (со склада). Пусто — новый узел заводится тут же. */
+  partUnitId?: string;
+  /**
+   * Куда уходит снятый узел (R-PU-8). Пусто — на склад. Снятый узел не
+   * исчезает: у него открывается период «вне автомата» той же записью журнала.
+   */
+  removedTo?: PartOffLocation;
   model?: string;
   reason?: PartSwapReason;
   personId?: string;
@@ -190,6 +217,53 @@ export function todayInTz(now = new Date()): string {
 @Injectable()
 export class MaintenanceService {
   constructor(@Inject(DB) private readonly db: Db) {}
+
+  /**
+   * Карточка узла для нового экземпляра (R-PU-1, R-PU-2): номер присваивает
+   * система (следующий свободный в серии вида), наклейка — за сотрудником
+   * (`label_pending`). Серийник/модель — с шильдика, если переписали.
+   */
+  private async newUnit(
+    tx: Tx,
+    partKind: PartKind,
+    fields: { serialNumber?: string | null; model?: string | null; warrantyUntil?: string | null },
+    createdBy: string,
+    origin: "manual" | "auto" | "count" = "manual",
+  ): Promise<typeof partUnit.$inferSelect> {
+    const taken = await tx
+      .select({ no: partUnit.inventoryNo })
+      .from(partUnit)
+      .where(and(eq(partUnit.partKind, partKind), sql`${partUnit.inventoryNo} is not null`));
+    const [created] = await tx
+      .insert(partUnit)
+      .values({
+        partKind,
+        inventoryNo: suggestInventoryNo(partKind, taken.map((t) => t.no!)),
+        labelPending: true,
+        serialNumber: fields.serialNumber?.trim() || null,
+        model: fields.model?.trim() || null,
+        warrantyUntil: fields.warrantyUntil ?? null,
+        origin,
+        createdBy,
+      })
+      .returning();
+    return created;
+  }
+
+  /** Карточка узла по id: существует, того же вида, не списана, без открытого периода на автомате. */
+  private async spareUnit(tx: Tx, partUnitId: string, partKind: string) {
+    const [unit] = await tx.select().from(partUnit).where(eq(partUnit.id, partUnitId)).limit(1);
+    if (!unit) throw new NotFoundException("Такой карточки узла нет");
+    if (unit.partKind !== partKind) throw new BadRequestException("Узел другого вида — установка невозможна");
+    if (unit.retiredAt) throw new BadRequestException("Узел списан — ставить его нельзя");
+    const [open] = await tx
+      .select()
+      .from(machinePart)
+      .where(and(eq(machinePart.partUnitId, unit.id), isNull(machinePart.removedOn)))
+      .limit(1);
+    if (open?.machineId) throw new BadRequestException("Этот узел стоит на другом автомате — сначала снимите его");
+    return { unit, open: open ?? null };
+  }
 
   /**
    * Записать факт работы.
@@ -725,13 +799,15 @@ export class MaintenanceService {
   }
 
   /** Узлы автомата: сначала стоящие сейчас, затем история. */
-  parts(machineId: string): Promise<PartRow[]> {
-    return this.db
-      .select()
+  async parts(machineId: string): Promise<PartWithUnit[]> {
+    const rows = await this.db
+      .select({ period: machinePart, unit: partUnit })
       .from(machinePart)
+      .leftJoin(partUnit, eq(partUnit.id, machinePart.partUnitId))
       .where(eq(machinePart.machineId, machineId))
       .orderBy(machinePart.removedOn, desc(machinePart.installedOn))
       .limit(200);
+    return rows.map(withUnit);
   }
 
   /**
@@ -742,7 +818,9 @@ export class MaintenanceService {
    * снятого — два «текущих» узла на одном месте. Второе не пропустит
    * частичный уникальный индекс, первое — только транзакция.
    */
-  async swapPart(input: SwapPartInput): Promise<{ log: LogRow; removed: PartRow | null; installed: PartRow }> {
+  async swapPart(
+    input: SwapPartInput,
+  ): Promise<{ log: LogRow; removed: PartRow | null; installed: PartRow; stored: PartRow | null }> {
     const performedOn = input.performedOn ?? todayInTz();
     const slot = input.slot ?? null;
 
@@ -785,9 +863,14 @@ export class MaintenanceService {
         const [removedBefore] = await tx
           .select()
           .from(machinePart)
-          .where(eq(machinePart.removeLogId, existing.id))
+          .where(and(eq(machinePart.removeLogId, existing.id), eq(machinePart.location, "machine")))
           .limit(1);
-        return { log: existing, removed: removedBefore ?? null, installed: installedBefore };
+        const [storedBefore] = await tx
+          .select()
+          .from(machinePart)
+          .where(and(eq(machinePart.installLogId, existing.id), isNull(machinePart.machineId)))
+          .limit(1);
+        return { log: existing, removed: removedBefore ?? null, installed: installedBefore, stored: storedBefore ?? null };
       }
 
       // Что стояло на этом месте до сих пор.
@@ -805,6 +888,7 @@ export class MaintenanceService {
         .limit(1);
 
       let removed: PartRow | null = null;
+      let stored: PartRow | null = null;
       if (open) {
         [removed] = await tx
           .update(machinePart)
@@ -818,19 +902,66 @@ export class MaintenanceService {
           })
           .where(eq(machinePart.id, open.id))
           .returning();
+        if (removed.serialNumber && input.oldSerial) {
+          // Переписанный серийник — на карточку узла, если там пусто.
+          await tx
+            .update(partUnit)
+            .set({ serialNumber: removed.serialNumber, updatedAt: new Date() })
+            .where(and(eq(partUnit.id, removed.partUnitId), isNull(partUnit.serialNumber)));
+        }
+        // Снятый узел не исчезает (R-PU-8): период «вне автомата» той же записью журнала.
+        [stored] = await tx
+          .insert(machinePart)
+          .values({
+            partUnitId: removed.partUnitId,
+            machineId: null,
+            location: input.removedTo ?? "warehouse",
+            partKind: removed.partKind,
+            slot: null,
+            serialNumber: removed.serialNumber,
+            model: removed.model,
+            installedOn: performedOn,
+            installLogId: log.id,
+            warrantyUntil: removed.warrantyUntil,
+            note: input.note ?? null,
+            createdBy: input.createdBy ?? "owner",
+          })
+          .returning();
+      }
+
+      // Что ставим: запасной узел по карточке (закрываем его «лежачий» период)
+      // или новый — карточка заводится здесь же, номер присваивает система.
+      let unit: typeof partUnit.$inferSelect;
+      if (input.partUnitId) {
+        const spare = await this.spareUnit(tx, input.partUnitId, input.partKind);
+        unit = spare.unit;
+        if (spare.open) {
+          await tx
+            .update(machinePart)
+            .set({ removedOn: performedOn, removeLogId: log.id })
+            .where(eq(machinePart.id, spare.open.id));
+        }
+      } else {
+        unit = await this.newUnit(
+          tx,
+          input.partKind as PartKind,
+          { serialNumber: input.newSerial, model: input.model, warrantyUntil: input.warrantyUntil },
+          input.createdBy ?? "owner",
+        );
       }
 
       const [installed] = await tx
         .insert(machinePart)
         .values({
+          partUnitId: unit.id,
           machineId: input.machineId,
           partKind: input.partKind as PartRow["partKind"],
           slot,
-          serialNumber: input.newSerial ?? null,
-          model: input.model ?? null,
+          serialNumber: input.newSerial ?? unit.serialNumber ?? null,
+          model: input.model ?? unit.model ?? null,
           installedOn: performedOn,
           installLogId: log.id,
-          warrantyUntil: input.warrantyUntil ?? null,
+          warrantyUntil: input.warrantyUntil ?? unit.warrantyUntil ?? null,
           reason: input.reason ?? null,
           note: input.note ?? null,
           createdBy: input.createdBy ?? "owner",
@@ -843,21 +974,23 @@ export class MaintenanceService {
         action: "maintenance.part_swapped",
         target: installed.id,
         before: removed,
-        after: installed,
+        after: { installed, stored },
       });
 
-      return { log, removed, installed };
+      return { log, removed, installed, stored };
     });
   }
 
   /** Узлы вне автоматов: что лежит на складе, мойке, сушке, в ремонте. */
-  storageParts(): Promise<PartRow[]> {
-    return this.db
-      .select()
+  async storageParts(): Promise<PartWithUnit[]> {
+    const rows = await this.db
+      .select({ period: machinePart, unit: partUnit })
       .from(machinePart)
+      .leftJoin(partUnit, eq(partUnit.id, machinePart.partUnitId))
       .where(and(isNull(machinePart.machineId), isNull(machinePart.removedOn)))
       .orderBy(machinePart.partKind, desc(machinePart.installedOn))
       .limit(200);
+    return rows.map(withUnit);
   }
 
   /**
@@ -968,6 +1101,7 @@ export class MaintenanceService {
       let serialNumber = input.serialNumber ?? null;
       let model = input.model ?? null;
       let warrantyUntil = input.warrantyUntil ?? null;
+      let partUnitId: string | null = null;
       if (input.partId) {
         const [stored] = await tx
           .select()
@@ -988,11 +1122,34 @@ export class MaintenanceService {
         serialNumber = stored.serialNumber ?? serialNumber;
         model = stored.model ?? model;
         warrantyUntil = stored.warrantyUntil ?? warrantyUntil;
+        partUnitId = stored.partUnitId;
+      } else if (input.partUnitId) {
+        const spare = await this.spareUnit(tx, input.partUnitId, input.partKind);
+        if (spare.open) {
+          await tx
+            .update(machinePart)
+            .set({ removedOn: performedOn, removeLogId: log.id })
+            .where(eq(machinePart.id, spare.open.id));
+        }
+        serialNumber = spare.unit.serialNumber ?? serialNumber;
+        model = spare.unit.model ?? model;
+        warrantyUntil = spare.unit.warrantyUntil ?? warrantyUntil;
+        partUnitId = spare.unit.id;
+      }
+      if (partUnitId === null) {
+        const created = await this.newUnit(
+          tx,
+          input.partKind as PartKind,
+          { serialNumber, model, warrantyUntil },
+          input.createdBy ?? "owner",
+        );
+        partUnitId = created.id;
       }
 
       const [installed] = await tx
         .insert(machinePart)
         .values({
+          partUnitId,
           machineId: input.machineId,
           location: "machine",
           partKind: input.partKind as PartRow["partKind"],
@@ -1099,9 +1256,17 @@ export class MaintenanceService {
       // Период «вне автомата» открывает та же запись журнала, что закрыла
       // период на автомате, — по installLogId/removeLogId история читается
       // в обе стороны без отдельной таблицы связей.
+      if (removed.serialNumber && input.serial) {
+        await tx
+          .update(partUnit)
+          .set({ serialNumber: removed.serialNumber, updatedAt: new Date() })
+          .where(and(eq(partUnit.id, removed.partUnitId), isNull(partUnit.serialNumber)));
+      }
+
       const [stored] = await tx
         .insert(machinePart)
         .values({
+          partUnitId: removed.partUnitId,
           machineId: null,
           location: input.toLocation,
           partKind: removed.partKind,

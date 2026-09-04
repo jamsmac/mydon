@@ -136,6 +136,14 @@ export class SwapPartDto {
   @IsOptional() @IsString() @MaxLength(128)
   newSerial?: string;
 
+  /** Карточка запасного узла, который ставим. Пусто — новый узел, номер присвоит система. */
+  @IsOptional() @IsUUID()
+  partUnitId?: string;
+
+  /** Куда уходит снятый узел (R-PU-8). Пусто — склад. */
+  @IsOptional() @IsIn([...OFF_LOCATIONS])
+  removedTo?: PartOffLocation;
+
   @IsOptional() @IsString() @MaxLength(128)
   model?: string;
 
@@ -178,6 +186,10 @@ export class InstallPartDto {
   /** Экземпляр со склада — открытый период «вне автомата». */
   @IsOptional() @IsUUID()
   partId?: string;
+
+  /** Или карточка узла (R-PU-1): ставим существующий экземпляр по карточке. */
+  @IsOptional() @IsUUID()
+  partUnitId?: string;
 
   @IsOptional() @IsString() @MaxLength(128)
   serialNumber?: string;

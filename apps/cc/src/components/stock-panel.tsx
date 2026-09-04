@@ -16,6 +16,8 @@ const KIND_LABEL: Record<string, string> = {
   intake: "приход",
   consumption: "расход",
   transfer: "перемещение",
+  adjustment: "инвентаризация",
+  return: "возврат из бункера",
 };
 
 const num = (n: number) => n.toLocaleString("ru-RU", { maximumFractionDigits: 3 });

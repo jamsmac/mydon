@@ -11,8 +11,8 @@
  */
 import { convertQty, type Unit } from "./recipe";
 
-/** Вид движения склада. */
-export type StockMovementKind = "intake" | "consumption" | "transfer" | "adjustment";
+/** Вид движения склада. `return` — возврат остатка со снятого бункера (+), нетто по взвешиванию (R-PU-9). */
+export type StockMovementKind = "intake" | "consumption" | "transfer" | "adjustment" | "return";
 
 /** Одно движение склада для подсчёта остатка. */
 export interface StockMovement {
@@ -49,7 +49,8 @@ export interface StockBalance {
  * само себя гасит.
  */
 function signedFor(m: StockMovement, warehouseId: string | null, converted: number): number {
-  if (m.kind === "intake") {
+  if (m.kind === "intake" || m.kind === "return") {
+    // Возврат остатка из бункера — тот же приход на свой склад.
     return warehouseId === null || m.warehouseId === warehouseId ? converted : 0;
   }
   if (m.kind === "consumption") {

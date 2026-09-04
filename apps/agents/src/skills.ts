@@ -10,6 +10,8 @@ import { llmLedgerFromEnv } from "./llm-ledger";
 import type { AgentDefinition } from "./registry";
 import { assessIdeas, buildIdeasProposal, readIdeaChannels, type IdeasMemory } from "./ideas";
 import { modelGatewayFromEnv } from "./model-gateway";
+import { partsAudit } from "./parts-audit";
+import { isLlmSkill, llmSkill } from "./llm-skill";
 import { findSolutions } from "./solution-search";
 import type { TaskLlmSession } from "./task-llm-session";
 import { loadSkillMeta } from "./skill-loader";
@@ -361,6 +363,7 @@ const coachReview: Skill = async (agent, core, context) => {
 export const SKILLS: Record<string, Skill> = {
   "watch-receivables": watchReceivables,
   "monitor-stock": monitorStock,
+  "parts-audit": partsAudit,
   "morning-digest": morningDigest,
   "read-sources": readSources,
   "scan-ideas": scanIdeas,
@@ -369,6 +372,21 @@ export const SKILLS: Record<string, Skill> = {
   "find-solution": findSolutionSkill,
 };
 
-export function hasSkill(name: string): boolean {
+/** Навык реализован кодом (реестр SKILLS). */
+export function hasCodeSkill(name: string): boolean {
   return Object.prototype.hasOwnProperty.call(SKILLS, name);
+}
+
+/**
+ * Навык «подключён»: есть код ИЛИ зарегистрирован llm-исполнитель (frontmatter
+ * `executor: llm`). Раньше подключённость означала только код; теперь runner и
+ * подбор навыка по задаче видят оба вида одинаково.
+ */
+export function hasSkill(name: string): boolean {
+  return hasCodeSkill(name) || isLlmSkill(name);
+}
+
+/** Реализация навыка: код побеждает llm (двусмысленность помечает check-passports). */
+export function resolveSkill(name: string): Skill | undefined {
+  return SKILLS[name] ?? llmSkill(name);
 }

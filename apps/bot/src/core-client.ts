@@ -82,6 +82,50 @@ export interface TaskRow {
 }
 
 /** Строка сводки сроков — то же, что отдаёт Core в /maintenance/due. */
+/** Карточка узла с вычисленным состоянием — как её отдаёт Core `/parts` (спека vendhub-parts). */
+export interface PartUnitRow {
+  id: string;
+  partKind: string;
+  inventoryNo: string | null;
+  labelPending: boolean;
+  serialNumber: string | null;
+  setNumber: number | null;
+  hopperPosition: number | null;
+  tareWeight: number | null;
+  retiredAt: string | null;
+  where: { location: string; machineId: string | null; machineName: string | null; slot: number | null; since: string } | null;
+  attention: string[];
+  label: string;
+  photoCount: number;
+}
+
+/** Строка инвентаризации узлов — как отдаёт Core `/parts/count/...` (У4). */
+export interface PartCountLineRow {
+  id: string;
+  sessionId: string;
+  partUnitId: string | null;
+  partKind: string;
+  inventoryNoEntered: string | null;
+  serialEntered: string | null;
+  photoSkippedReason: string | null;
+  result: string | null;
+  label: string;
+  photoCount: number;
+  /** Где узел числился на момент ввода: имя автомата со слотом или место; null — новый узел. */
+  registeredAt: string | null;
+}
+
+export interface PartCountSummaryRow {
+  session: { id: string; location: string; startedAt: string; finishedAt: string | null; appliedAt: string | null };
+  lines: PartCountLineRow[];
+  expected: PartUnitRow[];
+  found: number;
+  fresh: number;
+  moved: number;
+  missing: PartUnitRow[];
+  photoRequired: boolean;
+}
+
 export interface MaintenanceDueRow {
   planId: string;
   targetId: string;
@@ -1068,13 +1112,21 @@ export class CoreClient {
     partKind: string;
     slot?: number;
     newSerial?: string;
+    /** Карточка запасного узла со склада (У3). Пусто — Core заводит новый узел и даёт ему номер. */
+    partUnitId?: string;
+    /** Куда уходит снятый узел: мойка, склад, ремонт. Пусто — на склад. */
+    removedTo?: string;
     reason?: string;
     personId?: string;
     note?: string;
     /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
     clientKey?: string;
     createdBy?: string;
-  }): Promise<{ log: { id: string }; removed: { serialNumber: string | null } | null }> {
+  }): Promise<{
+    log: { id: string };
+    removed: { serialNumber: string | null; partUnitId?: string } | null;
+    installed?: { partUnitId: string; serialNumber: string | null };
+  }> {
     return this.request("/maintenance/part-swap", { method: "POST", body: JSON.stringify(input) });
   }
 
@@ -1121,6 +1173,95 @@ export class CoreClient {
     createdBy?: string;
   }): Promise<{ log: { id: string }; removed: { serialNumber: string | null } }> {
     return this.request("/maintenance/part-remove", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  // ── Узлы: карточки, очередь, номера (спека vendhub-parts, У1–У3) ──
+
+  /** Очередь внимания к узлам: без номера, наклеить, неизвестно где, без тары, без фото. */
+  partsQueue(): Promise<{ counts: Record<string, number>; items: PartUnitRow[] }> {
+    return this.request("/parts/queue");
+  }
+
+  partUnit(id: string): Promise<PartUnitRow> {
+    return this.request(`/parts/${id}`);
+  }
+
+  /** Узлы, стоящие на автомате сейчас. */
+  partsInstalled(machineId: string): Promise<PartUnitRow[]> {
+    return this.request(`/parts/installed?machineId=${machineId}`);
+  }
+
+  /** Запасные узлы вида: на складе (по умолчанию) или в указанном месте. */
+  partsSpares(kind: string, location?: string): Promise<PartUnitRow[]> {
+    return this.request(`/parts/spares?kind=${encodeURIComponent(kind)}${location ? `&location=${location}` : ""}`);
+  }
+
+  /** Узлы вне автоматов по месту: мойка, сушка, склад, ремонт. */
+  partsAt(location: "warehouse" | "washing" | "drying" | "repair" | "unknown"): Promise<PartUnitRow[]> {
+    return this.request(`/parts/at?location=${location}`);
+  }
+
+  /** Перемещение узла вне автомата: сушка → склад, склад ↔ ремонт. */
+  partMove(
+    id: string,
+    input: { to: "warehouse" | "washing" | "drying" | "repair" | "unknown"; personId?: string; note?: string; clientKey?: string; actorRef?: string },
+  ): Promise<{ unit: PartUnitRow; from: string | null; logId: string | null }> {
+    return this.request(`/parts/${id}/move`, { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** «Помыл»: с мойки на сушку или сразу на склад — решает настройка Core (PARTS_DRYING_STAGE). */
+  partWashed(
+    id: string,
+    input: { personId?: string; clientKey?: string; actorRef?: string },
+  ): Promise<{ unit: PartUnitRow; from: string | null; logId: string | null }> {
+    return this.request(`/parts/${id}/washed`, { method: "POST", body: JSON.stringify(input) });
+  }
+
+  // ── Инвентаризация узлов (У4) ──
+
+  /** Открыть (или продолжить открытую) сессию по месту. */
+  partCountStart(input: {
+    location: "warehouse" | "washing" | "drying" | "repair";
+    personId?: string;
+    actorRef?: string;
+  }): Promise<{ session: { id: string; location: string; startedAt: string }; resumed: boolean; photoRequired: boolean; expected: number }> {
+    return this.request("/parts/count/sessions", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Строка: что увидел сотрудник. Core опознаёт узел по номеру/серийнику или помечает как новый. */
+  partCountAddLine(
+    sessionId: string,
+    input: {
+      partKind: string;
+      inventoryNo?: string;
+      serialNumber?: string;
+      photoSkippedReason?: string;
+      clientKey?: string;
+      actorRef?: string;
+    },
+  ): Promise<{ line: PartCountLineRow; status: "found" | "new"; how: string | null }> {
+    return this.request(`/parts/count/sessions/${sessionId}/lines`, { method: "POST", body: JSON.stringify(input) });
+  }
+
+  partCountSkipPhoto(lineId: string, reason: string): Promise<unknown> {
+    return this.request(`/parts/count/lines/${lineId}/skip-photo`, { method: "POST", body: JSON.stringify({ reason }) });
+  }
+
+  partCountRemoveLine(lineId: string, actorRef?: string): Promise<unknown> {
+    return this.request(`/parts/count/lines/${lineId}/remove`, { method: "POST", body: JSON.stringify({ actorRef }) });
+  }
+
+  /** Сотрудник закончил вводить: сводка «найдено / новых / не найдено». Применяет владелец в панели. */
+  partCountFinish(sessionId: string, actorRef?: string): Promise<PartCountSummaryRow> {
+    return this.request(`/parts/count/sessions/${sessionId}/finish`, { method: "POST", body: JSON.stringify({ actorRef }) });
+  }
+
+  /** Проставить / подтвердить / исправить номер узла. */
+  partSetNumber(
+    id: string,
+    input: { inventoryNo?: string; confirmLabel?: boolean; actorRef?: string },
+  ): Promise<PartUnitRow> {
+    return this.request(`/parts/${id}/number`, { method: "POST", body: JSON.stringify(input) });
   }
 
   /** Что подходит к сроку. Статус считается на чтении, нигде не хранится. */
@@ -1545,7 +1686,15 @@ export class CoreClient {
     returnedDate: string;
     locationNote?: string;
     createdBy?: string;
-  }): Promise<{ id: string }> {
+  }): Promise<{
+    id: string;
+    /** Приход на склад (У5): нетто по таре узла; `reason` — почему не проведён. Старый Core полей не отдаёт. */
+    unitLabel?: string | null;
+    netWeight?: number | null;
+    ingredientName?: string | null;
+    stockMovementId?: string | null;
+    reason?: string | null;
+  }> {
     return this.request("/coffee/container-return", {
       method: "POST",
       body: JSON.stringify(input),

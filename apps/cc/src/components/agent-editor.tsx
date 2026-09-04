@@ -130,6 +130,20 @@ export function AgentEditor({ agent }: { agent: AgentCard }) {
         </label>
 
         <label>
+          <span>Страницы знаний (KB)</span>
+          <textarea
+            name="kbPages"
+            rows={3}
+            defaultValue={(agent.kbPages ?? []).join("\n")}
+            placeholder="По одной на строку. Например: shared/kb/globerent/heli-models.md"
+          />
+          <small className="hint">
+            Что агент читает перед ответом: пути внутри apps/agents/shared (только shared/…/*.md). Нужны
+            навыкам с исполнителем llm — например qualify-lead.
+          </small>
+        </label>
+
+        <label>
           <span>Расписания</span>
           <textarea
             name="schedule"

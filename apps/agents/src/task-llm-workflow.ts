@@ -1,4 +1,5 @@
 import { embeddingGatewayFromEnv } from "./embedding";
+import { isLlmSkill, llmSkillFeature } from "./llm-skill";
 import {
   OPENAI_COMPATIBLE_ADAPTER,
   OPENAI_COMPATIBLE_ADAPTER_VERSION,
@@ -72,8 +73,9 @@ function embeddingStep(
  */
 export function buildTaskLlmWorkflowPlan(skill: string): TaskLlmWorkflowPlan {
   const steps: TaskLlmWorkflowStep[] = [];
+  const llm = isLlmSkill(skill);
   const chat =
-    skill === "assess-ideas" || skill === "coach-review" || skill === "find-solution"
+    skill === "assess-ideas" || skill === "coach-review" || skill === "find-solution" || llm
       ? modelGatewayFromEnv()
       : null;
   const models = boundedModels(resolveModelChain());
@@ -110,6 +112,12 @@ export function buildTaskLlmWorkflowPlan(skill: string): TaskLlmWorkflowPlan {
       throw new Error("Metered chat gateway has no durable endpoint profile");
     }
     steps.push(chatStep("find-solution:rank", chat.provider, chat.endpointProfile, models));
+  } else if (llm && chat?.billingMode === "metered" && models.length > 0) {
+    // executor: llm — ровно один шаг chat на прогон (R-LS-2), feature = llm-skill:<навык>.
+    if (!chat.endpointProfile) {
+      throw new Error("Metered chat gateway has no durable endpoint profile");
+    }
+    steps.push(chatStep(llmSkillFeature(skill), chat.provider, chat.endpointProfile, models));
   }
 
   return { version: TASK_LLM_WORKFLOW_VERSION, steps };

@@ -1,5 +1,6 @@
 import { LlmLedgerUnavailableError, type AutonomyTier } from "@mydon/shared";
 import type { AgentsCoreClient, AgentTaskInvocation } from "./core-client";
+import { isLlmSkill, llmSkillFeature, llmSkillTriggers } from "./llm-skill";
 import type { AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
 import { hasSkill } from "./skills";
@@ -35,15 +36,26 @@ export interface RunAgentTasksOptions {
 /** Заведомо меньше 15-минутного stale lease Core. */
 export const AGENT_RUN_HEARTBEAT_MS = 60_000;
 
-/** find-solution не имеет бесплатного/local ranking fallback. */
-function hasFindSolutionRankRoute(plan: TaskLlmWorkflowPlan): boolean {
-  const matches = plan.steps.filter((step) => step.stepKey === "find-solution:rank");
+/** В плане ровно один metered chat-шаг с этим ключом и непустой цепочкой моделей. */
+function hasChatStep(plan: TaskLlmWorkflowPlan, stepKey: string): boolean {
+  const matches = plan.steps.filter((step) => step.stepKey === stepKey);
   return (
     matches.length === 1 &&
     matches[0]?.kind === "chat" &&
-    matches[0].feature === "find-solution:rank" &&
+    matches[0].feature === stepKey &&
     matches[0].models.length > 0
   );
+}
+
+/**
+ * Навыки, которым metered-маршрут обязателен: без него задача не стартует, а
+ * возвращается в Core с `route_unavailable` (bounded retry), как у find-solution.
+ * llm-навык (executor: llm) — ровно один шаг `llm-skill:<навык>` (R-LS-2).
+ */
+export function requiredChatStep(skill: string): string | null {
+  if (skill === "find-solution") return "find-solution:rank";
+  if (isLlmSkill(skill)) return llmSkillFeature(skill);
+  return null;
 }
 
 /** По заголовку задачи ищем навык агента, который её закрывает. */
@@ -52,6 +64,12 @@ export function matchSkill(agent: AgentDefinition, title: string): string | null
   // Прямое упоминание навыка в тексте — самый надёжный признак.
   for (const skill of agent.skills) {
     if (text.includes(skill.toLowerCase()) && hasSkill(skill)) return skill;
+  }
+  // Триггеры из frontmatter llm-навыка (`triggers`) — паспорт сам говорит, какие
+  // задачи он закрывает; статическая карта HINTS ниже — для навыков с кодом.
+  for (const skill of agent.skills) {
+    if (!isLlmSkill(skill)) continue;
+    if (llmSkillTriggers(skill).some((re) => re.test(title))) return skill;
   }
   // Иначе — по смыслу: слова задачи против того, что навык умеет.
   const HINTS: Record<string, RegExp> = {
@@ -210,20 +228,21 @@ export async function runAgentTasks(
         try {
           requestedPlan = buildTaskLlmWorkflowPlan(skill);
         } catch (error) {
-          if (skill !== "find-solution") throw error;
+          if (requiredChatStep(skill) === null) throw error;
           requestedPlan = { version: 1, steps: [] };
           routeError = error instanceof Error ? error.message : String(error);
         }
       }
-      if (skill === "find-solution" && !hasFindSolutionRankRoute(requestedPlan)) {
+      const neededStep = requiredChatStep(skill);
+      if (neededStep !== null && !hasChatStep(requestedPlan, neededStep)) {
         // Do not create an empty immutable execution while the route is off.
         // Core keeps this unstarted attempt and applies a bounded retryAt, so
         // enabling the route later can create its first plan without an owner
         // retry or a false workflow_changed conflict.
         const detail = (
           routeError
-            ? `find-solution metered route is unavailable: ${routeError}`
-            : "find-solution requires metered workflow step find-solution:rank"
+            ? `${skill} metered route is unavailable: ${routeError}`
+            : `${skill} requires metered workflow step ${neededStep}`
         ).slice(0, 1000);
         const released = await core.releaseAgentTask(
           t.id,
@@ -245,7 +264,7 @@ export async function runAgentTasks(
         results.push({
           taskId: t.id,
           outcome: "skipped",
-          note: "LLM-маршрут find-solution пока недоступен; Core отложил повтор на 60 секунд.",
+          note: `LLM-маршрут ${skill} пока недоступен; Core отложил повтор на 60 секунд.`,
         });
         continue;
       }
@@ -369,17 +388,25 @@ export async function runAgentTasks(
       if (run.skipReason === "no_signal" || run.skipReason === "no_change") {
         throw new Error(`Task-mode ${skill} вернул ${run.skipReason} без commit intent`);
       }
+      // llm-навык: ответ не по контракту или provider rejection — терминальный
+      // durable результат, на повторном claim он воспроизведётся тем же. Без
+      // block задача крутилась бы claim→replay→release на каждом poll; Core
+      // блокирует её до owner retry (он ротирует attempt — одна новая попытка).
+      const releaseReason =
+        run.skipReason === "budget_denied" ||
+        run.skipReason === "execution_unknown" ||
+        run.skipReason === "workflow_changed"
+          ? run.skipReason
+          : run.skipReason === "llm_invalid_output" || run.skipReason === "llm_failed"
+            ? "skill_failed"
+            : undefined;
       await core.releaseAgentTask(
         t.id,
         agent.name,
         runId,
         executionAttemptId,
-        run.skipReason === "budget_denied" ||
-          run.skipReason === "execution_unknown" ||
-          run.skipReason === "workflow_changed"
-          ? run.skipReason
-          : undefined,
-        run.reason,
+        releaseReason,
+        run.reason.slice(0, 1000),
       );
       results.push({ taskId: t.id, outcome: "skipped", note: run.reason });
     } catch (error) {

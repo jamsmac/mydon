@@ -102,6 +102,14 @@ const REGISTRY: Record<string, { category: Category; reason: string }> = {
     category: "NON_PERSONAL_TABLES",
     reason: "join entity через coffeeIngredient/machinePlacement — обогащение имён кофе-контура",
   },
+  "stock/vending-ledger.ts": {
+    category: "NON_PERSONAL_TABLES",
+    reason: "проекция vending_stock → леджер (У6): entity читается как склады и карточки товаров vendhub",
+  },
+  "coffee/coffee-ledger.service.ts": {
+    category: "NON_PERSONAL_TABLES",
+    reason: "возврат бункера → склад (У5): entity читается как имя точки заливки, карточки ингредиента и склада vendhub",
+  },
   "coffee/coffee-orders.service.ts": {
     category: "NON_PERSONAL_TABLES",
     reason: "join entity по coffeeOrder.machineId — имена автоматов кофе-контура",
@@ -129,6 +137,10 @@ const REGISTRY: Record<string, { category: Category; reason: string }> = {
   "maintenance/maintenance.service.ts": {
     category: "NON_PERSONAL_TABLES",
     reason: "обслуживание: entity — автоматы/техника vendhub, не личный контур",
+  },
+  "maintenance/parts.service.ts": {
+    category: "NON_PERSONAL_TABLES",
+    reason: "узлы автоматов: entity читается только как имя автомата по machine_id периода (vendhub), не личный контур",
   },
   "vending/vending.service.ts": {
     category: "NON_PERSONAL_TABLES",

@@ -1095,6 +1095,9 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       {isWarehouse && warehouseStock && (
         <section id="whstock" data-toc="Остаток">
           <WarehouseStockView stock={warehouseStock} />
+          <p className="hint">
+            <Link href="/stock/goods">Товары: сверка vending_stock с леджером →</Link>
+          </p>
         </section>
       )}
 

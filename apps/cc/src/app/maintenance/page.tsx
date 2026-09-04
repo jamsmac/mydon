@@ -1,8 +1,10 @@
+import Link from "next/link";
 import {
   DUE_ICON,
   DUE_LABEL,
   maintenanceKindLabel,
   OUTCOME_LABELS,
+  partAttentionLabel,
   partLabel,
   partLocationLabel,
   type MaintenanceOutcome,
@@ -13,6 +15,7 @@ import {
   type Entity,
   type MaintenanceDue,
   type MaintenanceLogRow,
+  type PartsQueue,
   type Person,
 } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
@@ -58,6 +61,13 @@ export default async function Maintenance() {
   } catch {
     storage = [];
   }
+  // Очередь внимания к узлам (спека vendhub-parts, R-PU-4): null — Core не ответил.
+  let partsQueue: PartsQueue | null = null;
+  try {
+    partsQueue = await core.partsQueue();
+  } catch {
+    partsQueue = null;
+  }
 
   const nameOf = new Map(machines.map((m) => [m.id, m.name]));
   const personOf = new Map(people.map((p) => [p.id, p.name]));
@@ -93,6 +103,30 @@ export default async function Maintenance() {
               (idle.length > 0 ? ` · вне эксплуатации ${idle.length}` : "")}
         </p>
       </div>
+
+      {/* ── Узлы автоматов: карточки, номера, очередь (спека vendhub-parts) ── */}
+      <section className="group-block">
+        <div className="section-title">
+          Узлы автоматов
+          {partsQueue && partsQueue.items.length > 0 && <span className="group-count">{partsQueue.items.length}</span>}
+        </div>
+        {partsQueue === null ? (
+          <p className="hint">Реестр узлов недоступен — Core не ответил на /parts/queue.</p>
+        ) : partsQueue.items.length === 0 ? (
+          <p className="hint">
+            Все узлы учтены. <Link href="/parts">Реестр узлов →</Link>
+          </p>
+        ) : (
+          <p className="hint">
+            {Object.entries(partsQueue.counts)
+              .filter(([, n]) => n > 0)
+              .map(([k, n]) => `${partAttentionLabel(k)} ${n}`)
+              .join(" · ")}
+            {" — "}
+            <Link href="/parts/queue">пройти по одному →</Link> · <Link href="/parts">реестр узлов</Link>
+          </p>
+        )}
+      </section>
 
       {stale.length > 0 && (
         <section className="group-block">

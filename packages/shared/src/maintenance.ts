@@ -206,7 +206,7 @@ export const INSPECTION_KIND: Record<InspectionType, MaintenanceKind> = {
  * Где узел, когда он не на автомате. `machine` в списках выбора не участвует:
  * «поставить на автомат» — это отдельная операция установки, а не смена места.
  */
-export const PART_LOCATIONS = ["machine", "warehouse", "washing", "drying", "repair"] as const;
+export const PART_LOCATIONS = ["machine", "warehouse", "washing", "drying", "repair", "unknown"] as const;
 export type PartLocation = (typeof PART_LOCATIONS)[number];
 
 export const PART_LOCATION_LABELS: Record<PartLocation, string> = {
@@ -215,6 +215,8 @@ export const PART_LOCATION_LABELS: Record<PartLocation, string> = {
   washing: "Мойка",
   drying: "Сушка",
   repair: "Ремонт",
+  // Узел не найден при инвентаризации (R-PU-7): карточка есть, места нет.
+  unknown: "Местонахождение неизвестно",
 };
 
 /** Куда можно СНЯТЬ узел — все места, кроме автомата. */

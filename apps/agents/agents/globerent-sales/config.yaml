@@ -2,6 +2,11 @@ name: globerent-sales
 business: globerent
 status: paused
 description: Поиск и квалификация лидов HELI + черновики КП.
+mission: Искать и квалифицировать лиды на погрузчики HELI по расписанию и по запросу, готовить черновики КП по прайсу — не отправляя их клиенту и не подписывая договоры.
+non_goals:
+  - НЕ отправляет КП клиенту и не подписывает договор
+  - НЕ выдумывает цены — только прайс; нет позиции → эскалация
+  - НЕ даёт скидок и нестандартных условий без владельца
 
 # Графики «что когда» (TZ Asia/Tashkent). hunt-leads — ежедневный скан сигналов спроса.
 schedule:
@@ -9,20 +14,23 @@ schedule:
     skill: hunt-leads
 
 autonomy_default: T1
+break_glass: [draft-quote] # деньги/письма клиентам — всегда через согласование (ревизия 04.09.2026)
 
 kb_pages:
   - shared/kb/globerent/heli-models.md
   - shared/kb/globerent/pricelist.md
-  - shared/kb/globerent/faq.md
-  - shared/kb/globerent/clients.md
   - shared/kb/globerent/lead-criteria.md
+  # faq.md и clients.md сняты (ревизия 04.09.2026): для квалификации не нужны; clients.md содержит дебиторку — least privilege
 
 skills:
   - hunt-leads
   - qualify-lead
   - draft-quote
+  - intake-classify # файл был, в паспорте не объявлен (ревизия 04.09.2026)
 
 # hunt-leads нужен веб → claude-p (WebSearch/WebFetch). ollama без веба.
+# ВНИМАНИЕ (04.09.2026): поле рантаймом НЕ читается — модель задаёт LLM_MODEL/LLM_FALLBACK_MODELS,
+# усилие — `model-effort` во frontmatter llm-навыка. Оставлено как заметка о замысле.
 model_routing:
   simple: "claude-p"
   complex: "claude-p"

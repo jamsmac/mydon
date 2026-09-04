@@ -319,3 +319,48 @@ describe("Автомат вне эксплуатации задач не пол�
     assert.equal(res.idleReasons.length, 2);
   });
 });
+
+describe("Задача ТО называет узлы по номерам (У3)", () => {
+  const units = [
+    { id: "u2", partKind: "mixer", inventoryNo: "M-018", label: "Миксер M-018", where: { slot: 2 } },
+    { id: "u1", partKind: "mixer", inventoryNo: "M-017", label: "Миксер M-017", where: { slot: 1 } },
+    { id: "g1", partKind: "grinder", inventoryNo: "G-003", label: "Гриндер G-003", where: { slot: null } },
+    { id: "h1", partKind: "hopper", inventoryNo: null, label: "Бункер (без номера)", where: { slot: 3 } },
+  ];
+
+  it("строка «Стоят:» — только узлы нужного вида, по местам", async () => {
+    let asked = 0;
+    const { core, tasks } = stubCore([row(), row({ planId: "pl-2", partKind: "hopper", partLabel: "Бункер" })], {
+      partsInstalled: async () => {
+        asked += 1;
+        return units;
+      },
+    });
+    await runMaintenanceMonitor(core, { now: NOW });
+    assert.equal(tasks.length, 2);
+    assert.match(tasks[0].description!, /Стоят: M-017 \(№1\), M-018 \(№2\)/);
+    assert.match(tasks[1].description!, /Стоят: без номера \(№3\)/);
+    assert.equal(asked, 1, "состав автомата читается один раз за прогон");
+  });
+
+  it("без карточек узлов и без метода в Core описание прежнее", async () => {
+    const plain = stubCore([row()]);
+    await runMaintenanceMonitor(plain.core, { now: NOW });
+    assert.ok(!/Стоят:/.test(plain.tasks[0].description!));
+    const empty = stubCore([row()], { partsInstalled: async () => [] });
+    await runMaintenanceMonitor(empty.core, { now: NOW });
+    assert.ok(!/Стоят:/.test(empty.tasks[0].description!));
+  });
+
+  it("сбой чтения узлов не мешает поставить задачу", async () => {
+    const { core, tasks, events } = stubCore([row()], {
+      partsInstalled: async () => {
+        throw new Error("500");
+      },
+    });
+    const res = await runMaintenanceMonitor(core, { now: NOW });
+    assert.equal(tasks.length, 1);
+    assert.equal(res.errors.length, 0);
+    assert.ok(!events.some((e) => e.type === "maintenance.monitor_failed"));
+  });
+});

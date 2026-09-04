@@ -2,6 +2,11 @@ name: globerent-ceo
 business: globerent
 status: paused
 description: Директор предприятия GLOBERENT (дистрибуция HELI) — единое окно, сводка, риск дебиторки, эскалация.
+mission: Держать единое окно по GLOBERENT — ежедневная сводка по продажам, сервису и риску дебиторки, проактивный отлов рисков и эскалация владельцу, не дублируя chief-of-staff.
+non_goals:
+  - НЕ решает КП, письма контрагентам и цены — только кнопка владельцу (T3)
+  - НЕ дублирует дайджест chief-of-staff
+  - НЕ работает с личным контуром владельца
 
 schedule:
   - cron: "0 18 * * *"      # ежедневная сводка по бизнесу
@@ -16,6 +21,8 @@ kb_pages:
 skills:
   - business-brief
 
+# ВНИМАНИЕ (04.09.2026): поле рантаймом НЕ читается — модель задаёт LLM_MODEL/LLM_FALLBACK_MODELS,
+# усилие — `model-effort` во frontmatter llm-навыка. Оставлено как заметка о замысле.
 model_routing:
   simple: "ollama/qwen2.5:14b"
   complex: "claude-p"

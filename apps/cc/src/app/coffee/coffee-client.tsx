@@ -381,6 +381,15 @@ function JournalTab({
               <span className="pill">
                 {r.weight}г{r.netWeight !== null ? ` · нетто ${r.netWeight}г` : " · тара не калибрована"}
               </span>
+              {r.stockMovementId ? (
+                <span className="pill ok" title="Нетто оприходовано на склад движением «возврат»">
+                  на складе
+                </span>
+              ) : r.partUnitId ? (
+                <a className="pill act" href={`/parts/${r.partUnitId}`} title="Приход не проведён: нет тары или ингредиента — поправь на карточке узла">
+                  не оприходовано
+                </a>
+              ) : null}
               <button
                 type="button"
                 className="row-x"

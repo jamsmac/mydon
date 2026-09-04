@@ -3,6 +3,7 @@ import type { Conversations } from "./conversation";
 import { applyPress, NUMPAD_MAX_DIGITS, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
 import { newRunId } from "./staff-refill";
 import type { StaffReply } from "./staff";
+import { parseStockTab, stockTabItems, stockTabNoun, stockTabRow, type StockTab } from "./stock-tabs";
 
 /**
  * Инвентаризация склада прямо в Telegram: сотрудник выбирает склад, ингредиент,
@@ -41,9 +42,11 @@ export function fmtQty(n: number): string {
 }
 
 /** Клавиатура выбора (склад/ингредиент). Префикс задаёт пространство callback. */
-function pickKeyboard(items: EntityRow[], kind: "wh" | "ing"): NonNullable<StaffReply["keyboard"]> {
+function pickKeyboard(items: EntityRow[], kind: "wh" | "ing", tab?: StockTab): NonNullable<StaffReply["keyboard"]> {
   return {
     inline_keyboard: [
+      // Вкладки — только на шаге карточки: у складов вкладок нет.
+      ...(tab ? [stockTabRow("i", tab)] : []),
       ...items.slice(0, 30).map((it) => [{ text: it.name.slice(0, 40), callback_data: `i:${kind}:${it.id}` }]),
       // Парсер «i:cancel» был с самого начала, а кнопки не было: выйти из
       // мастера можно было только словом «отмена», о котором надо знать.
@@ -55,12 +58,16 @@ function pickKeyboard(items: EntityRow[], kind: "wh" | "ing"): NonNullable<Staff
 export type InventoryCallback =
   | { kind: "warehouse"; id: string }
   | { kind: "ingredient"; id: string }
+  /** Вкладка «Сырьё / Товары» (У6): тот же список, другой тип карточек. */
+  | { kind: "tab"; tab: StockTab }
   | { kind: "num"; press: NumpadPress }
   | { kind: "cancel" };
 
 /** Строгий разбор нажатия. Данные кнопки приходят снаружи — доверять нельзя. */
 export function parseInventoryCallback(data: string): InventoryCallback | null {
   if (data === "i:cancel") return { kind: "cancel" };
+  const tab = parseStockTab("i", data);
+  if (tab) return { kind: "tab", tab };
   const wh = /^i:wh:([0-9a-f-]{36})$/.exec(data);
   if (wh) return { kind: "warehouse", id: wh[1] };
   const ing = /^i:ing:([0-9a-f-]{36})$/.exec(data);
@@ -100,14 +107,14 @@ export async function startInventory(chatId: number, deps: InventoryDeps): Promi
 }
 
 /** Шаг выбора ингредиента: общий для «один склад» и «выбрали склад». */
-async function ingredientStep(chatId: number, deps: InventoryDeps, warehouseName: string): Promise<StaffReply> {
-  const ings = await deps.core.ingredients();
-  if (ings.length === 0) {
+async function ingredientStep(chatId: number, deps: InventoryDeps, warehouseName: string, tab: StockTab = "ing"): Promise<StaffReply> {
+  const items = await stockTabItems(deps.core, tab);
+  if (items.length === 0 && tab === "ing") {
     deps.conversations.clear(chatId);
     return { text: "Ингредиентов в реестре пока нет — сначала заведи их («новый ингредиент»)." };
   }
-  const note = ings.length > 30 ? "\n(показаны первые 30)" : "";
-  return { text: `Склад «${warehouseName}». Какой ингредиент?${note}`, keyboard: pickKeyboard(ings, "ing") };
+  const note = items.length > 30 ? "\n(показаны первые 30)" : items.length === 0 ? "\nТоваров на перепродажу в реестре нет — владелец заводит их в панели (POST /stock/vending-cards)." : "";
+  return { text: `Склад «${warehouseName}». Какой ${stockTabNoun(tab)}?${note}`, keyboard: pickKeyboard(items, "ing", tab) };
 }
 
 /** Нажатие кнопки инвентаризации: склад, ингредиент, нумпад, отмена. */
@@ -173,6 +180,12 @@ export async function handleInventoryCallback(
     if (!wh) return { answer: "Склад не найден", message: { text: "Этого склада уже нет — начни заново." } };
     deps.conversations.advance(chatId, "ingredient", { warehouseId: wh.id, warehouseName: wh.name });
     return { answer: wh.name, message: await ingredientStep(chatId, deps, wh.name) };
+  }
+
+  if (cb.kind === "tab") {
+    if (conv.step !== "ingredient") return { answer: "Не сейчас" };
+    deps.conversations.advance(chatId, "ingredient", { tab: cb.tab });
+    return { answer: stockTabNoun(cb.tab), edit: await ingredientStep(chatId, deps, String(conv.data.warehouseName ?? "склад"), cb.tab) };
   }
 
   // cb.kind === "ingredient": показываем остаток и ждём факт.

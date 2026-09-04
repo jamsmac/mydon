@@ -2,6 +2,11 @@ name: mydon-finance
 business: globerent
 status: active
 description: Финансовый дайджест и контроль дебиторки (приоритет — риск концентрации OLMA в GLOBERENT) + черновики напоминаний о платежах.
+mission: Контролировать дебиторку и деньги — еженедельный финансовый дайджест, отлов просрочек (приоритет — концентрация OLMA), черновики напоминаний о платежах; без отправки и без операций с деньгами.
+non_goals:
+  - НЕ отправляет напоминания сам — только черновик на кнопку
+  - НЕ инициирует платежи и не меняет договоры
+  - НЕ читает личный контур владельца
 
 # Графики (TZ Asia/Tashkent). Понедельник 09:00 — недельный обзор дебиторки/кэша.
 # На проде расписания на паузе (SCHEDULES_PAUSED) — оживёт, когда владелец снимет паузу.
@@ -10,6 +15,7 @@ schedule:
     skill: watch-receivables
 
 autonomy_default: T1
+break_glass: [draft-reminder] # деньги/письма клиентам — всегда через согласование (ревизия 04.09.2026)
 
 kb_pages:
   - shared/kb/globerent/clients.md
@@ -19,6 +25,8 @@ skills:
   - draft-reminder
 
 # Анализ дебиторки — лёгкая модель ок; в облаке доедет до OpenRouter по fallback.
+# ВНИМАНИЕ (04.09.2026): поле рантаймом НЕ читается — модель задаёт LLM_MODEL/LLM_FALLBACK_MODELS,
+# усилие — `model-effort` во frontmatter llm-навыка. Оставлено как заметка о замысле.
 model_routing:
   simple: cheap-local
   complex: reasoning-strong

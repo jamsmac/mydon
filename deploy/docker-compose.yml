@@ -241,6 +241,9 @@ services:
       # Потолок действий на агента и период опроса задач.
       AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
       AGENT_TASK_INTERVAL_MS: ${AGENT_TASK_INTERVAL_MS:-60000}
+      # llm-навыки (executor: llm): потолок символов одной KB-страницы в
+      # контексте модели. Пусто → 12000 (см. docs/AGENTS_ACTIVATION.md, 1г).
+      LLM_SKILL_KB_PAGE_CHARS: ${LLM_SKILL_KB_PAGE_CHARS:-}
       LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
       # Монитор графиков обслуживания: ставит задачи на подходящие к сроку
       # работы. 06:00 — ДО дайджеста сотрудникам (07:00) и брифинга владельца

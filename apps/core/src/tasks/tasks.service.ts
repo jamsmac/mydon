@@ -1961,7 +1961,8 @@ export class TasksService {
       | "workflow_changed"
       | "route_unavailable"
       | "action_capped"
-      | "unsupported",
+      | "unsupported"
+      | "skill_failed",
     detail?: string,
     now = new Date(),
   ): Promise<TaskRow | null> {
@@ -2035,10 +2036,16 @@ export class TasksService {
           (job) =>
             job.status === "succeeded" || job.status === "rejected" || job.status === "cancelled",
         );
+      // skill_failed: навык завершился детерминированным отказом (ответ модели
+      // не по контракту или durable provider rejection). Результат job терминален
+      // и на повторном claim воспроизводится тем же — без block задача крутилась
+      // бы claim→replay→release на каждом poll. Блокируем до owner retry: он
+      // ротирует attempt и даёт ровно одну новую платную попытку.
       const shouldBlock =
         (reason === "execution_unknown" && !durableOutcomeKnown) ||
         reason === "workflow_changed" ||
         reason === "unsupported" ||
+        reason === "skill_failed" ||
         (reason === "route_unavailable" && !safeRouteRetry) ||
         (reason === "budget_denied" && !safeBudgetRetry && !durableBudgetRetry);
       const detailText = detail?.trim().slice(0, 900);
@@ -2058,7 +2065,9 @@ export class TasksService {
                   ? "budget denial после уже начатой metered-попытки"
                   : reason === "unsupported"
                     ? "у агента нет подходящего навыка; нужен owner retry"
-                    : "исход предыдущей metered-попытки неизвестен");
+                    : reason === "skill_failed"
+                      ? "навык не дал результата (ответ модели не по контракту или провайдер отклонил вызов); нужен owner retry"
+                      : "исход предыдущей metered-попытки неизвестен");
       const [released] = await tx
         .update(task)
         .set({

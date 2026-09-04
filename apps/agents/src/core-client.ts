@@ -1,4 +1,5 @@
-import type { EnsureTaskInput, MaintenanceDueRow } from "./maintenance-monitor";
+import type { EnsureTaskInput, InstalledPartUnit, MaintenanceDueRow } from "./maintenance-monitor";
+import type { PartsQueueSnapshot } from "./parts-audit";
 import type {
   AutonomyTier,
   Domain,
@@ -453,6 +454,9 @@ export class AgentsCoreClient {
       webSources: unknown;
       breakGlass: unknown;
       ideaChannels: unknown;
+      kbPages?: unknown;
+      mission?: string | null;
+      nonGoals?: unknown;
       archivedAt: string | null;
     }[]
   > {
@@ -701,7 +705,8 @@ export class AgentsCoreClient {
       | "execution_unknown"
       | "workflow_changed"
       | "route_unavailable"
-      | "unsupported",
+      | "unsupported"
+      | "skill_failed",
     detail?: string,
   ): Promise<boolean> {
     const response = await this.request<{ released: boolean }>(`/tasks/${id}/agent-run/release`, {
@@ -989,6 +994,18 @@ export class AgentsCoreClient {
   /** Что подходит к сроку. Статус считается на чтении, нигде не хранится. */
   maintenanceDue(): Promise<MaintenanceDueRow[]> {
     return this.request("/maintenance/due");
+  }
+
+  // ── Узлы автоматов (спека vendhub-parts, У3) ──────────────────────────────
+
+  /** Узлы, стоящие на автомате сейчас, — по карточкам с инвентарными номерами. */
+  partsInstalled(machineId: string): Promise<InstalledPartUnit[]> {
+    return this.request(`/parts/installed?machineId=${encodeURIComponent(machineId)}`);
+  }
+
+  /** Очередь внимания к узлам: без номера, наклеить, неизвестно где, без тары, без фото. */
+  partsQueue(): Promise<PartsQueueSnapshot> {
+    return this.request("/parts/queue");
   }
 
   /**

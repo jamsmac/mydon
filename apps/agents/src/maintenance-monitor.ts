@@ -70,11 +70,26 @@ export interface EnsureTaskInput {
   createdBy: string;
 }
 
+/** Узел, стоящий на автомате (Core `GET /parts/installed`, спека vendhub-parts У3). */
+export interface InstalledPartUnit {
+  id: string;
+  partKind: string;
+  inventoryNo: string | null;
+  label: string;
+  where: { slot: number | null } | null;
+}
+
 /** Узкий контракт Core-клиента — как у CoffeeMonitorCoreClient, ради тестов. */
 export interface MaintenanceMonitorCoreClient {
   maintenanceDue(): Promise<MaintenanceDueRow[]>;
   ensureTaskForDay(input: EnsureTaskInput): Promise<{ created: boolean; taskId?: string }>;
   recordEvent(input: { source: string; type: string; payload?: Record<string, unknown> }): Promise<unknown>;
+  /**
+   * Узлы автомата по карточкам — чтобы задача ТО называла, что именно стоит
+   * («Стоят: M-017 (№1), M-018 (№2)»). Необязательно: старый Core и тесты
+   * без узлов ведут себя как раньше.
+   */
+  partsInstalled?(machineId: string): Promise<InstalledPartUnit[]>;
 }
 
 export interface MaintenanceMonitorResult {
@@ -179,6 +194,19 @@ export async function runMaintenanceMonitor(
     return result;
   }
 
+  // Узлы по автоматам читаем один раз за прогон: у автомата несколько
+  // нормативов, а состав у него один.
+  const unitsCache = new Map<string, Promise<InstalledPartUnit[]>>();
+  const unitsOf = (machineId: string): Promise<InstalledPartUnit[]> => {
+    if (!core.partsInstalled) return Promise.resolve([]);
+    let p = unitsCache.get(machineId);
+    if (!p) {
+      p = core.partsInstalled(machineId).catch(() => []);
+      unitsCache.set(machineId, p);
+    }
+    return p;
+  };
+
   for (const row of rows) {
     try {
       // «Норматив не задан» — дефект настройки, а не сигнал. О нём владелец
@@ -206,7 +234,7 @@ export async function runMaintenanceMonitor(
           // Пусто — задача свободная, её разберут из общего пула.
           ...(row.assigneeId ? { ownerRef: row.assigneeId } : {}),
           entityId: row.targetId,
-          description: describe(row),
+          description: describe(row, row.partKind ? await unitsOf(row.targetId) : []),
           due: dueInstant(dayKey),
           priority: priorityOf(row.status),
           source: `maint:${row.planId}`,
@@ -266,9 +294,20 @@ export async function runMaintenanceMonitor(
   return result;
 }
 
-function describe(row: MaintenanceDueRow): string {
+/** Строка «Стоят: …» — узлы нужного вида, что сейчас на автомате, по номерам и местам. */
+export function installedLine(row: MaintenanceDueRow, units: InstalledPartUnit[]): string | null {
+  if (!row.partKind) return null;
+  const mine = units.filter((u) => u.partKind === row.partKind);
+  if (mine.length === 0) return null;
+  const sorted = [...mine].sort((a, b) => (a.where?.slot ?? 99) - (b.where?.slot ?? 99));
+  return `Стоят: ${sorted.map((u) => `${u.inventoryNo ?? "без номера"}${u.where?.slot ? ` (№${u.where.slot})` : ""}`).join(", ")}`;
+}
+
+function describe(row: MaintenanceDueRow, units: InstalledPartUnit[] = []): string {
   const lines = [`${DUE_ICON[row.status]} ${row.kindLabel}`];
   if (row.partLabel) lines.push(`Узел: ${row.partLabel}`);
+  const installed = installedLine(row, units);
+  if (installed) lines.push(installed);
   if (row.lastDoneOn) lines.push(`Прошлый раз: ${row.lastDoneOn}`);
   if (row.countLeft !== null) lines.push(`По счётчику осталось: ${row.countLeft}`);
   return lines.join("\n");
