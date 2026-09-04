@@ -49,8 +49,12 @@
 
 ## Референсы
 
-- Проект в работе (на проверке владельца): `docs/superpowers/specs/2026-09-04-vendhub-parts-inventory-design.md` —
-  узлы с инвентарными номерами, инвентаризация узлов, возврат бункеров → склад, товары на перепродажу в леджере (этапы У1–У6).
+- Узлы с инвентарными номерами, инвентаризация узлов, возврат бункеров → склад, товары на перепродажу в леджере:
+  спека `docs/superpowers/specs/2026-09-04-vendhub-parts-inventory-design.md` (as-built §12, этапы У1–У6 сделаны
+  04.09.2026 на ветке `feat/agentic-os-arms`); что делать владельцу — `docs/OWNER_NEXT_STEPS_parts.md`.
+  Код: `apps/core/src/maintenance/parts.service.ts`, `part-count.service.ts`, `apps/core/src/coffee/coffee-ledger.service.ts`,
+  `apps/core/src/stock/vending-ledger.ts`; бот `apps/bot/src/part-numbers.ts`, `part-wash.ts`, `part-count.ts`,
+  `stock-tabs.ts`; панель `/parts`, `/parts/queue`, `/parts/count`, `/stock/goods`; проверки `tools/pglite-checks/`.
 - Спеки: `docs/FIELD_OPS_SPEC.md`, `docs/WAREHOUSE_SPEC.md`, `docs/REPLENISHMENT_MODEL.md`,
   `docs/MACHINE_COMMON_LAYER.md`, `docs/MACHINE_STATUS_SPEC.md`, `docs/PLAN_STOCK_ABSORPTION.md`,
   `docs/PLAN_UCHET_SYRYA.md`, `docs/GJVENDING_RECIPES.md`, `docs/coffee-workflow.md`,
