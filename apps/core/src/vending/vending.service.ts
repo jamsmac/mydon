@@ -76,6 +76,7 @@ import {
 import { DB, type Db } from "../db/db.module";
 import { ApprovalsService } from "../approvals/approvals.service";
 import { settingValue } from "../system/settings";
+import { VendingLedgerService } from "../stock/vending-ledger";
 import { failedStreak, FAILED_STREAK_ALERT, STREAK_SCAN_LIMIT } from "./sync-streak";
 import type { CancelKind } from "./record-cancel.service";
 
@@ -662,6 +663,8 @@ export class VendingService {
   constructor(
     @Inject(DB) private readonly db: Db,
     @Optional() @Inject(ApprovalsService) private readonly approvals?: ApprovalRequester,
+    /** Проекция `vending_stock` → леджер (У6). В тестах отсутствует — двойной записи нет. */
+    @Optional() @Inject(VendingLedgerService) private readonly ledger?: VendingLedgerService,
   ) {}
 
   /**
@@ -1617,6 +1620,16 @@ export class VendingService {
         // в ней уникальны по построению.
         const productId = productIds(product);
         stockRows.push({ productName: product, productId, quantity, countedAt, updatedAt: countedAt });
+        // Двойная запись (У6): пересчёт — корректировка леджера от ЕГО остатка
+        // (до катовера проекция и леджер законно расходятся).
+        await this.ledger?.count(tx, {
+          productId,
+          productName: product,
+          counted: quantity,
+          dt: tashkentDay(countedAt),
+          clientKey: `vending-count:${product}:${countedAt.toISOString()}`,
+          createdBy: actor,
+        });
         // Строка истории — на КАЖДУЮ применённую позицию, даже если количество
         // не изменилось: это счёт, а не правка. «Склад считали 25.08, вышло
         // 19» ценно само по себе — иначе история показывала бы только те дни,
@@ -1739,9 +1752,31 @@ export class VendingService {
     return row.id;
   }
 
+  /**
+   * Источник остатка товаров: `table` — строка `vending_stock` (как раньше),
+   * `ledger` — сумма движений леджера по карточке товара на центральном
+   * складе (после катовера У6). Строки без карточки в режиме леджера
+   * показываются по таблице — им в леджере лежать негде.
+   */
+  async stockSource(): Promise<"table" | "ledger"> {
+    return this.ledger ? this.ledger.source() : "table";
+  }
+
   /** Текущий остаток склада по товарам (для панели/отчётов). */
   async stockLevels(): Promise<StockLevelRow[]> {
     const rows = await this.db.select().from(vendingStock);
+    if (this.ledger && (await this.stockSource()) === "ledger") {
+      const warehouseId = await this.ledger.centralWarehouseId(this.db);
+      if (warehouseId) {
+        const out: StockLevelRow[] = [];
+        for (const r of rows) {
+          const cardId = r.productId ? await this.ledger.cardIdOf(this.db, r.productId) : null;
+          const quantity = cardId ? await this.ledger.qty(this.db, warehouseId, cardId) : r.quantity;
+          out.push({ product: r.productName, productId: r.productId, quantity, countedAt: r.countedAt.toISOString() });
+        }
+        return out.sort((a, b) => a.product.localeCompare(b.product, "ru"));
+      }
+    }
     return rows
       // `productId` в ответе — не украшение: связь строки склада с карточкой
       // прайса иначе не видна ниоткуда, и её потерю (бэкфилл П4) нечем поймать
@@ -2509,6 +2544,7 @@ export class VendingService {
     // и наблюдает цену позиции против карточки (R-P5b-5), а без прайса
     // «было/стало» в наблюдении сравнивать не с чем.
     const { catalog, priceByName } = await this.loadProductIndex();
+    const productIdOf = this.productIdResolver({ catalog });
     /** Закупочная цена карточки по НОРМАЛИЗОВАННОМУ канону — «было» наблюдения. */
     const ценаКарточки = new Map<string, number>();
     for (const [имя, цена] of priceByName) ценаКарточки.set(normalizeProductName(имя), цена);
@@ -2702,6 +2738,18 @@ export class VendingService {
             target: [vendingStock.productName],
             set: { quantity: sql`${vendingStock.quantity} + ${toWarehouse}`, countedAt: now, updatedAt: now },
           });
+        // Двойная запись (У6): приход по накладной — движением леджера по карточке товара.
+        await this.ledger?.movement(tx, {
+          productId: productIdOf(product),
+          productName: product,
+          kind: "intake",
+          qty: toWarehouse,
+          dt: dtToday,
+          note: `накладная ${order.id.slice(0, 8)}, принял ${receivedBy}`,
+          clientKey: `vending-order:${order.id}:${key}`,
+          createdBy: receivedBy,
+          source: "vending-order",
+        });
         replenished += 1;
         units += toWarehouse;
       }

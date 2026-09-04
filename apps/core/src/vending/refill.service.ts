@@ -1,8 +1,9 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { auditLog, event, machineSlot, vendingRefill, vendingStock } from "@mydon/db";
 import { normalizeMachineSerial } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
+import { VendingLedgerService } from "../stock/vending-ledger";
 import { VendingService } from "./vending.service";
 
 type RefillRow = typeof vendingRefill.$inferSelect;
@@ -48,6 +49,8 @@ export class RefillService {
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly vending: VendingService,
+    /** Проекция `vending_stock` → леджер (У6). В тестах отсутствует — двойной записи нет. */
+    @Optional() @Inject(VendingLedgerService) private readonly ledger?: VendingLedgerService,
   ) {}
 
   /**
@@ -134,6 +137,19 @@ export class RefillService {
         })
         .returning();
 
+      // Двойная запись (У6): то же списание — движением леджера по карточке
+      // товара на центральном складе; ключ — заливка, повтор не двоит.
+      await this.ledger?.movement(tx, {
+        productId,
+        productName,
+        kind: "consumption",
+        qty: input.qty,
+        dt: performedAt.toISOString().slice(0, 10),
+        note: `заливка автомата ${input.machineSerial}`,
+        clientKey: `vending-refill:${created.id}`,
+        createdBy: input.createdBy ?? "owner",
+      });
+
       await tx.insert(auditLog).values({
         actorKind: input.personId ? "human" : "system",
         actorRef: input.createdBy ?? "owner",
@@ -161,7 +177,13 @@ export class RefillService {
         },
       });
 
-      return { refill: created, stockLeft: stock?.quantity ?? null, duplicate: false };
+      // После катовера (VENDING_STOCK_SOURCE=ledger) остаток — по леджеру, а не по строке проекции.
+      let stockLeft: number | null = stock?.quantity ?? null;
+      if (this.ledger && productId && (await this.ledger.source(tx)) === "ledger") {
+        const [warehouseId, cardId] = await Promise.all([this.ledger.centralWarehouseId(tx), this.ledger.cardIdOf(tx, productId)]);
+        if (warehouseId && cardId) stockLeft = await this.ledger.qty(tx, warehouseId, cardId);
+      }
+      return { refill: created, stockLeft, duplicate: false };
     });
   }
 

@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { ApprovalsModule } from "../approvals/approvals.module";
+import { StockModule } from "../stock/stock.module";
 import { OurvendHealthService } from "../ourvend/ourvend-health.service";
 import { OurvendParityService } from "../ourvend/ourvend-parity.service";
 import { ParityIssueService } from "../ourvend/parity-issue.service";
@@ -37,7 +38,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
  * застоя, из того же модуля.
  */
 @Module({
-  imports: [ApprovalsModule],
+  imports: [ApprovalsModule, StockModule],
   controllers: [VendingController],
   providers: [
     VendingService,

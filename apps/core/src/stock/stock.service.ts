@@ -40,6 +40,7 @@ import {
 import { Cron } from "croner";
 import { and, desc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { ensureProductCards, vendingParity } from "./vending-ledger";
 
 function isExpiryFlag(v: string): v is ExpiryFlag {
   return v === "expired" || v === "expiring" || v === "ok" || v === "none";
@@ -300,6 +301,29 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
     return isUnit(attrs["единица"]) ? (attrs["единица"] as Unit) : null;
   }
 
+  /** Базовая единица карточки склада: у ингредиента — из «единица», у товара на перепродажу — штуки. */
+  private baseUnitOfCard(card: typeof entity.$inferSelect): Unit | null {
+    const attrs = (card.attrs ?? {}) as Record<string, unknown>;
+    return this.baseUnitOf(attrs) ?? (card.type === "product" ? "шт" : null);
+  }
+
+  /**
+   * Карточка, которую принимает леджер (R-PU-10, У6): ингредиент — как
+   * прежде, товар — только вида «на перепродажу» (рецептурный товар живёт
+   * в составе, его на склад не приходуют). Один леджер для сырья и товаров.
+   */
+  private async stockCard(id: string): Promise<typeof entity.$inferSelect> {
+    const [card] = await this.db.select().from(entity).where(eq(entity.id, id));
+    if (!card) throw new NotFoundException(`Карточки нет: ${id}`);
+    if (card.type === "ingredient") return card;
+    if (card.type === "product" && productKind((card.attrs ?? {}) as Record<string, unknown>) === "перепродажа") return card;
+    throw new BadRequestException(
+      card.type === "product"
+        ? `Карточка ${card.name} — рецептурный товар, на склад его не приходуют (только «на перепродажу»)`
+        : `Карточка ${card.name} — не ingredient и не товар на перепродажу`,
+    );
+  }
+
   /** Проверить, что карточка есть и нужного типа. */
   private async cardOfType(id: string, type: string): Promise<typeof entity.$inferSelect> {
     const [card] = await this.db.select().from(entity).where(eq(entity.id, id));
@@ -316,7 +340,7 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
     if (!isUnit(input.unit)) throw new BadRequestException(`Единица «${input.unit}» неизвестна`);
     const unit: Unit = input.unit;
 
-    const ing = await this.cardOfType(input.ingredientId, "ingredient");
+    const ing = await this.stockCard(input.ingredientId);
     await this.cardOfType(input.warehouseId, "warehouse");
     if (input.kind === "transfer") {
       if (!input.counterpartyId) {
@@ -330,7 +354,7 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
 
     // Единицу прихода сверяем с базовой единицей ингредиента: несводимую не
     // принимаем молча — иначе остаток нельзя будет посчитать честно.
-    const base = this.baseUnitOf((ing.attrs ?? {}) as Record<string, unknown>);
+    const base = this.baseUnitOfCard(ing);
     if (base && unit !== base && convertQty(input.qty, unit, base) === null) {
       throw new BadRequestException(
         `«${unit}» не перевести в базовую единицу ингредиента «${base}»`,
@@ -379,6 +403,16 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
     return row;
   }
 
+  /** Сверка проекции товаров с леджером (У6). */
+  vendingParity() {
+    return vendingParity(this.db);
+  }
+
+  /** Карточки реестра для товаров прайса (У6): связать или завести. */
+  ensureVendingCards(opts: { dryRun?: boolean; actorRef?: string }) {
+    return ensureProductCards(this.db, opts);
+  }
+
   /** Склад приёма по умолчанию — для автоматических приходов (возврат бункера) и списаний. */
   async defaultWarehouseId(): Promise<string | null> {
     return (await this.defaultWarehouse())?.id ?? null;
@@ -402,9 +436,9 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
   }): Promise<{ movement: MovementRow; batchId: string; replay: boolean }> {
     if (!(input.qty > 0)) throw new BadRequestException("Количество возврата должно быть больше нуля");
     if (!isUnit(input.unit)) throw new BadRequestException(`Единица «${input.unit}» неизвестна`);
-    const ing = await this.cardOfType(input.ingredientId, "ingredient");
+    const ing = await this.stockCard(input.ingredientId);
     await this.cardOfType(input.warehouseId, "warehouse");
-    const base = this.baseUnitOf((ing.attrs ?? {}) as Record<string, unknown>);
+    const base = this.baseUnitOfCard(ing);
     if (base && input.unit !== base && convertQty(input.qty, input.unit, base) === null) {
       throw new BadRequestException(`«${input.unit}» не перевести в базовую единицу ингредиента «${base}»`);
     }
@@ -519,8 +553,8 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
       note: string | null;
     }[];
   }> {
-    const ing = await this.cardOfType(ingredientId, "ingredient");
-    const base = this.baseUnitOf((ing.attrs ?? {}) as Record<string, unknown>);
+    const ing = await this.stockCard(ingredientId);
+    const base = this.baseUnitOfCard(ing);
     const rows = await this.movementsOf(eq(stockMovement.ingredientId, ingredientId));
 
     // Имена складов, встретившихся в движениях.
@@ -580,6 +614,8 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
     items: {
       ingredientId: string;
       ingredientName: string;
+      /** `ingredient` — сырьё, `product` — товар на перепродажу (У6): панель показывает их двумя секциями. */
+      cardType: "ingredient" | "product";
       baseUnit: Unit | null;
       qty: number | null;
       unconvertible: number;
@@ -609,12 +645,13 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
 
     const items = ingIds.map((iid) => {
       const ing = ingById.get(iid);
-      const base = ing ? this.baseUnitOf((ing.attrs ?? {}) as Record<string, unknown>) : null;
+      const base = ing ? this.baseUnitOfCard(ing) : null;
       const input = this.toBalanceInput(rows.filter((r) => r.ingredientId === iid));
       const b = base ? stockBalance(input, base, warehouseId) : null;
       return {
         ingredientId: iid,
         ingredientName: ing?.name ?? "ингредиент",
+        cardType: (ing?.type === "product" ? "product" : "ingredient") as "ingredient" | "product",
         baseUnit: base,
         qty: b ? b.qty : null,
         unconvertible: b ? b.unconvertible : 0,
@@ -651,8 +688,8 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
     unconvertible: number;
   }> {
     const wh = await this.cardOfType(warehouseId, "warehouse");
-    const ing = await this.cardOfType(ingredientId, "ingredient");
-    const base = this.baseUnitOf((ing.attrs ?? {}) as Record<string, unknown>);
+    const ing = await this.stockCard(ingredientId);
+    const base = this.baseUnitOfCard(ing);
     const rows = await this.movementsOf(eq(stockMovement.ingredientId, ingredientId));
     const b = base ? stockBalance(this.toBalanceInput(rows), base, warehouseId) : null;
     return {
@@ -1231,10 +1268,10 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
     if (!isUnit(input.unit)) throw new BadRequestException(`Единица «${input.unit}» неизвестна`);
     const unit: Unit = input.unit;
 
-    const ing = await this.cardOfType(input.ingredientId, "ingredient");
+    const ing = await this.stockCard(input.ingredientId);
     await this.cardOfType(input.warehouseId, "warehouse");
     const attrs = (ing.attrs ?? {}) as Record<string, unknown>;
-    const base = this.baseUnitOf(attrs);
+    const base = this.baseUnitOfCard(ing);
 
     // Штуки в вес — по весу упаковки с карточки.
     //

@@ -2013,6 +2013,13 @@ export const vendingProduct = pgTable("vending_product", {
   /** Требует маркировки (КИЗ). `false` значит И «не требуется», И «не выясняли» — различить нечем. */
   marked: boolean("marked").default(false).notNull(),
   isActive: boolean("is_active").default(true).notNull(),
+  /**
+   * Карточка реестра `entity` (type=product, вид «перепродажа») — мост в
+   * складской леджер (R-PU-10, У6): движения `stock_movement` живут по
+   * карточкам реестра, а прайс вендинга — здесь. NULL — карточки нет, товар
+   * в леджер не попадает (сверка это покажет; `ensureProductCards` заводит).
+   */
+  entityId: uuid("entity_id").references(() => entity.id),
   createdAt: createdAt(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

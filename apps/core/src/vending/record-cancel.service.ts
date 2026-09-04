@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import {
   auditLog,
@@ -11,6 +11,7 @@ import {
 } from "@mydon/db";
 import { can, type CashCategorySummary } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
+import { VendingLedgerService } from "../stock/vending-ledger";
 import { readIntSetting } from "../system/settings";
 
 export type CancelKind = "refill" | "stock_count" | "cash";
@@ -56,7 +57,11 @@ function negativeCategories(categories: CashCategorySummary[]): CashCategorySumm
 
 @Injectable()
 export class RecordCancelService {
-  constructor(@Inject(DB) private readonly db: Db) {}
+  constructor(
+    @Inject(DB) private readonly db: Db,
+    /** Проекция `vending_stock` → леджер (У6). В тестах отсутствует — двойной записи нет. */
+    @Optional() @Inject(VendingLedgerService) private readonly ledger?: VendingLedgerService,
+  ) {}
 
   /** Сторно живёт одной транзакцией; `now` параметром делает окно проверяемым. */
   async cancel(kind: CancelKind, id: string, actor: CancelActor, now: Date): Promise<CancelResult> {
@@ -144,6 +149,16 @@ export class RecordCancelService {
               updatedAt: now,
             },
           });
+        // Двойная запись (У6): сторно заливки возвращает товар на склад корректировкой «+qty».
+        await this.ledger?.movement(tx, {
+          productId: original.productId,
+          productName: original.productName,
+          kind: "adjustment",
+          qty: original.qty,
+          note: `сторно заливки ${original.id.slice(0, 8)}`,
+          clientKey: `vending-refill-storno:${original.id}`,
+          createdBy: original.createdBy,
+        });
         await record(original.id, storno.id, label, original.createdBy, original, storno);
         return { ok: true, kind, stornoId: storno.id, label, alreadyCancelled: false };
       }

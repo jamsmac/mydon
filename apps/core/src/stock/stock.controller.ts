@@ -320,6 +320,18 @@ export class StockController {
     return this.stock.warehouseStock(id);
   }
 
+  /** Сверка проекции `vending_stock` с леджером по товарам (У6): нулевая неделю — можно катовер. */
+  @Get("vending-parity")
+  vendingParity() {
+    return this.stock.vendingParity();
+  }
+
+  /** Карточки реестра для товаров прайса: связать по имени или завести (У6). `?dryRun=1` — только план. */
+  @Post("vending-cards")
+  vendingCards(@Query("dryRun") dryRun?: string, @Query("actor") actor?: string) {
+    return this.stock.ensureVendingCards({ dryRun: dryRun === "1" || dryRun === "true", actorRef: actor ?? "owner" });
+  }
+
   /** Остаток пары «склад × ингредиент» — что показать перед вводом факта. */
   @Get("balance")
   balance(

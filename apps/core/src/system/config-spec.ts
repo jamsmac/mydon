@@ -198,6 +198,18 @@ export const CONFIG_SPECS: ConfigSpec[] = [
       "0 — склад по кофе ведётся только приходами, возвратами и инвентаризацией, как до среза У5.",
     validate: oneOf(["0", "1"]),
   },
+  {
+    key: "VENDING_STOCK_SOURCE",
+    label: "Товары: источник остатка центрального склада",
+    kind: "select",
+    options: ["table", "ledger"],
+    fallback: "table",
+    help:
+      "table — строка vending_stock, как раньше (леджер пишется параллельно, двойная запись). " +
+      "ledger — остаток считается по движениям складского леджера на центральном складе (катовер У6). " +
+      "Переключать, когда сверка /stock/vending-parity держится нулевой неделю.",
+    validate: oneOf(["table", "ledger"]),
+  },
   // ── Доступ: ужесточение owner-identity (P5, R-P5-4/5/6) ──
   {
     key: "OWNER_IDENTITY_ENFORCED",

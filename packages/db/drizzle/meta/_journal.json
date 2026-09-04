@@ -603,6 +603,13 @@
       "when": 1788536528030,
       "tag": "0085_part_count",
       "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1788538519123,
+      "tag": "0086_vending_product_entity",
+      "breakpoints": true
     }
   ]
 }

@@ -1954,6 +1954,8 @@ export interface WarehouseStock {
   items: {
     ingredientId: string;
     ingredientName: string;
+    /** `ingredient` — сырьё, `product` — товар на перепродажу (У6). Старый Core поля не отдаёт. */
+    cardType?: "ingredient" | "product";
     baseUnit: string | null;
     qty: number | null;
     unconvertible: number;
@@ -2268,6 +2270,14 @@ export interface PartsQueue {
   items: PartUnit[];
 }
 
+/** Сверка `vending_stock` с леджером по товарам (У6). */
+export interface VendingParity {
+  warehouseId: string | null;
+  rows: { productName: string; productId: string | null; cardId: string | null; table: number; ledger: number | null; diff: number | null }[];
+  mismatched: number;
+  unlinked: number;
+}
+
 /** Инвентаризация узлов (У4): сессия по месту и строки. */
 export interface PartCountSession {
   id: string;
@@ -2477,6 +2487,11 @@ export const core = {
     send<{ unit: PartUnit; from: string | null; logId: string | null }>(`/parts/${id}/washed`, "POST", { actorRef }),
   partsProvision: (input: { dryRun?: boolean; machineIds?: string[]; actorRef?: string }) =>
     send<PartsProvisionReport>("/parts/provision", "POST", input),
+  /** Сверка проекции товаров с леджером (У6). */
+  vendingParity: () => get<VendingParity>("/stock/vending-parity"),
+  /** Карточки реестра для товаров прайса (У6): связать или завести; dryRun — только план. */
+  vendingCards: (dryRun: boolean) =>
+    send<{ linked: string[]; created: string[]; ambiguous: string[]; already: number }>(`/stock/vending-cards?dryRun=${dryRun ? "1" : "0"}&actor=owner`, "POST", {}),
   /** Инвентаризация узлов (У4): сессии, сводка, применение, откат. */
   partCountSessions: (limit = 50) => get<PartCountSessionListRow[]>(`/parts/count/sessions?limit=${limit}`),
   partCountSummary: (id: string) => get<PartCountSummary>(`/parts/count/sessions/${id}`),

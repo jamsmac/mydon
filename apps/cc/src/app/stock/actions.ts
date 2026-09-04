@@ -36,3 +36,22 @@ export async function runRegisterImport(input: {
     return { ok: false, error: err instanceof Error ? err.message : "Импорт не удался" };
   }
 }
+
+/** Карточки реестра для товаров прайса (У6): план (dryRun) или запись. */
+export async function ensureVendingCards(dryRun: boolean): Promise<{
+  ok: boolean;
+  error?: string;
+  report?: { linked: string[]; created: string[]; ambiguous: string[]; already: number };
+}> {
+  try {
+    const report = await core.vendingCards(dryRun);
+    if (!dryRun) {
+      revalidatePath("/stock/goods");
+      revalidatePath("/domain/vendhub");
+    }
+    return { ok: true, report };
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Не удалось" };
+  }
+}
