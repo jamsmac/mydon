@@ -19,14 +19,29 @@ try {
   const p = new PartsService(db); const m = new MaintenanceService(db);
   // на B уже стоит миксер в слоте 2 (заведён руками) — его не дублируем
   await m.installPart({ machineId: B, partKind: "mixer", slot: 2 });
+  // …и миксер в слоте 1 из бэкфилла 0084: без номера, не в очереди — система обязана присвоить номер
+  const BF = "00000000-0000-0000-0000-00000000ee01";
+  await run(`insert into part_unit (id, part_kind, origin, label_pending, note) values ('${BF}','mixer','backfill',false,'из журнала')`);
+  await run(`insert into machine_part (part_unit_id, machine_id, location, part_kind, slot, installed_on) values ('${BF}','${B}','machine','mixer',1,'2026-05-01')`);
 
   const dry = await p.provision({ dryRun: true });
   assert.equal(dry.machines.length, 2, "только кофейные автоматы");
-  assert.equal(dry.createdTotal, 15 + 14);
+  assert.equal(dry.createdTotal, 15 + 13);
   assert.ok(dry.machines[0].created.some(c => c.includes("набор 27")), "план видит набор по последней заливке");
+  assert.equal(dry.numberedTotal, 1);
+  // ручной миксер B занял M-001; автомат A (первый по имени) заводит 4 миксера M-002…M-005; бэкфиллу на B — M-006
+  assert.deepEqual(dry.machines[1].numbered, ["Миксер №1 → M-006"], "номер считается по всему прогону; dry-run ничего не пишет");
+  assert.ok(dry.machines[0].created.some(c => c.includes("Миксер №1 → M-002")), "предпросмотр показывает будущие номера заводимых узлов");
+  assert.equal((await run(`select inventory_no, label_pending from part_unit where id='${BF}'`))[0].inventory_no, null);
 
   const r1 = await p.provision({ actorRef: "owner" });
-  assert.equal(r1.createdTotal, 29);
+  assert.equal(r1.createdTotal, 28);
+  assert.equal(r1.numberedTotal, 1);
+  assert.deepEqual(r1.machines[1].numbered, ["Миксер №1 → M-006"], "боевой прогон выдаёт тот же номер, что и предпросмотр");
+  const bf = (await run(`select inventory_no, label_pending from part_unit where id='${BF}'`))[0];
+  assert.equal(bf.inventory_no, "M-006"); assert.equal(bf.label_pending, true, "узел из бэкфилла встал в очередь наклеек");
+  const mixNos = (await run(`select inventory_no from part_unit where part_kind='mixer' order by inventory_no`)).map(r => r.inventory_no);
+  assert.deepEqual(mixNos, ["M-001","M-002","M-003","M-004","M-005","M-006","M-007","M-008"], "номера миксеров идут подряд без дыр и дублей");
   const hoppersA = await p.list({ kind: "hopper", machineId: A });
   const byPos = new Map(hoppersA.map(h => [h.where.slot, h]));
   assert.equal(byPos.get(1).inventoryNo, "H-27-1"); assert.equal(byPos.get(1).tareWeight, 410); assert.equal(byPos.get(1).setNumber, 27);
@@ -34,11 +49,12 @@ try {
   assert.equal(byPos.get(4).setNumber, null); assert.match(byPos.get(4).inventoryNo, /^H-\d{3}$/, "без набора — счётчик");
   const mixersB = await p.list({ kind: "mixer", machineId: B });
   assert.deepEqual(mixersB.map(x => x.where.slot).sort(), [1,2,3,4]);
-  assert.equal(mixersB.filter(x => x.origin === "auto").length, 3);
-  const q = await p.queue(); assert.equal(q.counts.label_pending, 29 + 1, "все автозаведённые и ручной миксер ждут наклейку");
+  assert.equal(mixersB.filter(x => x.origin === "auto").length, 2);
+  const q = await p.queue(); assert.equal(q.counts.label_pending, 28 + 1 + 1, "все автозаведённые, ручной миксер и пронумерованный бэкфилл ждут наклейку");
 
   const r2 = await p.provision({});
   assert.equal(r2.createdTotal, 0, "идемпотентно");
+  assert.equal(r2.numberedTotal, 0, "номер второй раз не выдаётся");
   // повторное автозаведение после снятия бункера: свободный бункер набора ставится обратно, не дубль
   await m.removePart({ machineId: A, partKind: "hopper", slot: 1, toLocation: "washing" });
   const r3 = await p.provision({ machineIds: [A] });

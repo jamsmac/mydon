@@ -20,6 +20,7 @@ import {
   parsePartsTemplate,
   partLabel,
   planMissingParts,
+  planUnnumberedParts,
   suggestInventoryNo,
   type PartAttention,
   type PartKind,
@@ -123,6 +124,8 @@ export interface ProvisionMachineReport {
   existing: number;
   /** Бункеры, у которых набор найден по последней заливке. */
   hopperSetsFound: number;
+  /** Стоявшим БЕЗ номера (бэкфилл журнала) присвоен номер: «Миксер №1 → M-001». */
+  numbered: string[];
 }
 
 export interface ProvisionReport {
@@ -130,6 +133,8 @@ export interface ProvisionReport {
   template: PartsTemplateEntry[];
   machines: ProvisionMachineReport[];
   createdTotal: number;
+  /** Сколько стоявших узлов получили номер (и попали в очередь наклеек). */
+  numberedTotal: number;
 }
 
 /** Подпись узла: вид + номер, «без номера» — честно словами. */
@@ -612,14 +617,66 @@ export class PartsService {
       )
       .orderBy(asc(entity.name));
 
-    const report: ProvisionReport = { dryRun: input.dryRun === true, template, machines: [], createdTotal: 0 };
+    const report: ProvisionReport = { dryRun: input.dryRun === true, template, machines: [], createdTotal: 0, numberedTotal: 0 };
+    // Номера серий за ОДИН прогон: семя — занятые в базе, дальше — выданные
+    // здесь же. Иначе предпросмотр печатал бы M-001 каждому миксеру подряд
+    // (dry-run ничего не бронирует), а боевой прогон — другие номера.
+    const takenNos = new Map<PartKind, string[]>();
+    const nextNo = async (kind: PartKind, tx: Tx): Promise<string> => {
+      let taken = takenNos.get(kind);
+      if (!taken) {
+        const rows = await tx
+          .select({ no: partUnit.inventoryNo })
+          .from(partUnit)
+          .where(and(eq(partUnit.partKind, kind), sql`${partUnit.inventoryNo} is not null`));
+        taken = rows.map((r) => r.no!);
+        takenNos.set(kind, taken);
+      }
+      const no = suggestInventoryNo(kind, taken);
+      taken.push(no);
+      return no;
+    };
     for (const m of machines) {
       const line = await this.db.transaction(async (tx) => {
         const open = await tx
-          .select({ kind: machinePart.partKind, slot: machinePart.slot })
+          .select({ kind: machinePart.partKind, slot: machinePart.slot, unitId: machinePart.partUnitId })
           .from(machinePart)
           .where(and(eq(machinePart.machineId, m.id), isNull(machinePart.removedOn)));
         const missing = planMissingParts(template, open);
+
+        // Стоящие БЕЗ номера (бэкфилл 0084 восстановил узлы из журнала без
+        // инвентарных номеров): слот занят, но очередь «Наклеить номер» их не
+        // видит. Система присваивает номер и ставит в очередь — как при заведении.
+        const unnumberedRows = open.length
+          ? await tx
+              .select({ id: partUnit.id, setNumber: partUnit.setNumber, hopperPosition: partUnit.hopperPosition })
+              .from(partUnit)
+              .where(and(inArray(partUnit.id, open.map((o) => o.unitId)), isNull(partUnit.inventoryNo)))
+          : [];
+        const unnumberedById = new Map(unnumberedRows.map((r) => [r.id, r]));
+        const toNumber = planUnnumberedParts(
+          template,
+          open
+            .filter((o) => unnumberedById.has(o.unitId))
+            .map((o) => ({ unitId: o.unitId, kind: o.kind, slot: o.slot, inventoryNo: null })),
+        );
+        const numbered: string[] = [];
+        for (const ref of toNumber) {
+          const row = unnumberedById.get(ref.unitId)!;
+          const no =
+            ref.kind === "hopper" && row.setNumber !== null && row.hopperPosition !== null
+              ? formatInventoryNo("hopper", 0, { setNumber: row.setNumber, position: row.hopperPosition })
+              : await nextNo(ref.kind, tx);
+          if (!input.dryRun) {
+            const busy = await this.takenBy(tx, no, ref.unitId);
+            if (busy) throw new ConflictException(`Номер ${no} уже у узла «${partUnitLabel(busy)}»`);
+            await tx
+              .update(partUnit)
+              .set({ inventoryNo: no, labelPending: true, updatedAt: new Date() })
+              .where(eq(partUnit.id, ref.unitId));
+          }
+          numbered.push(`${partLabel(ref.kind)}${ref.slot !== null ? ` №${ref.slot}` : ""} → ${no}`);
+        }
         const sets = missing.some((x) => x.kind === "hopper") ? await this.hopperSetsOf(tx, m.id) : new Map<number, number>();
         const created: string[] = [];
         for (const slotKey of missing) {
@@ -649,17 +706,27 @@ export class PartsService {
               }
             }
           }
+          // Номер нового узла — из списка прогона (см. nextNo), а не из базы в
+          // момент вставки: иначе предпросмотр и боевой прогон печатают разные
+          // номера, как только предыдущий автомат что-то завёл. Бункер с
+          // набором номер получает от набора — он детерминирован и без списка.
+          const bySet = hopperSet !== undefined && !setTaken;
+          const plannedNo = unit
+            ? null
+            : bySet
+              ? formatInventoryNo("hopper", 0, { setNumber: hopperSet!, position: slotKey.slot! })
+              : await nextNo(slotKey.kind, tx);
           if (input.dryRun) {
             created.push(
               unit
                 ? `${partUnitLabel(unit)} (уже заведён, свободен — будет поставлен)`
-                : `${partLabel(slotKey.kind)}${slotKey.slot !== null ? ` №${slotKey.slot}` : ""}${hopperSet !== undefined ? ` · набор ${hopperSet}` : ""}`,
+                : `${partLabel(slotKey.kind)}${slotKey.slot !== null ? ` №${slotKey.slot}` : ""}${hopperSet !== undefined ? ` · набор ${hopperSet}` : ""} → ${plannedNo}`,
             );
             continue;
           }
           if (!unit) {
             let tare: number | null = null;
-            if (hopperSet !== undefined && !setTaken) {
+            if (bySet) {
               const [t] = await tx
                 .select({ tareWeight: coffeeContainerTare.tareWeight })
                 .from(coffeeContainerTare)
@@ -670,7 +737,7 @@ export class PartsService {
             const view = await this.create(
               {
                 partKind: slotKey.kind,
-                ...(hopperSet !== undefined && !setTaken ? { setNumber: hopperSet, hopperPosition: slotKey.slot! } : {}),
+                ...(bySet ? { setNumber: hopperSet, hopperPosition: slotKey.slot! } : { inventoryNo: plannedNo! }),
                 ...(tare !== null ? { tareWeight: tare } : {}),
                 origin: "auto",
                 labelPending: true,
@@ -710,18 +777,20 @@ export class PartsService {
           created,
           existing: open.length,
           hopperSetsFound: sets.size,
+          numbered,
         } satisfies ProvisionMachineReport;
       });
       report.machines.push(line);
       report.createdTotal += line.created.length;
+      report.numberedTotal += line.numbered.length;
     }
-    if (!input.dryRun && report.createdTotal > 0) {
+    if (!input.dryRun && (report.createdTotal > 0 || report.numberedTotal > 0)) {
       await this.db.insert(auditLog).values({
         actorKind: actorKindOf(actorRef),
         actorRef,
         action: "parts.provisioned",
         target: "machine_card:coffee",
-        after: { createdTotal: report.createdTotal, machines: report.machines.length },
+        after: { createdTotal: report.createdTotal, numberedTotal: report.numberedTotal, machines: report.machines.length },
       });
     }
     return report;
