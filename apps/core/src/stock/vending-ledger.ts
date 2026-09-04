@@ -260,6 +260,13 @@ export interface VendingParityReport {
   missingRows: number;
   /** Позиций прайса в сверке. */
   products: number;
+  /**
+   * Карточных позиций без выбранного центрального склада (`status = "no_warehouse"`).
+   * Без склада ВСЕ карточные строки не расхождение (`isMismatch=false`) и не
+   * `missingRows` — сверка выглядит зелёной, ничего не проверив. Этот счётчик —
+   * единственное место, где «склад не выбран» видно в самом отчёте.
+   */
+  noWarehouse: number;
 }
 
 /**
@@ -288,6 +295,7 @@ export async function vendingParity(db: Writer): Promise<VendingParityReport> {
     unlinked: rows.filter((r) => r.status === "no_card").length,
     missingRows: rows.filter((r) => r.status === "no_row").length,
     products: rows.filter((r) => r.productId !== null).length,
+    noWarehouse: rows.filter((r) => r.status === "no_warehouse").length,
   };
 }
 

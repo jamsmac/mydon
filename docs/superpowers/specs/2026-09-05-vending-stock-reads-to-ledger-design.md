@@ -189,6 +189,7 @@ export interface GoodsStock {
 | Файл | Что |
 |---|---|
 | `apps/core/src/stock/vending-ledger.ts` | `ledgerQtyMany()`, `lastCountedByProduct()`, `goodsStock()`, `GoodsStockRow/GoodsStock`, переписанная `vendingParity()` со статусами; методы в `VendingLedgerService` |
+| `apps/core/src/stock/goods-stock.ts` | чистая логика: типы (`GoodsStockRow`/`GoodsStock`/`VendingParityRow`/`VendingParityStatus`), `assembleGoodsStock`, `parityRows` — без импортов БД, проверяется на заглушке |
 | `apps/core/src/vending/vending.service.ts` | `stockLevels()` и `stockRows()` — ветка `ledger` через одну дверь; `StockLevelRow.quantity/countedAt` nullable; план: `unknownStock` + предупреждение; сторож давности — `asOf` из выдачи, `null` вне `watched` |
 | `apps/core/src/vending/analytics.service.ts` | мёртвый сток — ветка `ledger` |
 | `apps/core/src/vending/refill.service.ts` | остаток в обеих ветках через леджер в режиме `ledger` |

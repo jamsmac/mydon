@@ -272,4 +272,26 @@ describe("Повтор заливки в режиме ledger — остаток 
     assert.equal(res.duplicate, true);
     assert.equal(res.stockLeft, 37);
   });
+
+  it("свежая заливка нерезолвящегося товара в режиме ledger — остаток «неизвестно», не строка тени", async () => {
+    // productId null (товар без карточки прайса) — леджер не ищет остаток по
+    // карточке, значит «неизвестно», а не число из upsert-а тени vending_stock.
+    const inserted: Row[] = [];
+    const db = stubDb({ inserted, stockAfter: { quantity: -6 } });
+    const ledger = {
+      source: async () => "ledger",
+      centralWarehouseId: async () => "wh-1",
+      cardIdOf: async () => "c-s",
+      qty: async () => 99,
+      movement: async () => ({ ok: true }),
+    } as never;
+    const res = await new RefillService(db, vendingStub, ledger).create({
+      machineSerial: "M1",
+      productName: "Snickers",
+      qty: 6,
+      clientKey: "rf-2",
+    });
+    assert.equal(res.duplicate, false);
+    assert.equal(res.stockLeft, null, "без карточки товара остаток леджера не подставляется таблицей");
+  });
 });

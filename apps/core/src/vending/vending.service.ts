@@ -639,6 +639,16 @@ interface PurchaseContext {
   unmatchedStock: StockRow[];
   /** Позиции прайса с неизвестным остатком (нет карточки склада / склад не выбран): в расчёт не вошли, R-GS-3. */
   unknownStock: StockRow[];
+  /**
+   * «Когда последний раз считали склад» — из ОДНОЙ ДВЕРИ (R-GS-1, §5.3), а не
+   * пересчитано из строк, отфильтрованных под потребность плана: в режиме
+   * `ledger` это `goodsStock().asOf` (максимум по ВСЕМ активным позициям
+   * прайса, включая карточные без движения), в `table` — прежний реduce по
+   * сопоставленным строкам склада (R-GS-4, число не меняется).
+   */
+  stockAsOf: Date | null;
+  /** Источник, которым посчитан склад в этом контексте — определяет текст `stock_stale`. */
+  stockSource: "table" | "ledger";
   /** Канон-имена из слотов с дефицитом, которых нет в прайсе вендинга. */
   unknownProducts: string[];
   /**
@@ -1892,13 +1902,24 @@ export class VendingService {
    * устарел» в плане. Дата пересчёта нужна здесь же: закуп молча вычитает
    * остаток из потребности, и если ему месяц, план врёт без единого признака.
    */
-  private async stockRows(): Promise<StockRow[]> {
+  private async stockRows(): Promise<{ rows: StockRow[]; asOf: Date | null; source: "table" | "ledger" }> {
     if (this.ledger && (await this.stockSource()) === "ledger") {
       const goods = await this.ledger.goodsStock(this.db);
-      return goods.rows.map((r) => ({ product: r.productName, quantity: r.quantity, countedAt: r.countedAt }));
+      return {
+        rows: goods.rows.map((r) => ({ product: r.productName, quantity: r.quantity, countedAt: r.countedAt })),
+        // Одна дверь (§5.3): давность — по ВСЕМ активным позициям прайса, а не
+        // только по тем, что попадут в потребность плана после сопоставления.
+        asOf: goods.asOf,
+        source: "ledger",
+      };
     }
     const rows = await this.db.select().from(vendingStock);
-    return rows.map((r) => ({ product: r.productName, quantity: r.quantity, countedAt: r.countedAt }));
+    return {
+      rows: rows.map((r) => ({ product: r.productName, quantity: r.quantity, countedAt: r.countedAt })),
+      // table: давность считается ниже, тем же reduce по сопоставленным строкам, что и раньше (R-GS-4).
+      asOf: null,
+      source: "table",
+    };
   }
 
   /**
@@ -2031,7 +2052,8 @@ export class VendingService {
     // расчёт не идёт вовсе: у неё нет ни цены, ни кратности, ни правил, а
     // вычесть её из потребности значит молча поверить имени, которого система
     // не знает. Такие штуки план показывает отдельно (C2).
-    const allStockRows = await this.stockRows();
+    const stockDoor = await this.stockRows();
+    const allStockRows = stockDoor.rows;
     const stockRows: StockRow[] = [];
     const unmatchedStock: StockRow[] = [];
     const unknownStock: StockRow[] = [];
@@ -2090,6 +2112,12 @@ export class VendingService {
     const nameBySerial = new Map(
       ok.map((m) => [m.machineId, nameByCanon.get(normalizeMachineSerial(m.machineId)) ?? m.machineId] as const),
     );
+    // Давность: ledger — из одной двери целиком (§5.3); table — прежний reduce
+    // ровно по сопоставленным строкам (R-GS-4, число не меняется).
+    const stockAsOf =
+      stockDoor.source === "ledger"
+        ? stockDoor.asOf
+        : stockRows.reduce<Date | null>((acc, r) => (r.countedAt && (!acc || r.countedAt > acc) ? r.countedAt : acc), null);
     return {
       summary,
       ok,
@@ -2099,6 +2127,8 @@ export class VendingService {
       unmatchedStock,
       unknownStock,
       unknownProducts,
+      stockAsOf,
+      stockSource: stockDoor.source,
       sales: { capturedAt: sold.capturedAt, serialsInBatch: sold.serials },
     };
   }
@@ -2156,8 +2186,10 @@ export class VendingService {
       slots: allocateBySlots(slotsBySerial.get(a.serial) ?? [], a),
     }));
 
-    // `asOf` — «когда последний раз считали хоть что-то» (для показа).
-    const asOf = ctx.stockRows.reduce<Date | null>((acc, r) => (r.countedAt && (!acc || r.countedAt > acc) ? r.countedAt : acc), null);
+    // `asOf` — «когда последний раз считали хоть что-то» (для показа), из ОДНОЙ
+    // ДВЕРИ контекста (§5.3): в ledger это `goodsStock().asOf` по всем активным
+    // позициям прайса, а не только по тем, что вошли в потребность плана.
+    const asOf = ctx.stockAsOf;
 
     // А ДАВНОСТЬ — по строкам, которые план РЕАЛЬНО использует: остаток
     // товара, который сейчас уезжает в автоматы (`fromStock > 0`). Прежняя
@@ -2186,8 +2218,11 @@ export class VendingService {
         code: "stock_stale",
         message:
           asOf === null
-            ? "Склад ни разу не считали — план считает его пустым и покупает весь дефицит. " +
-              "Обнови в боте: «склад Montella 24, Fanta 12»"
+            ? ctx.stockSource === "ledger"
+              ? "Склад ни разу не считали — остаток берётся по леджеру, но давность ничем не подтверждена. " +
+                "Обнови в боте: «склад Montella 24, Fanta 12»"
+              : "Склад ни разу не считали — план считает его пустым и покупает весь дефицит. " +
+                "Обнови в боте: «склад Montella 24, Fanta 12»"
             : `Склад: ${staleRows.length} поз. старше ${STOCK_STALE_DAYS} дней (${имена.join(", ")}${ещё}) — ` +
               `обнови в боте: «склад ${имена[0] ?? "Montella"} 24»`,
       });

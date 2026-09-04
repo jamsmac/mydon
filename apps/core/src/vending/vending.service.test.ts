@@ -720,6 +720,50 @@ describe("Вендинг Core: сводный закуп (§5.4–5.5)", () => {
       "неизвестный остаток — не «строка без карточки прайса»: в unmatchedStock он не попадает",
     );
   });
+
+  it("план в ledger: asOf — из одной двери целиком, а не из строк, сопоставленных с потребностью (§5.3)", async () => {
+    // Pulpy без карточки (не входит в сопоставленные stockRows), но именно его
+    // countedAt даёт максимум — старый reduce по сопоставленным строкам этого
+    // не увидел бы (Montella, единственная сопоставленная, здесь без даты).
+    const goods = {
+      warehouseId: "wh-1",
+      asOf: new Date("2026-09-01T01:00:00Z"),
+      rows: [
+        { productName: "Montella", productId: "p-m", cardId: "c-m", quantity: 1, countedAt: null, isActive: true },
+        { productName: "Pulpy", productId: "p-p", cardId: null, quantity: null, countedAt: new Date("2026-09-01T01:00:00Z"), isActive: true },
+      ],
+    };
+    const ledger = { source: async () => "ledger", goodsStock: async () => goods } as never;
+    const svc = new VendingService(purchaseDb(slots, sales, products, []), undefined, ledger);
+    const plan = await svc.plan();
+    assert.equal(plan.stock.asOf, "2026-09-01T01:00:00.000Z", "asOf берётся из goodsStock().asOf, а не из reduce по сопоставленным строкам");
+    assert.ok(
+      !plan.warnings.some((w) => w.code === "stock_stale" && /считает его пустым/.test(w.message)),
+      "склад считали (пусть и по карточке без товара из плана) — «пустым» врать нельзя",
+    );
+  });
+
+  it("план в ledger: склад ни разу не считали (asOf null) — текст про леджер, а не про пустой склад (§5.3)", async () => {
+    const goods = {
+      warehouseId: "wh-1",
+      asOf: null,
+      rows: [
+        { productName: "Montella", productId: "p-m", cardId: "c-m", quantity: 1, countedAt: null, isActive: true },
+        { productName: "Pulpy", productId: "p-p", cardId: null, quantity: null, countedAt: null, isActive: true },
+      ],
+    };
+    const ledger = { source: async () => "ledger", goodsStock: async () => goods } as never;
+    const svc = new VendingService(purchaseDb(slots, sales, products, []), undefined, ledger);
+    const plan = await svc.plan();
+    assert.equal(plan.stock.asOf, null);
+    const staleWarning = plan.warnings.find((w) => w.code === "stock_stale");
+    assert.ok(staleWarning, "asOf null обязан зажечь stock_stale");
+    assert.match(staleWarning!.message, /остаток берётся по леджеру, но давность ничем не подтверждена/);
+    assert.ok(
+      !/считает его пустым/.test(staleWarning!.message),
+      "в ledger-режиме план НЕ считает склад пустым — он вычитает остаток леджера",
+    );
+  });
 });
 
 describe("Вендинг Core: отправка закупа на утверждение (§5.7)", () => {

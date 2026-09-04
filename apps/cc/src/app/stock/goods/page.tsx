@@ -33,7 +33,8 @@ export default async function StockGoodsPage() {
         <p>
           Источник остатка сейчас: <b>{ledgerMode ? "леджер (катовер сделан)" : "строка vending_stock (двойная запись)"}</b>.
           {parity.warehouseId ? "" : " Центральный склад не выбран — пометь склад «приём по умолчанию» в карточке склада."}{" "}
-          Позиций прайса: {parity.products} · без строки в таблице: {parity.missingRows} · расхождений: {parity.mismatched} · без карточки реестра: {parity.unlinked}.
+          Позиций прайса: {parity.products} · без строки в таблице: {parity.missingRows} · расхождений: {parity.mismatched} · без карточки реестра: {parity.unlinked}
+          {parity.noWarehouse > 0 ? ` · склад не выбран: ${parity.noWarehouse}` : ""}.
         </p>
       </div>
 

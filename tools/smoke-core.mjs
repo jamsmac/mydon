@@ -1258,6 +1258,12 @@ async function проверитьУзлы() {
  * ждёт панель, а не роняют сырой SQL леджера.
  */
 async function проверитьОстаткиТоваровВЛеджере() {
+  // Запоминаем значение ДО переключения: `finally` обязан вернуть настройку
+  // в то состояние, в котором её застал прогон, а не всегда удалять строку —
+  // на проде/стейджинге ключ может быть уже выставлен вручную владельцем.
+  const прежняя = await sql`select value from system_config where key = 'VENDING_STOCK_SOURCE'`;
+  const былаСтрока = прежняя.length > 0;
+  const прежнееЗначение = былаСтрока ? прежняя[0].value : null;
   await sql`
     insert into system_config (key, value) values ('VENDING_STOCK_SOURCE', 'ledger')
     on conflict (key) do update set value = excluded.value
@@ -1278,9 +1284,13 @@ async function проверитьОстаткиТоваровВЛеджере() 
       }
     }
     const сверка = await читать("/stock/vending-parity");
-    if (typeof сверка.missingRows !== "number" || typeof сверка.products !== "number") {
+    if (
+      typeof сверка.missingRows !== "number" ||
+      typeof сверка.products !== "number" ||
+      typeof сверка.noWarehouse !== "number"
+    ) {
       throw new Error(
-        `/stock/vending-parity без числовых missingRows/products: ${JSON.stringify(сверка).slice(0, 300)}`,
+        `/stock/vending-parity без числовых missingRows/products/noWarehouse: ${JSON.stringify(сверка).slice(0, 300)}`,
       );
     }
     for (const строка of сверка.rows ?? []) {
@@ -1289,8 +1299,14 @@ async function проверитьОстаткиТоваровВЛеджере() 
       }
     }
   } finally {
-    // Вернуть настройку в исходное состояние, даже если проверка выше упала.
-    await sql`delete from system_config where key = 'VENDING_STOCK_SOURCE'`;
+    // Вернуть настройку в исходное состояние, даже если проверка выше упала:
+    // была строка — восстановить её значение, не было — удалить, а не молча
+    // удалить и в том случае, когда до прогона там что-то уже стояло.
+    if (былаСтрока) {
+      await sql`update system_config set value = ${прежнееЗначение} where key = 'VENDING_STOCK_SOURCE'`;
+    } else {
+      await sql`delete from system_config where key = 'VENDING_STOCK_SOURCE'`;
+    }
   }
 }
 

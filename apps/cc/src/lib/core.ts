@@ -2289,6 +2289,8 @@ export interface VendingParity {
   unlinked: number;
   missingRows: number;
   products: number;
+  /** Карточных позиций без выбранного центрального склада (`status = "no_warehouse"`). */
+  noWarehouse: number;
 }
 
 /** Инвентаризация узлов (У4): сессия по месту и строки. */

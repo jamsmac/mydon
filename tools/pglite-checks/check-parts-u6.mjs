@@ -39,7 +39,7 @@ try {
   assert.equal((await stock.pairBalance(W, sn.id)).qty, 40, "леджер: 8 → 40 корректировкой +32");
   assert.equal((await stock.pairBalance(W, BOUNTY)).qty, 20);
   let parity = await ledger.parity();
-  assert.equal(parity.mismatched, 0); assert.equal(parity.unlinked, 0);
+  assert.equal(parity.mismatched, 0); assert.equal(parity.unlinked, 0); assert.equal(parity.noWarehouse, 0, "склад выбран (W) — no_warehouse не бывает");
   assert.deepEqual(parity.rows.map((r) => [r.productName, r.table, r.ledger]), [["Bounty", 20, 20], ["Snickers", 40, 40]]);
 
   // Заливка автомата: проекция −3 и леджер −3, повтор по ключу не двоит
@@ -48,12 +48,13 @@ try {
   const r2 = await refill.create({ machineSerial: "M1", productName: "Snickers", qty: 3, clientKey: "rf-1" });
   assert.equal(r2.duplicate, true);
   assert.equal((await stock.pairBalance(W, sn.id)).qty, 37);
-  parity = await ledger.parity(); assert.equal(parity.mismatched, 0);
+  parity = await ledger.parity(); assert.equal(parity.mismatched, 0); assert.equal(parity.noWarehouse, 0);
 
   // Ручной приход мимо проекции → сверка видит расхождение
   await stock.createMovement({ kind: "intake", ingredientId: sn.id, warehouseId: W, qty: 5, unit: "шт", clientKey: "in-2" });
   parity = await ledger.parity();
   assert.equal(parity.mismatched, 1); assert.equal(parity.rows.find((r) => r.productName === "Snickers").diff, -5);
+  assert.equal(parity.noWarehouse, 0);
 
   // Катовер: чтение из леджера
   assert.equal((await vending.stockLevels()).find((r) => r.product === "Snickers").quantity, 37, "до катовера — таблица");
@@ -79,13 +80,25 @@ try {
   const r4 = await refill.create({ machineSerial: "M1", productName: "Snickers", qty: 2, clientKey: "rf-2" });
   assert.equal(r4.duplicate, true); assert.equal(r4.stockLeft, 40);
   // (в) Пустая таблица при заполненном леджере → сверка НЕ зелёная
+  // Twix — карточный товар прайса БЕЗ единого движения леджера (§9.2): его
+  // строка обязана остаться "no_row" и НЕ расхождением — ledger=0, а не ≠0.
+  // Карточку заводим прямой вставкой, а не `ledger.ensureCards({})`: та бы
+  // задела ВСЕ бескарточные активные позиции прайса разом, включая Pulpy —
+  // а Pulpy ниже нарочно остаётся no_card (обнаружено этим же прогоном).
+  const TWIX = "00000000-0000-0000-0000-00000000cc01";
+  await run(`insert into entity (id, type, name, attrs) values ('${TWIX}','product','Twix','{"вид":"перепродажа","единица":"шт"}')`);
+  await run(`insert into vending_product (name, purchase_price, entity_id) values ('Twix', 6000, '${TWIX}')`);
   await run(`delete from vending_stock`);
   parity = await ledger.parity();
-  assert.equal(parity.missingRows, 2, "Snickers и Bounty без строки; Pulpy без карточки — это no_card, не no_row");
-  assert.equal(parity.mismatched, 2, "Snickers 40 и Bounty 20 в леджере — расхождения; Pulpy без карточки — нет");
-  assert.equal(parity.products, 3, "все три позиции прайса в сверке");
+  assert.equal(parity.missingRows, 3, "Snickers, Bounty и Twix без строки; Pulpy без карточки — это no_card, не no_row");
+  assert.equal(parity.mismatched, 2, "Snickers 40 и Bounty 20 в леджере — расхождения; Twix 0 в леджере и Pulpy без карточки — нет");
+  assert.equal(parity.products, 4, "все четыре позиции прайса в сверке");
+  assert.equal(parity.noWarehouse, 0);
   assert.equal(parity.rows.find((r) => r.productName === "Snickers").status, "no_row");
   assert.equal(parity.rows.find((r) => r.productName === "Pulpy").status, "no_card");
+  const twixRow = parity.rows.find((r) => r.productName === "Twix");
+  assert.equal(twixRow.status, "no_row", "карточный товар без движений — тоже no_row, не mismatch");
+  assert.equal(twixRow.isMismatch, false, "ledger 0 у no_row — не расхождение (§6: mismatch только при ledger ≠ 0)");
   // (г) В режиме ledger список остатков и план не зависят от таблицы
   assert.equal((await vending.stockLevels()).find((r) => r.product === "Snickers").quantity, 40, "таблица пуста, остаток из леджера");
   // (д) Режим table — прежние числа: таблица пуста → пусто
