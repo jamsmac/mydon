@@ -104,6 +104,17 @@ export class CreateAgentDto {
 
   @IsOptional() @IsArray() @ArrayMaxSize(30) @IsString({ each: true }) @MaxLength(128, { each: true })
   ideaChannels?: string[];
+
+  /**
+   * Страницы знаний агента — относительные пути внутри apps/agents/shared
+   * (например shared/kb/globerent/heli-models.md). Только путь: без `..`, без
+   * абсолютных и без схем — контекст модели собирается из файлов образа, и
+   * значение из панели не должно указывать наружу.
+   */
+  @IsOptional() @IsArray() @ArrayMaxSize(30) @IsString({ each: true }) @MaxLength(200, { each: true })
+  @Matches(/^shared\/[A-Za-z0-9_\-./]+\.md$/, { each: true, message: "kbPages: путь вида shared/kb/<dir>/<page>.md" })
+  @Matches(/^(?!.*\.\.)/, { each: true, message: "kbPages: путь не может содержать .." })
+  kbPages?: string[];
 }
 
 export class SeedAgentsDto {
@@ -228,6 +239,7 @@ export class AgentsController {
         : {}),
       ...(dto.breakGlass !== undefined ? { breakGlass: dto.breakGlass } : {}),
       ...(dto.ideaChannels !== undefined ? { ideaChannels: dto.ideaChannels } : {}),
+      ...(dto.kbPages !== undefined ? { kbPages: dto.kbPages } : {}),
     };
   }
 }

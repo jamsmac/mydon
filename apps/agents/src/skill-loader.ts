@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { AutonomyTier } from "@mydon/shared";
+import type { ModelReasoningEffort } from "./model-gateway";
 import { maxTier } from "./policy";
 import { toolTierFloor } from "./tools";
 
@@ -40,11 +41,29 @@ export interface SkillMeta {
   requiresApproval?: AutonomyTier;
   /** Абсолютный путь к файлу навыка. */
   file: string;
+  /**
+   * Кто исполняет навык: `code` — функция из реестра SKILLS (как всегда было),
+   * `llm` — общий исполнитель markdown-навыка (спека 2026-09-04-llm-skill-executor:
+   * тело файла становится инструкцией модели, ответ — обычным Proposal).
+   */
+  executor: SkillExecutor;
+  /** Регулярные выражения для подбора навыка по заголовку задачи (frontmatter `triggers`). */
+  triggers: string[];
+  /** Усилие рассуждения модели для `llm`-навыка (frontmatter `model-effort`). */
+  modelEffort?: ModelReasoningEffort;
+  /** Потолок токенов ответа для `llm`-навыка (frontmatter `max-tokens`). */
+  maxTokens?: number;
+  /** Тело файла без frontmatter — инструкция для `llm`-исполнителя. */
+  body: string;
   /** Замечания к frontmatter (пусто = чисто). Поднимает check-passports. */
   problems: string[];
 }
 
+export type SkillExecutor = "code" | "llm";
+
 const TIERS = new Set(["T0", "T1", "T2", "T3", "T4"]);
+const EXECUTORS = new Set<SkillExecutor>(["code", "llm"]);
+const EFFORTS = new Set<ModelReasoningEffort>(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 function asTier(value: unknown): AutonomyTier | undefined {
   const raw = typeof value === "string" ? value.trim().toUpperCase() : "";
@@ -73,7 +92,13 @@ export function splitFrontmatter(text: string): { data: Record<string, unknown>;
 }
 
 /** Строит метаданные одного навыка и копит замечания к его frontmatter. */
-function buildMeta(agent: string, filename: string, file: string, data: Record<string, unknown>): SkillMeta {
+function buildMeta(
+  agent: string,
+  filename: string,
+  file: string,
+  data: Record<string, unknown>,
+  body = "",
+): SkillMeta {
   const problems: string[] = [];
   const fallbackName = filename.replace(/\.md$/, "");
 
@@ -94,7 +119,66 @@ function buildMeta(agent: string, filename: string, file: string, data: Record<s
   if (approvalRaw === undefined) problems.push("нет requires-approval — минимальный тир навыка не задан");
   else if (requiresApproval === undefined) problems.push(`неизвестный тир requires-approval «${String(approvalRaw)}»`);
 
-  return { name, agent, description, allowedTools, requiresApproval, file, problems };
+  // Исполнитель: по умолчанию код (поведение как раньше). `llm` — исполняемый markdown.
+  const executorRaw = data.executor;
+  let executor: SkillExecutor = "code";
+  if (executorRaw !== undefined) {
+    const value = typeof executorRaw === "string" ? executorRaw.trim().toLowerCase() : "";
+    if (EXECUTORS.has(value as SkillExecutor)) executor = value as SkillExecutor;
+    else problems.push(`неизвестный executor «${String(executorRaw)}» — допустимы code | llm`);
+  }
+  if (executor === "llm" && requiresApproval === undefined) {
+    problems.push("executor: llm без requires-approval — llm-навык обязан объявить минимальный тир");
+  }
+
+  // Триггеры подбора по заголовку задачи: регулярные выражения (без флагов).
+  const triggersRaw = data.triggers;
+  const triggers: string[] = [];
+  if (triggersRaw !== undefined) {
+    if (!Array.isArray(triggersRaw)) problems.push("triggers должен быть списком регулярных выражений");
+    else {
+      for (const t of triggersRaw) {
+        const text = String(t);
+        try {
+          new RegExp(text, "iu");
+          triggers.push(text);
+        } catch {
+          problems.push(`битая регулярка в triggers: «${text}»`);
+        }
+      }
+    }
+  }
+
+  const effortRaw = data["model-effort"] ?? data.modelEffort;
+  let modelEffort: ModelReasoningEffort | undefined;
+  if (effortRaw !== undefined) {
+    const value = typeof effortRaw === "string" ? effortRaw.trim().toLowerCase() : "";
+    if (EFFORTS.has(value as ModelReasoningEffort)) modelEffort = value as ModelReasoningEffort;
+    else problems.push(`неизвестный model-effort «${String(effortRaw)}»`);
+  }
+
+  const maxTokensRaw = data["max-tokens"] ?? data.maxTokens;
+  let maxTokens: number | undefined;
+  if (maxTokensRaw !== undefined) {
+    const n = Number(maxTokensRaw);
+    if (Number.isInteger(n) && n > 0) maxTokens = n;
+    else problems.push(`max-tokens должен быть целым положительным числом, получено «${String(maxTokensRaw)}»`);
+  }
+
+  return {
+    name,
+    agent,
+    description,
+    allowedTools,
+    requiresApproval,
+    file,
+    executor,
+    triggers,
+    ...(modelEffort !== undefined ? { modelEffort } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    body,
+    problems,
+  };
 }
 
 /**
@@ -116,8 +200,8 @@ export function loadSkillMeta(agentsDir: string): SkillMeta[] {
     for (const f of fs.readdirSync(skillsDir).sort()) {
       if (!f.endsWith(".md")) continue;
       const file = path.join(skillsDir, f);
-      const { data } = splitFrontmatter(fs.readFileSync(file, "utf8"));
-      out.push(buildMeta(agent, f, file, data));
+      const { data, body } = splitFrontmatter(fs.readFileSync(file, "utf8"));
+      out.push(buildMeta(agent, f, file, data, body));
     }
   }
   return out;

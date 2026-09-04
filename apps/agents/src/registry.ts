@@ -34,7 +34,18 @@ export interface AgentDefinition {
   breakGlass?: string[];
   /** Публичные Telegram-каналы идей для чтения (паспорт: idea_channels). */
   ideaChannels?: string[];
+  /** Страницы знаний в контексте агента (паспорт: kb_pages) — пути `shared/kb/…`. */
+  kbPages?: string[];
+  /** Зачем агент нужен (паспорт: mission) — раньше в базу не переносилось. */
+  mission?: string;
+  /** Чего агент НЕ делает (паспорт: non_goals). */
+  nonGoals?: string[];
   dir: string;
+}
+
+/** kb_pages: только относительные пути внутри shared/, без `..`; остальное отсеиваем (check-passports ругается). */
+export function isKbPagePath(value: unknown): value is string {
+  return typeof value === "string" && /^shared\/[A-Za-z0-9_\-./]+\.md$/.test(value) && !value.includes("..");
 }
 
 const TIERS = new Set(["T0", "T1", "T2", "T3", "T4"]);
@@ -98,6 +109,14 @@ export function loadAgents(agentsDir: string): {
         ? (raw.idea_channels as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
         : [];
 
+      const kbPages: string[] = Array.isArray(raw.kb_pages)
+        ? (raw.kb_pages as unknown[]).map((s) => (typeof s === "string" ? s.split("#")[0].trim() : s)).filter(isKbPagePath)
+        : [];
+
+      const nonGoals: string[] = Array.isArray(raw.non_goals)
+        ? (raw.non_goals as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+        : [];
+
       agents.push({
         name: typeof raw.name === "string" ? raw.name : name,
         business: typeof raw.business === "string" ? raw.business : "shared",
@@ -111,6 +130,9 @@ export function loadAgents(agentsDir: string): {
         ...(webSources.length ? { webSources } : {}),
         ...(breakGlass.length ? { breakGlass } : {}),
         ...(ideaChannels.length ? { ideaChannels } : {}),
+        ...(kbPages.length ? { kbPages } : {}),
+        ...(typeof raw.mission === "string" && raw.mission.trim() ? { mission: raw.mission.trim() } : {}),
+        ...(nonGoals.length ? { nonGoals } : {}),
         dir,
       });
     } catch (err) {

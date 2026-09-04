@@ -395,6 +395,7 @@ export class ReleaseAgentRunDto extends AgentRunFenceDto {
     "route_unavailable",
     "action_capped",
     "unsupported",
+    "skill_failed",
   ])
   reason?:
     | "budget_denied"
@@ -402,7 +403,8 @@ export class ReleaseAgentRunDto extends AgentRunFenceDto {
     | "workflow_changed"
     | "route_unavailable"
     | "action_capped"
-    | "unsupported";
+    | "unsupported"
+    | "skill_failed";
 
   @IsOptional()
   @IsString()

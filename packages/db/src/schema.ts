@@ -1629,6 +1629,14 @@ export const agent = pgTable(
     breakGlass: jsonb("break_glass").default([]).notNull(),
     /** Публичные Telegram-каналы идей для чтения: ["promtjam"]. */
     ideaChannels: jsonb("idea_channels").default([]).notNull(),
+    /**
+     * Страницы знаний, которые агент подгружает в контекст:
+     * ["shared/kb/globerent/heli-models.md", …] — пути внутри apps/agents/shared.
+     * Раньше kb_pages жили только в config.yaml и рантайм их не читал; с
+     * исполнителем `executor: llm` они становятся частью контекста модели, а
+     * агент, заведённый из панели (без каталога на диске), иначе остался бы без KB.
+     */
+    kbPages: jsonb("kb_pages").default([]).notNull(),
     /** Архив: агент убран из работы, но его история сохранена. */
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: createdAt(),

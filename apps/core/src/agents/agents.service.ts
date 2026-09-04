@@ -34,6 +34,8 @@ export interface UpsertAgentInput {
   breakGlass?: string[];
   /** Публичные Telegram-каналы идей. */
   ideaChannels?: string[];
+  /** Страницы знаний в контексте агента: пути внутри apps/agents/shared (R-LS-10). */
+  kbPages?: string[];
 }
 
 /**
@@ -93,6 +95,7 @@ export class AgentsService {
           webSources: input.webSources ?? [],
           breakGlass: input.breakGlass ?? [],
           ideaChannels: input.ideaChannels ?? [],
+          kbPages: input.kbPages ?? [],
         })
         .returning();
 
@@ -127,6 +130,7 @@ export class AgentsService {
     if (patch.webSources !== undefined) values.webSources = patch.webSources;
     if (patch.breakGlass !== undefined) values.breakGlass = patch.breakGlass;
     if (patch.ideaChannels !== undefined) values.ideaChannels = patch.ideaChannels;
+    if (patch.kbPages !== undefined) values.kbPages = patch.kbPages;
 
     return this.db.transaction(async (tx) => {
       const [updated] = await tx

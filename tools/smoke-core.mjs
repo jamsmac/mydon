@@ -1890,6 +1890,55 @@ async function проверитьСогласование() {
   if (repeated.r.ok) throw new Error("повторное решение прошло, хотя запрос уже закрыт");
 }
 
+/**
+ * Карточка агента: kb_pages (миграция 0083) и границы роли доезжают до базы и
+ * обратно, а путь наружу (`..`, не shared/) отсекается валидатором. Заглушка
+ * drizzle этого не доказывает: jsonb-колонка с default '[]' и её чтение — SQL.
+ */
+async function проверитьКарточкуАгента() {
+  const name = `smoke-kb-${Date.now()}`;
+  const kbPages = ["shared/kb/globerent/heli-models.md", "shared/kb/globerent/pricelist.md"];
+  const created = await jsonRequest("POST", "/agents", {
+    name,
+    business: "globerent",
+    status: "paused",
+    mission: "Проверка round-trip карточки агента",
+    nonGoals: ["НЕ пишет клиентам"],
+    skills: ["qualify-lead"],
+    kbPages,
+  });
+  if (!created.r.ok) throw new Error(`создание → ${created.r.status}: ${created.text.slice(0, 200)}`);
+
+  const read = await jsonRequest("GET", `/agents/${name}`);
+  if (!read.r.ok) throw new Error(`чтение → ${read.r.status}`);
+  if (JSON.stringify(read.json.kbPages) !== JSON.stringify(kbPages)) {
+    throw new Error(`kbPages не доехали до базы и обратно: ${JSON.stringify(read.json.kbPages)}`);
+  }
+  if (read.json.mission !== "Проверка round-trip карточки агента" || read.json.nonGoals?.length !== 1) {
+    throw new Error("mission/nonGoals потерялись при создании");
+  }
+
+  const escape = await jsonRequest("PATCH", `/agents/${name}`, { kbPages: ["shared/kb/../../.env"] });
+  if (escape.r.ok) throw new Error("путь с .. в kbPages принят — контекст модели можно увести наружу");
+  const outside = await jsonRequest("PATCH", `/agents/${name}`, { kbPages: ["kb/globerent/faq.md"] });
+  if (outside.r.ok) throw new Error("путь не из shared/ в kbPages принят");
+
+  const patched = await jsonRequest("PATCH", `/agents/${name}`, { kbPages: [kbPages[0]] });
+  if (!patched.r.ok) throw new Error(`правка → ${patched.r.status}: ${patched.text.slice(0, 200)}`);
+  const after = await jsonRequest("GET", `/agents/${name}`);
+  if (JSON.stringify(after.json.kbPages) !== JSON.stringify([kbPages[0]])) {
+    throw new Error(`patch kbPages не применился: ${JSON.stringify(after.json.kbPages)}`);
+  }
+  if (after.json.mission !== "Проверка round-trip карточки агента") {
+    throw new Error("patch kbPages затёр mission — частичная правка должна оставлять остальное");
+  }
+
+  const archived = await jsonRequest("DELETE", `/agents/${name}`);
+  if (!archived.r.ok) throw new Error(`архивация → ${archived.r.status}`);
+  const list = await jsonRequest("GET", "/agents");
+  if (list.json.some((row) => row.name === name)) throw new Error("архивный агент остался в списке активных");
+}
+
 /** Два этапа инкассации и защита от повторного приёма на живом SQL. */
 async function проверитьИнкассацию() {
   const machine = await jsonRequest("POST", "/entities", {
@@ -2895,6 +2944,13 @@ try {
     console.log("  ok  сценарий: согласование → исполнение → утверждённая карточка");
   } catch (e) {
     провалы.push(`согласование: ${e.message}`);
+  }
+
+  try {
+    await проверитьКарточкуАгента();
+    console.log("  ok  сценарий: карточка агента — kb_pages/mission round-trip, путь наружу отсечён");
+  } catch (e) {
+    провалы.push(`карточка агента: ${e.message}`);
   }
 
   try {

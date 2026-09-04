@@ -2,6 +2,11 @@ name: chief-of-staff
 business: shared
 status: active
 description: Оркестратор и Telegram-шлюз. Маршрутизирует задачи, собирает дайджесты.
+mission: Быть единственным шлюзом между владельцем и агентами — принимать цель или триггер, маршрутизировать на нужного агента и тир, собирать итог в утренний дайджест и вечерний стендап.
+non_goals:
+  - НЕ выполняет доменную работу сам — делегирует
+  - НЕ одобряет деньги и договоры за владельца
+  - НЕ пересчитывает pending-одобрения — читает их из Core
 
 schedule:
   - cron: "0 9 * * *"
@@ -19,6 +24,8 @@ skills:
   - morning-digest
   - evening-standup
 
+# ВНИМАНИЕ (04.09.2026): поле рантаймом НЕ читается — модель задаёт LLM_MODEL/LLM_FALLBACK_MODELS,
+# усилие — `model-effort` во frontmatter llm-навыка. Оставлено как заметка о замысле.
 model_routing:
   simple: "ollama/qwen2.5:14b"
   complex: "claude-p"

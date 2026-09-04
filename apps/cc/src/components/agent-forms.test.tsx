@@ -41,6 +41,7 @@ const agent: AgentCard = {
   ideaChannels: [],
   webSources: [],
   breakGlass: [],
+  kbPages: ["shared/kb/globerent/heli-models.md"],
   archivedAt: null,
   updatedAt: "2026-08-24T00:00:00.000Z",
 };
@@ -85,6 +86,21 @@ describe("формы агентов", () => {
     expect(form.get("mission")).toBe("Сверять деньги каждый день");
     expect(mission).toHaveValue("Сверять деньги каждый день");
     expect(mocks.refresh).not.toHaveBeenCalled();
+  });
+
+  it("страницы знаний (kbPages) редактируются и уходят в сохранение по одной на строку", async () => {
+    mocks.saveAgent.mockResolvedValue({ ok: true });
+    const user = userEvent.setup();
+    render(<AgentEditor agent={agent} />);
+
+    const kb = screen.getByLabelText(/Страницы знаний \(KB\)/);
+    expect(kb).toHaveValue("shared/kb/globerent/heli-models.md");
+    await user.type(kb, "{enter}shared/kb/globerent/pricelist.md");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    expect(await screen.findByText("Сохранено")).toBeVisible();
+    const form = mocks.saveAgent.mock.calls[0]?.[1] as FormData;
+    expect(form.get("kbPages")).toBe("shared/kb/globerent/heli-models.md\nshared/kb/globerent/pricelist.md");
   });
 
   it("показывает ошибку включения агента", async () => {

@@ -1240,6 +1240,44 @@ describe("Durable claim задачи агента", () => {
     assert.equal(patch.agentExecutionBlockedReason, "нет подходящего навыка");
   });
 
+  it("skill_failed блокирует claim до owner retry и хранит причину отказа навыка", async () => {
+    const updates: NonNullable<StubOpts["updates"]> = [];
+    await makeTasks(
+      stubDb({
+        selects: [
+          [
+            {
+              id: TASK,
+              ownerKind: "agent",
+              ownerRef: "globerent-sales",
+              status: "in_progress",
+              agentRunId: NEW_RUN,
+              agentExecutionAttemptId: EXECUTION,
+            },
+          ],
+          [],
+        ],
+        updateResult: { id: TASK, status: "todo", agentExecutionAttemptId: EXECUTION },
+        updates,
+      }),
+    ).releaseAgentRun(
+      TASK,
+      "globerent-sales",
+      NEW_RUN,
+      EXECUTION,
+      "skill_failed",
+      "ответ модели не по контракту; начало ответа: Лид горячий",
+      NOW,
+    );
+
+    const patch = updates[0]!.patch;
+    assert.equal(patch.status, "todo");
+    assert.equal(patch.agentRunId, null);
+    assert.equal("agentExecutionAttemptId" in patch, false, "attempt ротирует только owner retry");
+    assert.equal(patch.agentExecutionBlockedAt, NOW, "иначе claim→replay→release крутился бы на каждом poll");
+    assert.equal(patch.agentExecutionBlockedReason, "ответ модели не по контракту; начало ответа: Лид горячий");
+  });
+
   it("lost complete response не блокирует уже terminal job и сохраняет attempt", async () => {
     const state = agentRunState();
     state.execution = {

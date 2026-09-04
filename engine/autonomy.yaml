@@ -1,0 +1,97 @@
+# engine/autonomy.yaml — политика автономии MYDON (читаемое зеркало кода)
+#
+# ИСТИНА — В КОДЕ: apps/agents/src/policy.ts (порог и правило гейта), apps/agents/src/tools.ts
+# (пол тира по типу инструмента), apps/agents/src/skill-loader.ts (пол тира из frontmatter навыка),
+# apps/agents/src/registry.ts (break_glass). Этот файл читают агенты и люди; при расхождении
+# правится файл, не код. Перенесён из донора mydon-agent-os и ПРИВЕДЁН К СЕМАНТИКЕ MYDON —
+# у донора тиры описывали «уровень надзора над действием», здесь тир = потолок самостоятельности
+# (T0 — самый строгий). Не путать: назначить агенту T4 «на всякий случай» — значит РАЗРЕШИТЬ ему всё.
+version: 2
+source_of_truth:
+  - apps/agents/src/policy.ts
+  - apps/agents/src/tools.ts
+  - apps/agents/src/skill-loader.ts
+  - apps/agents/src/registry.ts
+mirrored_at: 2026-09-04
+
+# Порог самостоятельности всей системы. Действие исполняется БЕЗ согласования только если
+# его тир НЕ ВЫШЕ порога. При T0 согласования требует всё (текущий режим).
+threshold_env: AGENT_AUTONOMY_MAX
+threshold_default: T0
+rule: "requiresApproval(actionTier) = threshold == T0 || rank(actionTier) > rank(threshold)"
+
+# Что означает тир (подписи — как в панели, apps/cc/src/app/agents/page.tsx TIER_LABEL).
+tiers:
+  T0: { label: "только спрашивает",       meaning: "читать, искать, предлагать; ничего не исполняет" }
+  T1: { label: "предлагает, решаешь ты",  meaning: "уведомления и заявки постфактум; всё остальное — согласование" }
+  T2: { label: "мелкое — сам",            meaning: "создаёт файлы, записи, черновики, правки KB/навыков" }
+  T3: { label: "многое — сам",            meaning: "деньги, публикации от имени владельца, письма клиентам, исполнение команд" }
+  T4: { label: "почти всё сам",           meaning: "договоры, финансовые документы, ЭДО — фабрике направлений недоступно" }
+
+# Эффективный тир действия = МАКСИМУМ (строже побеждает) из трёх источников:
+floors:
+  agent_default: "config.yaml → autonomy_default (карточка агента; база — источник истины после сида)"
+  skill_frontmatter: "skills/<skill>.md → requires-approval (самый строгий среди файлов с этим именем)"
+  tool_type: "allowed-tools → тип инструмента → минимальный тир (таблица ниже)"
+
+# Пол тира по типу инструмента (tools.ts TOOLTYPE_MIN). Неизвестный инструмент = net (T1), не read.
+tool_types:
+  read:     { min_tier: T0, match: "read | get | list | kb | db | reg | entities" }
+  net:      { min_tier: T1, match: "send | notify | post | message | telegram | email | web | fetch | http | scrape | browse | (неизвестное)" }
+  write:    { min_tier: T2, match: "write | create | update | delete | записать | создать | изменить" }
+  exec:     { min_tier: T3, match: "exec | run | shell | bash | command" }
+  money:    { min_tier: T3, match: "money | invoice | payment | pay | платёж | инкасс" }
+  contract: { min_tier: T4, match: "contract | edo | dogovor | договор" }
+
+# Минимальные полы по типу ДЕЙСТВИЯ — ориентир для авторов навыков (перенос из донора, сверено с tool_types).
+# Навык, объявляющий действие из списка, ставит в frontmatter requires-approval не ниже указанного.
+action_floors:
+  monitoring: T0
+  digest: T0
+  kb_read: T0
+  lead_qualification: T1
+  call_analysis: T1
+  client_intake: T1
+  replenishment_request: T1
+  status_update: T1
+  notification: T1
+  maintenance_reminder: T1
+  kb_update: T2
+  skill_edit: T2
+  service_dispatch: T2
+  client_quote: T3          # деньги → согласование (КП; арифметика — в коде, quote.ts)
+  document_generate: T3     # только коммерческое КП; акт/счёт/ЭДО — T4 ниже
+  counterparty_email: T3
+  price_change: T3
+  publish_as_owner: T3      # публикации, объявления, письма реальным клиентам от имени владельца
+  spend_money: T3           # любая трата, реклама, подписка сервиса
+  contract: T4
+  financial_document: T4
+  payment_action: T4
+  edo_draft: T4             # черновик в Didox; подпись и отправка запрещены
+
+# Всегда через согласование и аудит, независимо от порога (паспорт: break_glass).
+break_glass_rule: "config.yaml → break_glass: [<actionType>] — HITL всегда, даже при высоком AGENT_AUTONOMY_MAX"
+
+# Жёсткие запреты: никогда не авто, ни при каком тире.
+hard_gates:
+  - перевод денег / инициация платежа
+  - подписание договора, подпись и отправка ЭДО
+  - удаление данных без бэкапа и тега в git
+  - изменение прав доступа и секретов
+  - публикация от имени владельца без его слова
+  - запуск направления фабрики без Operator-агента и kill-критериев
+
+# Куда уходит согласование.
+escalation:
+  channels: [cc:/inbox, telegram]
+  approver: owner
+  decisions: ["✅ Одобрить", "❌ Отклонить"]
+  note: "T2-автокоммит по таймеру из донора НЕ перенесён: в MYDON решение принимает только владелец"
+
+# Денежный контур (см. docs/AGENTS_ACTIVATION.md) — второй барьер помимо тиров.
+money:
+  llm_enabled_env: LLM_ENABLED          # 0 по умолчанию — платные вызовы запрещены
+  global_daily_budget_env: LLM_GLOBAL_DAILY_BUDGET_USD
+  per_call_reservation_env: LLM_MAX_RESERVATION_USD
+  per_agent_daily: "config.yaml → budget.per_day_usd, on_exceeded: pause"

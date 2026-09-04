@@ -20,12 +20,13 @@ import {
 } from "./polling";
 import { runOurvendAccounting } from "./ourvend-accounting";
 import { ourvendConfigFromEnv, runOurvendSync } from "./ourvend-sync";
-import { loadAgents, type AgentDefinition } from "./registry";
+import { registerLlmSkills } from "./llm-skill";
+import { isKbPagePath, loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
 import { desiredJobs, jobKey, scheduledInvocationMode } from "./schedule";
 import { ScheduledOccurrenceRetryQueue } from "./scheduled-occurrence-queue";
 import { loadSkillMeta, skillTierFloors } from "./skill-loader";
-import { hasSkill } from "./skills";
+import { hasCodeSkill } from "./skills";
 import { applySystemOverrides } from "./system-config";
 import { buildTaskLlmWorkflowPlan } from "./task-llm-workflow";
 import { runAgentTasks } from "./task-worker";
@@ -33,6 +34,8 @@ import { runAgentTasks } from "./task-worker";
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
 const AGENTS_DIR = path.resolve(__dirname, "../agents");
+/** Общий контекст агентов: COMPANY.md и kb/ — часть образа (COPY . .), читаются llm-исполнителем. */
+const SHARED_DIR = path.resolve(__dirname, "../shared");
 
 /** Паспорт-файл → тело для переноса в базу (начальный сид). */
 function toPassport(a: AgentDefinition): Record<string, unknown> {
@@ -51,6 +54,11 @@ function toPassport(a: AgentDefinition): Record<string, unknown> {
     ...(a.webSources !== undefined ? { webSources: a.webSources } : {}),
     ...(a.breakGlass !== undefined ? { breakGlass: a.breakGlass } : {}),
     ...(a.ideaChannels !== undefined ? { ideaChannels: a.ideaChannels } : {}),
+    // Страницы знаний и границы роли тоже едут в базу: без этого агент из базы
+    // (источник истины) шёл бы к модели без KB, а карточка — без миссии.
+    ...(a.kbPages !== undefined ? { kbPages: a.kbPages } : {}),
+    ...(a.mission !== undefined ? { mission: a.mission } : {}),
+    ...(a.nonGoals !== undefined ? { nonGoals: a.nonGoals } : {}),
   };
 }
 
@@ -68,6 +76,9 @@ function fromCore(row: {
   webSources: unknown;
   breakGlass: unknown;
   ideaChannels: unknown;
+  kbPages?: unknown;
+  mission?: string | null;
+  nonGoals?: unknown;
 }): AgentDefinition {
   const schedule = Array.isArray(row.schedule)
     ? (row.schedule as { cron?: unknown; skill?: unknown }[])
@@ -96,6 +107,10 @@ function fromCore(row: {
         (s): s is string => typeof s === "string" && s.length > 0,
       )
     : [];
+  const kbPages = Array.isArray(row.kbPages) ? (row.kbPages as unknown[]).filter(isKbPagePath) : [];
+  const nonGoals = Array.isArray(row.nonGoals)
+    ? (row.nonGoals as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+    : [];
   const onExceeded =
     row.budgetOnExceeded === "pause" ||
     row.budgetOnExceeded === "downgrade" ||
@@ -116,6 +131,9 @@ function fromCore(row: {
     ...(webSources.length ? { webSources } : {}),
     ...(breakGlass.length ? { breakGlass } : {}),
     ...(ideaChannels.length ? { ideaChannels } : {}),
+    ...(kbPages.length ? { kbPages } : {}),
+    ...(typeof row.mission === "string" && row.mission.trim() ? { mission: row.mission.trim() } : {}),
+    ...(nonGoals.length ? { nonGoals } : {}),
     dir: "(из базы)",
   };
 }
@@ -168,7 +186,16 @@ async function main(): Promise<void> {
   // Минимальные тиры навыков (frontmatter `requires-approval`). Файлы навыков —
   // часть образа и в рантайме не меняются, поэтому читаем один раз. Ключ — имя
   // навыка, поэтому карта годится и для агентов из базы (у них нет каталога).
-  const skillFloors = skillTierFloors(loadSkillMeta(AGENTS_DIR));
+  const skillMetas = loadSkillMeta(AGENTS_DIR);
+  const skillFloors = skillTierFloors(skillMetas);
+  // Навыки с `executor: llm` получают общий исполнитель (спека llm-skill). Код
+  // побеждает: одноимённый навык из SKILLS остаётся кодом.
+  const llmSkills = registerLlmSkills(
+    skillMetas,
+    { sharedDir: SHARED_DIR, agentsDir: AGENTS_DIR },
+    hasCodeSkill,
+  );
+  if (llmSkills.length) console.log(`llm-навыки подключены: ${llmSkills.join(", ")}`);
 
   const { agents: fromFiles, errors } = loadAgents(AGENTS_DIR);
   for (const e of errors) {
@@ -280,7 +307,10 @@ async function main(): Promise<void> {
       return;
     }
 
-    const { jobs, notWired } = desiredJobs(agents, hasSkill);
+    // В расписание идут только навыки с кодом: llm-навык на cron заблокирован до
+    // допуска в DURABLE_SCHEDULED_SKILLS (R-LS-11) — иначе каждый тик падал бы
+    // на «metered scheduled skill … blocked» в лог.
+    const { jobs, notWired } = desiredJobs(agents, hasCodeSkill);
     const want = new Set(jobs.map(jobKey));
 
     // Гасим то, чего в желаемом наборе больше нет.

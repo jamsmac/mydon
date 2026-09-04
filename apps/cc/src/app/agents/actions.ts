@@ -80,6 +80,7 @@ export async function saveAgent(name: string, form: FormData): Promise<ActionRes
       webSources: parseWebSources(String(form.get("webSources") ?? "")),
       breakGlass: parseList(String(form.get("breakGlass") ?? "")),
       ideaChannels: parseChannels(String(form.get("ideaChannels") ?? "")),
+      kbPages: parseList(String(form.get("kbPages") ?? "")),
     });
   } catch (err) {
     return fail(err);

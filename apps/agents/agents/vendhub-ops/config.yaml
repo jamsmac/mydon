@@ -19,6 +19,8 @@ kb_pages:
 skills:
   - monitor-stock
 
+# ВНИМАНИЕ (04.09.2026): поле рантаймом НЕ читается — модель задаёт LLM_MODEL/LLM_FALLBACK_MODELS,
+# усилие — `model-effort` во frontmatter llm-навыка. Оставлено как заметка о замысле.
 model_routing:
   simple: "ollama/qwen2.5:14b"
   complex: "claude-p"

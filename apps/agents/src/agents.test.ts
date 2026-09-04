@@ -16,6 +16,7 @@ import { EXECUTORS } from "./executors";
 import { runAgentTasks } from "./task-worker";
 import { TaskLlmWorkflowChangedError } from "./task-llm-session";
 import { SKILLS } from "./skills";
+import { LlmSkillFailedError, LlmSkillInvalidOutputError } from "./llm-skill";
 import type { AgentDefinition } from "./registry";
 
 const AGENTS_DIR = path.resolve(__dirname, "../agents");
@@ -919,7 +920,8 @@ describe("Задачи агента и дневной потолок", () => {
         | "execution_unknown"
         | "workflow_changed"
         | "route_unavailable"
-        | "unsupported";
+        | "unsupported"
+        | "skill_failed";
       detail?: string;
     }[] = [];
     const claims: { id: string; agentName: string; runId: string }[] = [];
@@ -1004,7 +1006,8 @@ describe("Задачи агента и дневной потолок", () => {
             | "execution_unknown"
             | "workflow_changed"
             | "route_unavailable"
-            | "unsupported",
+            | "unsupported"
+            | "skill_failed",
           detail?: string,
         ) => {
           releases.push({
@@ -1429,6 +1432,42 @@ describe("Задачи агента и дневной потолок", () => {
       assert.ok(!statuses.some((s) => s.status === "done"), "budget denial не равен «повода нет»");
       assert.equal(releases.length, 1, "budget_denied освобождает claim");
       assert.equal(releases[0]?.reason, "budget_denied");
+    } finally {
+      SKILLS["watch-receivables"] = original;
+    }
+  });
+
+  it("llm-навык: ответ не по контракту блокирует задачу (skill_failed) до owner retry, а не крутит poll", async () => {
+    const original = SKILLS["watch-receivables"];
+    SKILLS["watch-receivables"] = async () => {
+      throw new LlmSkillInvalidOutputError("ответ модели не по контракту: нет JSON", "Лид горячий, звоните.");
+    };
+    try {
+      const { client, statuses, releases, commits } = stub();
+      const res = await runAgentTasks(agent, client, "T0");
+      assert.equal(res[0].outcome, "skipped");
+      assert.match(res[0].note, /начало ответа: Лид горячий/);
+      assert.deepEqual(statuses, [], "задача не закрывается как done — результата нет");
+      assert.deepEqual(commits, []);
+      assert.equal(releases.length, 1);
+      assert.equal(releases[0]?.reason, "skill_failed", "терминальный durable результат воспроизводится — нужен block");
+      assert.match(releases[0]?.detail ?? "", /не по контракту/);
+    } finally {
+      SKILLS["watch-receivables"] = original;
+    }
+  });
+
+  it("llm-навык: provider rejection тоже skill_failed — без block replay давал бы тот же отказ на каждом poll", async () => {
+    const original = SKILLS["watch-receivables"];
+    SKILLS["watch-receivables"] = async () => {
+      throw new LlmSkillFailedError("провайдер отклонил вызов: 503");
+    };
+    try {
+      const { client, releases } = stub();
+      const res = await runAgentTasks(agent, client, "T0");
+      assert.equal(res[0].outcome, "skipped");
+      assert.equal(releases[0]?.reason, "skill_failed");
+      assert.match(releases[0]?.detail ?? "", /503/);
     } finally {
       SKILLS["watch-receivables"] = original;
     }

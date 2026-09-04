@@ -37,3 +37,7 @@ pnpm-debug.log*
 design/dashboard-redesign/vendhub-dashboard-redesign.html
 # Прототипы, отданные на просмотр: черновики, а не часть панели.
 apps/cc/public/prototypes/
+
+# Локальные правила хуков Claude Code (hookify) — на каждой машине свои.
+# Навыки в .claude/skills/ при этом КОММИТЯТСЯ: это часть Agentic OS репозитория.
+.claude/*.local.md

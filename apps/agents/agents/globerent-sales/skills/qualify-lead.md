@@ -3,6 +3,11 @@ name: qualify-lead
 description: Квалификация лида HELI (hot/warm/cold) по сигналам и следующий шаг. КП клиенту — только черновик на кнопку (T3). Используй при новом лиде, запросе, тендере, выставке.
 allowed-tools: [read_kb, read_db, write_task]
 requires-approval: T1
+# Исполняемый markdown (спека 2026-09-04-llm-skill-executor-design): тело файла — инструкция модели,
+# вход — текст порученной задачи, выход — предложение во Входящих. Первый паспорт на executor: llm.
+executor: llm
+triggers: ["квалифиц", "(^|[^а-яa-z])лид(а|ы|ов|у|е|ом)?([^а-я]|$)", "(^|[^a-z])leads?([^a-z]|$)", "запрос на (погрузчик|технику)", "тендер", "выставк"]
+model-effort: medium
 ---
 # SKILL — qualify-lead
 

@@ -453,6 +453,9 @@ export class AgentsCoreClient {
       webSources: unknown;
       breakGlass: unknown;
       ideaChannels: unknown;
+      kbPages?: unknown;
+      mission?: string | null;
+      nonGoals?: unknown;
       archivedAt: string | null;
     }[]
   > {
@@ -701,7 +704,8 @@ export class AgentsCoreClient {
       | "execution_unknown"
       | "workflow_changed"
       | "route_unavailable"
-      | "unsupported",
+      | "unsupported"
+      | "skill_failed",
     detail?: string,
   ): Promise<boolean> {
     const response = await this.request<{ released: boolean }>(`/tasks/${id}/agent-run/release`, {

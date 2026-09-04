@@ -497,6 +497,18 @@ describe("DTO durable agent-run", () => {
     assert.deepEqual(
       await validate(
         plainToInstance(ReleaseAgentRunDto, {
+          agentName: "globerent-sales",
+          runId: RUN_ID,
+          executionAttemptId: EXECUTION_ID,
+          reason: "skill_failed",
+          detail: "ответ модели не по контракту",
+        }),
+      ),
+      [],
+    );
+    assert.deepEqual(
+      await validate(
+        plainToInstance(ReleaseAgentRunDto, {
           agentName: "receivables",
           runId: RUN_ID,
           executionAttemptId: EXECUTION_ID,

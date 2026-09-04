@@ -1165,6 +1165,8 @@ export interface AgentCard {
   webSources: { name: string; url: string }[];
   breakGlass: string[];
   ideaChannels: string[];
+  /** Страницы знаний — пути внутри apps/agents/shared (например shared/kb/globerent/heli-models.md). */
+  kbPages: string[];
   archivedAt: string | null;
   updatedAt: string;
 }

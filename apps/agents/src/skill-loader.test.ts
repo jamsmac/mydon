@@ -78,6 +78,91 @@ describe("loadSkillMeta", () => {
   });
 });
 
+describe("loadSkillMeta — поля llm-исполнителя (executor / triggers / model-effort / max-tokens)", () => {
+  it("без executor навык считается кодовым, triggers пустые, тело сохраняется", () => {
+    const dir = makeAgentsDir({
+      "a/skills/x.md": "---\nname: x\ndescription: d\nrequires-approval: T1\n---\n# Тело навыка",
+    });
+    const [m] = loadSkillMeta(dir);
+    assert.equal(m.executor, "code");
+    assert.deepEqual(m.triggers, []);
+    assert.equal(m.modelEffort, undefined);
+    assert.equal(m.maxTokens, undefined);
+    assert.match(m.body, /Тело навыка/);
+    assert.equal(m.problems.length, 0);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("executor: llm читается вместе с triggers, model-effort и max-tokens", () => {
+    const dir = makeAgentsDir({
+      "a/skills/qualify.md": [
+        "---",
+        "name: qualify",
+        "description: d",
+        "allowed-tools: [read_kb]",
+        "requires-approval: T1",
+        "executor: LLM",
+        'triggers: ["квалифиц", "(^|[^а-я])лид"]',
+        "model-effort: Medium",
+        "max-tokens: 1200",
+        "---",
+        "тело",
+      ].join("\n"),
+    });
+    const [m] = loadSkillMeta(dir);
+    assert.equal(m.executor, "llm", "регистр значения не важен");
+    assert.deepEqual(m.triggers, ["квалифиц", "(^|[^а-я])лид"]);
+    assert.equal(m.modelEffort, "medium");
+    assert.equal(m.maxTokens, 1200);
+    assert.equal(m.problems.length, 0, m.problems.join("; "));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("неизвестный executor, битая регулярка, чужой model-effort и дробный max-tokens — отдельные замечания", () => {
+    const dir = makeAgentsDir({
+      "a/skills/bad.md": [
+        "---",
+        "name: bad",
+        "description: d",
+        "requires-approval: T1",
+        "executor: python",
+        'triggers: ["ok", "(незакрытая"]',
+        "model-effort: turbo",
+        "max-tokens: 12.5",
+        "---",
+        "тело",
+      ].join("\n"),
+    });
+    const [m] = loadSkillMeta(dir);
+    const joined = m.problems.join("; ");
+    assert.equal(m.executor, "code", "неизвестный executor не превращает навык в llm");
+    assert.deepEqual(m.triggers, ["ok"], "валидные триггеры остаются, битые отбрасываются");
+    assert.match(joined, /неизвестный executor «python»/);
+    assert.match(joined, /битая регулярка в triggers: «\(незакрытая»/);
+    assert.match(joined, /неизвестный model-effort «turbo»/);
+    assert.match(joined, /max-tokens должен быть целым положительным числом/);
+    assert.equal(m.modelEffort, undefined);
+    assert.equal(m.maxTokens, undefined);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("executor: llm без requires-approval — замечание: llm-навык обязан объявить минимальный тир", () => {
+    const dir = makeAgentsDir({ "a/skills/free.md": "---\nname: free\ndescription: d\nexecutor: llm\n---\nтело" });
+    const [m] = loadSkillMeta(dir);
+    assert.equal(m.executor, "llm");
+    assert.match(m.problems.join("; "), /executor: llm без requires-approval/);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("triggers не списком — замечание, триггеров нет", () => {
+    const dir = makeAgentsDir({ "a/skills/t.md": "---\nname: t\ndescription: d\nrequires-approval: T1\ntriggers: лид\n---\nтело" });
+    const [m] = loadSkillMeta(dir);
+    assert.deepEqual(m.triggers, []);
+    assert.match(m.problems.join("; "), /triggers должен быть списком/);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("skillTierFloors — строже побеждает", () => {
   it("одинаковый навык у разных агентов → берётся самый строгий тир", () => {
     const dir = makeAgentsDir({
@@ -107,6 +192,19 @@ describe("реальные паспорта навыков MYDON", () => {
       0,
       "навыки с замечаниями: " + bad.map((m) => `${m.agent}/${m.name} (${m.problems.join(", ")})`).join("; "),
     );
+  });
+
+  it("qualify-lead — единственный executor: llm в репозитории, с триггерами и тиром T1", () => {
+    const metas = loadSkillMeta(REAL_AGENTS_DIR);
+    const llm = metas.filter((m) => m.executor === "llm");
+    assert.deepEqual(
+      llm.map((m) => `${m.agent}/${m.name}`),
+      ["globerent-sales/qualify-lead"],
+      "новые llm-навыки добавляются осознанно — обнови этот список вместе с docs/AGENTS_ACTIVATION.md",
+    );
+    assert.equal(llm[0].requiresApproval, "T1");
+    assert.ok(llm[0].triggers.length >= 3, "у llm-навыка должны быть триггеры подбора по задаче");
+    assert.equal(llm[0].modelEffort, "medium");
   });
 
   it("draft-quote (деньги) объявлен не ниже T3; monitor-stock поднят инструментами до T3", () => {

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
-import { checkPassport, parsePassport } from "./check-passports";
+import { checkLinks, checkPassport, parsePassport } from "./check-passports";
 
 describe("Разбор паспорта", () => {
   it("«schedule: []» — это пустой список, а не начало списка", () => {
@@ -67,5 +70,61 @@ describe("Проверка паспорта", () => {
   it("ловит неизвестный статус", () => {
     const r = checkPassport("a", { ...good, status: "включён" }, ["scan"]);
     assert.match(r.problems.join(), /неизвестный статус/);
+  });
+});
+
+describe("Связи паспорта с навыками и KB (checkLinks, спека llm-skill)", () => {
+  const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), "mydon-shared-"));
+  fs.mkdirSync(path.join(sharedDir, "kb/globerent"), { recursive: true });
+  fs.writeFileSync(path.join(sharedDir, "kb/globerent/heli-models.md"), "# HELI");
+  const noCode = () => false;
+  const base = { business: "globerent", status: "paused", schedule: [] as { cron?: string; skill?: string }[] };
+
+  it("целые связи замечаний не дают: kb-страница есть, llm-навык не в расписании", () => {
+    const problems = checkLinks(
+      { ...base, kb_pages: ["shared/kb/globerent/heli-models.md"] },
+      [{ name: "qualify-lead", executor: "llm" }, { name: "scan", executor: "code" }],
+      sharedDir,
+      noCode,
+    );
+    assert.deepEqual(problems, []);
+  });
+
+  it("llm-навык в расписании — замечание (R-LS-11: cron для executor: llm закрыт до допуска)", () => {
+    const problems = checkLinks(
+      { ...base, schedule: [{ cron: "0 8 * * 1", skill: "qualify-lead" }] },
+      [{ name: "qualify-lead", executor: "llm" }],
+      sharedDir,
+      noCode,
+    );
+    assert.equal(problems.length, 1);
+    assert.match(problems[0], /расписание зовёт llm-навык «qualify-lead»/);
+    assert.match(problems[0], /DURABLE_SCHEDULED_SKILLS/);
+  });
+
+  it("executor: llm при наличии кода в SKILLS — двусмысленность, исполнится код", () => {
+    const problems = checkLinks(base, [{ name: "watch-receivables", executor: "llm" }], sharedDir, (n) => n === "watch-receivables");
+    assert.deepEqual(problems, ["навык watch-receivables: executor: llm, но есть код в SKILLS — исполняться будет код"]);
+  });
+
+  it("kb_pages: чужой формат пути и отсутствующая страница — разные замечания; хвост-комментарий отбрасывается", () => {
+    const problems = checkLinks(
+      {
+        ...base,
+        kb_pages: [
+          "shared/kb/globerent/heli-models.md # основная",
+          "kb/globerent/heli-models.md",
+          "shared/kb/../secret.md",
+          "shared/kb/globerent/nope.md",
+        ],
+      },
+      [],
+      sharedDir,
+      noCode,
+    );
+    assert.equal(problems.length, 3, problems.join("\n"));
+    assert.match(problems[0], /«kb\/globerent\/heli-models.md» — путь должен быть вида shared\/kb/);
+    assert.match(problems[1], /«shared\/kb\/..\/secret.md» — путь должен быть вида/);
+    assert.match(problems[2], /страницы «shared\/kb\/globerent\/nope.md» нет на диске/);
   });
 });
