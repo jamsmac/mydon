@@ -83,13 +83,16 @@ export default async function PartsPage({
             </div>
           )}
         </div>
-        {queue.items.length > 0 && (
-          <p className="hint" style={{ marginTop: 8 }}>
+        <p className="hint" style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {queue.items.length > 0 && (
             <Link href="/parts/queue" className="btn primary">
               Пройти по одному →
             </Link>
-          </p>
-        )}
+          )}
+          <Link href="/parts/count" className="btn">
+            Инвентаризация узлов
+          </Link>
+        </p>
       </section>
 
       <section className="group-block">

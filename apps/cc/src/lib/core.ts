@@ -2265,6 +2265,67 @@ export interface PartsQueue {
   items: PartUnit[];
 }
 
+/** Инвентаризация узлов (У4): сессия по месту и строки. */
+export interface PartCountSession {
+  id: string;
+  location: string;
+  warehouseId: string | null;
+  personId: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  appliedAt: string | null;
+  appliedBy: string | null;
+  reversesId: string | null;
+  note: string | null;
+  createdBy: string;
+}
+
+export interface PartCountSessionListRow extends PartCountSession {
+  lines: number;
+  personName: string | null;
+}
+
+export interface PartCountLine {
+  id: string;
+  sessionId: string;
+  partUnitId: string | null;
+  partKind: string;
+  inventoryNoEntered: string | null;
+  serialEntered: string | null;
+  setNumberEntered: number | null;
+  hopperPositionEntered: number | null;
+  photoSkippedReason: string | null;
+  result: "found" | "new" | "missing" | "reversed" | null;
+  prevLocation: string | null;
+  prevMachineId: string | null;
+  prevSlot: number | null;
+  createdBy: string | null;
+  createdAt: string;
+  label: string;
+  unit: PartUnit | null;
+  photoCount: number;
+  registeredAt: string | null;
+}
+
+export interface PartCountSummary {
+  session: PartCountSession;
+  lines: PartCountLine[];
+  expected: PartUnit[];
+  found: number;
+  fresh: number;
+  moved: number;
+  missing: PartUnit[];
+  photoRequired: boolean;
+}
+
+export interface PartCountApplyReport {
+  sessionId: string;
+  found: number;
+  created: string[];
+  moved: string[];
+  missing: string[];
+}
+
 export interface PartUnitPeriod extends MachinePart {
   machineName: string | null;
 }
@@ -2413,6 +2474,15 @@ export const core = {
     send<{ unit: PartUnit; from: string | null; logId: string | null }>(`/parts/${id}/washed`, "POST", { actorRef }),
   partsProvision: (input: { dryRun?: boolean; machineIds?: string[]; actorRef?: string }) =>
     send<PartsProvisionReport>("/parts/provision", "POST", input),
+  /** Инвентаризация узлов (У4): сессии, сводка, применение, откат. */
+  partCountSessions: (limit = 50) => get<PartCountSessionListRow[]>(`/parts/count/sessions?limit=${limit}`),
+  partCountSummary: (id: string) => get<PartCountSummary>(`/parts/count/sessions/${id}`),
+  partCountStart: (input: { location: string; personId?: string; note?: string; actorRef?: string }) =>
+    send<{ session: PartCountSession; resumed: boolean; photoRequired: boolean; expected: number }>("/parts/count/sessions", "POST", input),
+  partCountApply: (id: string, actorRef = "owner") => send<PartCountApplyReport>(`/parts/count/sessions/${id}/apply`, "POST", { actorRef }),
+  partCountReverse: (id: string, actorRef = "owner") =>
+    send<{ session: PartCountSession; restored: string[]; skipped: string[] }>(`/parts/count/sessions/${id}/reverse`, "POST", { actorRef }),
+  partCountRemoveLine: (lineId: string, actorRef = "owner") => send<{ ok: boolean }>(`/parts/count/lines/${lineId}/remove`, "POST", { actorRef }),
   /** История экземпляров по серийнику и/или модели — все периоды в обе стороны. */
   partHistory: (q: { serial?: string; model?: string }) => {
     const qs = new URLSearchParams();

@@ -99,6 +99,33 @@ export interface PartUnitRow {
   photoCount: number;
 }
 
+/** Строка инвентаризации узлов — как отдаёт Core `/parts/count/...` (У4). */
+export interface PartCountLineRow {
+  id: string;
+  sessionId: string;
+  partUnitId: string | null;
+  partKind: string;
+  inventoryNoEntered: string | null;
+  serialEntered: string | null;
+  photoSkippedReason: string | null;
+  result: string | null;
+  label: string;
+  photoCount: number;
+  /** Где узел числился на момент ввода: имя автомата со слотом или место; null — новый узел. */
+  registeredAt: string | null;
+}
+
+export interface PartCountSummaryRow {
+  session: { id: string; location: string; startedAt: string; finishedAt: string | null; appliedAt: string | null };
+  lines: PartCountLineRow[];
+  expected: PartUnitRow[];
+  found: number;
+  fresh: number;
+  moved: number;
+  missing: PartUnitRow[];
+  photoRequired: boolean;
+}
+
 export interface MaintenanceDueRow {
   planId: string;
   targetId: string;
@@ -1188,6 +1215,45 @@ export class CoreClient {
     input: { personId?: string; clientKey?: string; actorRef?: string },
   ): Promise<{ unit: PartUnitRow; from: string | null; logId: string | null }> {
     return this.request(`/parts/${id}/washed`, { method: "POST", body: JSON.stringify(input) });
+  }
+
+  // ── Инвентаризация узлов (У4) ──
+
+  /** Открыть (или продолжить открытую) сессию по месту. */
+  partCountStart(input: {
+    location: "warehouse" | "washing" | "drying" | "repair";
+    personId?: string;
+    actorRef?: string;
+  }): Promise<{ session: { id: string; location: string; startedAt: string }; resumed: boolean; photoRequired: boolean; expected: number }> {
+    return this.request("/parts/count/sessions", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Строка: что увидел сотрудник. Core опознаёт узел по номеру/серийнику или помечает как новый. */
+  partCountAddLine(
+    sessionId: string,
+    input: {
+      partKind: string;
+      inventoryNo?: string;
+      serialNumber?: string;
+      photoSkippedReason?: string;
+      clientKey?: string;
+      actorRef?: string;
+    },
+  ): Promise<{ line: PartCountLineRow; status: "found" | "new"; how: string | null }> {
+    return this.request(`/parts/count/sessions/${sessionId}/lines`, { method: "POST", body: JSON.stringify(input) });
+  }
+
+  partCountSkipPhoto(lineId: string, reason: string): Promise<unknown> {
+    return this.request(`/parts/count/lines/${lineId}/skip-photo`, { method: "POST", body: JSON.stringify({ reason }) });
+  }
+
+  partCountRemoveLine(lineId: string, actorRef?: string): Promise<unknown> {
+    return this.request(`/parts/count/lines/${lineId}/remove`, { method: "POST", body: JSON.stringify({ actorRef }) });
+  }
+
+  /** Сотрудник закончил вводить: сводка «найдено / новых / не найдено». Применяет владелец в панели. */
+  partCountFinish(sessionId: string, actorRef?: string): Promise<PartCountSummaryRow> {
+    return this.request(`/parts/count/sessions/${sessionId}/finish`, { method: "POST", body: JSON.stringify({ actorRef }) });
   }
 
   /** Проставить / подтвердить / исправить номер узла. */

@@ -63,6 +63,7 @@ import {
   startPartNumbers,
 } from "./part-numbers";
 import { PART_WASH_FLOW, handlePartWashCallback, parsePartWashCallback, partWashStepHint, startPartWash } from "./part-wash";
+import { PART_COUNT_FLOW, handlePartCountCallback, handlePartCountText, parsePartCountCallback, partCountStepHint, startPartCount } from "./part-count";
 import {
   handleRefillCallback,
   handleRefillCount,
@@ -452,6 +453,13 @@ ${reply.text}`;
   if (conv?.flow === PART_WASH_FLOW) {
     return { reply: { text: partWashStepHint() } };
   }
+  if (conv?.flow === PART_COUNT_FLOW) {
+    const textStep = conv.step === "number" || conv.step === "serial" || conv.step === "reason";
+    if (textStep && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await handlePartCountText(chatId, clean, person, deps) };
+    }
+    return { reply: { text: partCountStepHint(conv.step) } };
+  }
   if (conv?.flow === "part-replace") {
     if (conv.step === "object" && clean.length > 0 && !clean.startsWith("/")) {
       return { reply: await searchObjects(clean, deps) };
@@ -650,6 +658,8 @@ async function startMenuItem(
       return { reply: await startPartNumbers(chatId, person, deps) };
     case "pwash":
       return { reply: await startPartWash(chatId, person, deps) };
+    case "pcount":
+      return { reply: await startPartCount(chatId, person, deps) };
     case "clean":
       return { reply: await startClean(chatId, person, deps) };
     case "insp":
@@ -951,6 +961,14 @@ export async function handleStaffCallback(
       return { answer: "Недоступно", message: "«🚿 Помыл узлы» тебе сейчас недоступно. Скажи владельцу." };
     }
     return unwrap(await handlePartWashCallback(chatId, pwCb, person, deps));
+  }
+
+  const pcCb = parsePartCountCallback(data);
+  if (pcCb) {
+    if (!can(person.roles, "parts.count")) {
+      return { answer: "Недоступно", message: "«🗂 Инвентаризация узлов» тебе сейчас недоступно. Скажи владельцу." };
+    }
+    return unwrap(await handlePartCountCallback(chatId, pcCb, person, deps));
   }
 
   const cleanCb = parseCleanCallback(data);

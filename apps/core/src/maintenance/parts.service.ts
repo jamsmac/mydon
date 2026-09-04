@@ -205,6 +205,17 @@ export class PartsService {
     return new Map(rows.map((r) => [r.ownerId, Number(r.n)]));
   }
 
+  /** Представления для других сервисов (инвентаризация): те же карточки с состоянием. */
+  async views(units: PartUnitRow[], tx?: Tx): Promise<PartUnitView[]> {
+    return this.toViews(tx ?? this.db, units);
+  }
+
+  /** Узел по инвентарному номеру — без учёта регистра и пробелов. NULL — свободен. */
+  async findByInventoryNo(inventoryNo: string, tx?: Tx): Promise<PartUnitRow | null> {
+    if (normalizeInventoryNo(inventoryNo) === null) return null;
+    return this.takenBy(tx ?? this.db, inventoryNo);
+  }
+
   private async toViews(tx: Tx | Db, units: PartUnitRow[]): Promise<PartUnitView[]> {
     const ids = units.map((u) => u.id);
     const [where, photos] = await Promise.all([this.whereaboutsOf(tx, ids), this.photoCounts(tx, ids)]);

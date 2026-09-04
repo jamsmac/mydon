@@ -3412,6 +3412,79 @@ export const staffInvite = pgTable(
  * «ежемесячная» работа за год делается десять раз вместо двенадцати —
  * и никто этого не замечает, потому что каждый отдельный раз выглядит верно.
  */
+// ── Инвентаризация узлов (спека vendhub-parts, R-PU-7, У4) ──
+
+/** Итог строки: `found` — узел опознан, `new` — заведён при применении, `missing` — ожидался, не найден, `reversed` — обратная сессия вернула как было. */
+export const partCountResultEnum = pgEnum("part_count_result", ["found", "new", "missing", "reversed"]);
+
+/**
+ * Сессия инвентаризации узлов по месту (склад / мойка / сушка / ремонт).
+ * Черновик копится строками; «Применить» сверяет с открытыми периодами одной
+ * транзакцией: найденные подтверждены, новые заведены, не найденные →
+ * `unknown`. Ничего не удаляется; отмена — обратной сессией (`reverses_id`).
+ */
+export const partCountSession = pgTable(
+  "part_count_session",
+  {
+    id: id(),
+    /** Где считаем. Автомат не считают сессией — его состав ведёт автозаведение. */
+    location: partLocationEnum("location").notNull(),
+    /** Склад-`entity`, если складов несколько. NULL — мойка/сушка/ремонт или единственный склад. */
+    warehouseId: uuid("warehouse_id").references(() => entity.id),
+    personId: uuid("person_id").references(() => person.id),
+    startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+    /** Сотрудник закончил вводить (сессия ждёт применения владельцем). */
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    /** Применена: периоды узлов приведены к найденному. */
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    appliedBy: text("applied_by"),
+    /** Обратная сессия: какую применённую откатывает. */
+    reversesId: uuid("reverses_id"),
+    note: text("note"),
+    createdBy: text("created_by").notNull().default("owner"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("part_count_session_location_idx").on(t.location, t.startedAt),
+    check("part_count_session_off_machine", sql`${t.location} <> 'machine'`),
+  ],
+);
+
+/** Строка инвентаризации: что сотрудник увидел и ввёл. Фото — `attachment` (owner_type part_count_line). */
+export const partCountLine = pgTable(
+  "part_count_line",
+  {
+    id: id(),
+    sessionId: uuid("session_id")
+      .references(() => partCountSession.id, { onDelete: "cascade" })
+      .notNull(),
+    /** Опознанный узел. NULL — не опознан: заводится при применении (`result = new`). */
+    partUnitId: uuid("part_unit_id").references(() => partUnit.id),
+    partKind: partKindEnum("part_kind").notNull(),
+    inventoryNoEntered: text("inventory_no_entered"),
+    serialEntered: text("serial_entered"),
+    setNumberEntered: integer("set_number_entered"),
+    hopperPositionEntered: integer("hopper_position_entered"),
+    /** Фото пропущено — почему (настройка PARTS_COUNT_PHOTO_REQUIRED). NULL — фото есть или не требовалось. */
+    photoSkippedReason: text("photo_skipped_reason"),
+    result: partCountResultEnum("result"),
+    /** Откуда узел пришёл при применении, если числился не здесь, — для обратной сессии. */
+    prevLocation: partLocationEnum("prev_location"),
+    prevMachineId: uuid("prev_machine_id").references(() => entity.id),
+    prevSlot: integer("prev_slot"),
+    /** Ключ идемпотентности от бота: повтор того же «добавить» не даёт вторую строку. */
+    clientKey: text("client_key"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("part_count_line_session_idx").on(t.sessionId, t.createdAt),
+    uniqueIndex("part_count_line_client_key").on(t.clientKey).where(sql`client_key is not null`),
+    // Один узел в сессии — один раз: «посчитал дважды» — ошибка ввода, а не два узла.
+    uniqueIndex("part_count_line_unit_key").on(t.sessionId, t.partUnitId).where(sql`part_unit_id is not null`),
+  ],
+);
+
 export const maintenancePlan = pgTable(
   "maintenance_plan",
   {
@@ -3584,6 +3657,8 @@ export const schema = {
   maintenanceLog,
   partUnit,
   machinePart,
+  partCountSession,
+  partCountLine,
   maintenancePlan,
   // Доступ сотрудников: приглашения.
   staffInvite,

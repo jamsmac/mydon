@@ -10,6 +10,7 @@ import { isCoffeeFixTrigger } from "./coffee-fix";
 import { isMyRecordsTrigger } from "./my-records";
 import { isPartNumberTrigger } from "./part-numbers";
 import { isPartWashTrigger } from "./part-wash";
+import { isPartCountTrigger } from "./part-count";
 
 /**
  * Меню сотрудника: один реестр и для кнопок, и для текстовых триггеров.
@@ -111,6 +112,9 @@ export const STAFF_MENU: readonly MenuItem[] = [
   // Помыл узлы — снятые на мойку базы детали: мойка → сушка → склад (У3).
   // Не путать с «🧼 Мойка бункера»: та про бункер на точке, эта про снятый узел.
   { id: "pwash", label: "🚿 Помыл узлы", perm: "parts.move", ready: true, match: isPartWashTrigger },
+  // Инвентаризация узлов — по одному, с фото (У4). Стоит РАНЬШЕ складской
+  // «🧮 Инвентаризация»: та ловит любое «инвентар…», эта — только «… узлов».
+  { id: "pcount", label: "🗂 Инвентаризация узлов", perm: "parts.count", ready: true, match: isPartCountTrigger },
   // Ряд 5 — периодическое.
   {
     id: "insp",

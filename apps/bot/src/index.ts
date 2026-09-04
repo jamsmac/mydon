@@ -40,6 +40,7 @@ import {
   startStaffAdd,
 } from "./staff-add";
 import { handleAfterPhoto } from "./field-work";
+import { handlePartCountPhoto } from "./part-count";
 import { summarizeActions } from "./owner-actions";
 import { asStaffMode } from "./as-staff";
 import { InvalidTokenError, TelegramApi, TelegramError, type TgUpdate } from "./telegram";
@@ -336,6 +337,11 @@ async function main(): Promise<void> {
       const attached = await handleAfterPhoto(chatId, file, person, staffDeps);
       if (attached) {
         await tg.sendMessage(chatId, attached.text, attached.keyboard);
+        return;
+      }
+      const counted = await handlePartCountPhoto(chatId, file, person, staffDeps);
+      if (counted) {
+        await tg.sendMessage(chatId, counted.text, counted.keyboard);
         return;
       }
       const done = await handleTaskDonePhoto(chatId, file, person, staffDeps);
