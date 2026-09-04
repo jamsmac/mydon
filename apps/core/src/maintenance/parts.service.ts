@@ -716,6 +716,128 @@ export class PartsService {
     return report;
   }
 
+  /**
+   * Перемещение узла вне автомата (R-PU-8, У3): мойка → сушка → склад,
+   * склад → ремонт и обратно. Узел на автомате не двигается — его снимают
+   * мастером снятия. Запись журнала (kind=cleaning для мойки, иначе other)
+   * идёт на автомат, с которого узел снят последним: у мойки на базе нет
+   * своего объекта, а история узла читается с карточки автомата.
+   */
+  async move(
+    id: string,
+    input: {
+      to: Exclude<PeriodRow["location"], "machine">;
+      personId?: string;
+      taskId?: string;
+      note?: string;
+      clientKey?: string;
+      actorRef?: string;
+    },
+  ): Promise<{ unit: PartUnitView; from: PeriodRow["location"] | null; logId: string | null }> {
+    const actorRef = input.actorRef ?? "owner";
+    const today = todayInTz();
+    return this.db.transaction(async (tx) => {
+      const [unit] = await tx.select().from(partUnit).where(eq(partUnit.id, id)).limit(1);
+      if (!unit) throw new NotFoundException("Узла с таким id нет");
+      if (unit.retiredAt) throw new BadRequestException("Узел списан — перемещать нечего");
+      // Повтор по clientKey: движение уже записано — отдаём текущее состояние.
+      if (input.clientKey) {
+        const [dup] = await tx
+          .select({ id: maintenanceLog.id })
+          .from(maintenanceLog)
+          .where(eq(maintenanceLog.clientKey, input.clientKey))
+          .limit(1);
+        if (dup) {
+          const [view] = await this.toViews(tx, [unit]);
+          return { unit: view, from: null, logId: dup.id };
+        }
+      }
+      const [open] = await tx
+        .select()
+        .from(machinePart)
+        .where(and(eq(machinePart.partUnitId, id), isNull(machinePart.removedOn)))
+        .limit(1);
+      if (open?.machineId) throw new BadRequestException("Узел стоит на автомате — сначала снимите его мастером снятия");
+      const from = open?.location ?? null;
+      if (from === input.to) throw new BadRequestException(`Узел и так ${input.to === "warehouse" ? "на складе" : "там"}`);
+
+      // Автомат, с которого узел снят последним, — объект записи журнала.
+      const [lastMachine] = await tx
+        .select({ machineId: machinePart.machineId })
+        .from(machinePart)
+        .where(and(eq(machinePart.partUnitId, id), sql`${machinePart.machineId} is not null`))
+        .orderBy(desc(machinePart.installedOn))
+        .limit(1);
+      let logId: string | null = null;
+      if (lastMachine?.machineId) {
+        const [log] = await tx
+          .insert(maintenanceLog)
+          .values({
+            entityId: lastMachine.machineId,
+            kind: from === "washing" ? "cleaning" : "other",
+            partKind: unit.partKind,
+            partUnitId: unit.id,
+            personId: input.personId ?? null,
+            taskId: input.taskId ?? null,
+            performedOn: today,
+            outcome: "done",
+            note: input.note ?? `${partUnitLabel(unit)}: ${from ?? "без места"} → ${input.to}`,
+            clientKey: input.clientKey ?? null,
+            createdBy: actorRef,
+          })
+          .returning();
+        logId = log.id;
+      }
+      if (open) {
+        await tx
+          .update(machinePart)
+          .set({ removedOn: today, ...(logId ? { removeLogId: logId } : {}) })
+          .where(eq(machinePart.id, open.id));
+      }
+      await tx.insert(machinePart).values({
+        partUnitId: unit.id,
+        machineId: null,
+        location: input.to,
+        partKind: unit.partKind,
+        slot: null,
+        serialNumber: unit.serialNumber,
+        model: unit.model,
+        installedOn: today,
+        ...(logId ? { installLogId: logId } : {}),
+        warrantyUntil: unit.warrantyUntil,
+        note: input.note ?? null,
+        createdBy: actorRef,
+      });
+      await tx.insert(auditLog).values({
+        actorKind: actorKindOf(actorRef),
+        actorRef,
+        action: "parts.unit_moved",
+        target: id,
+        before: { location: from },
+        after: { location: input.to },
+      });
+      const [view] = await this.toViews(tx, [unit]);
+      return { unit: view, from, logId };
+    });
+  }
+
+  /** Куда идёт помытый узел: на сушку (настройка PARTS_DRYING_STAGE=1) или сразу на склад. */
+  async afterWashLocation(): Promise<"drying" | "warehouse"> {
+    const raw = (await settingValue(this.db, "PARTS_DRYING_STAGE")).trim();
+    return raw === "0" ? "warehouse" : "drying";
+  }
+
+  /** Узлы вне автоматов по месту — для мастера «Помыл» и панели мойки. */
+  async atLocation(location: Exclude<PeriodRow["location"], "machine">): Promise<PartUnitView[]> {
+    const rows = await this.db
+      .select({ unit: partUnit })
+      .from(machinePart)
+      .innerJoin(partUnit, eq(partUnit.id, machinePart.partUnitId))
+      .where(and(eq(machinePart.location, location), isNull(machinePart.removedOn), isNull(partUnit.retiredAt)))
+      .orderBy(asc(machinePart.installedOn));
+    return this.toViews(this.db, rows.map((r) => r.unit));
+  }
+
   /** Записи журнала по узлу — мойки, ремонты, снятия. */
   async logs(id: string): Promise<(typeof maintenanceLog.$inferSelect)[]> {
     return this.db

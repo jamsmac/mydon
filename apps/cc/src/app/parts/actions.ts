@@ -70,6 +70,18 @@ export async function savePartUnit(id: string, form: FormData): Promise<ActionRe
   return { ok: true };
 }
 
+/** Перемещение узла вне автомата: сушка, склад, ремонт; «помыт» — по настройке сушки. */
+export async function movePartUnit(id: string, to: "washed" | "warehouse" | "drying" | "repair" | "washing"): Promise<ActionResult> {
+  try {
+    if (to === "washed") await core.partWashed(id, "owner");
+    else await core.partMove(id, { to, actorRef: "owner" });
+  } catch (err) {
+    return fail(err);
+  }
+  refresh(id);
+  return { ok: true };
+}
+
 export async function retirePartUnit(id: string, reason: string): Promise<ActionResult> {
   try {
     await core.partRetire(id, reason.trim() || "списан владельцем", "owner");

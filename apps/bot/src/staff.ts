@@ -62,6 +62,7 @@ import {
   partNumberStepHint,
   startPartNumbers,
 } from "./part-numbers";
+import { PART_WASH_FLOW, handlePartWashCallback, parsePartWashCallback, partWashStepHint, startPartWash } from "./part-wash";
 import {
   handleRefillCallback,
   handleRefillCount,
@@ -448,6 +449,9 @@ ${reply.text}`;
     }
     return { reply: { text: partNumberStepHint(conv.step) } };
   }
+  if (conv?.flow === PART_WASH_FLOW) {
+    return { reply: { text: partWashStepHint() } };
+  }
   if (conv?.flow === "part-replace") {
     if (conv.step === "object" && clean.length > 0 && !clean.startsWith("/")) {
       return { reply: await searchObjects(clean, deps) };
@@ -644,6 +648,8 @@ async function startMenuItem(
       return { reply: await startPartReplace(chatId, person, deps) };
     case "pnum":
       return { reply: await startPartNumbers(chatId, person, deps) };
+    case "pwash":
+      return { reply: await startPartWash(chatId, person, deps) };
     case "clean":
       return { reply: await startClean(chatId, person, deps) };
     case "insp":
@@ -937,6 +943,14 @@ export async function handleStaffCallback(
       return { answer: "Недоступно", message: "«🔢 Номера узлов» тебе сейчас недоступно. Скажи владельцу." };
     }
     return unwrap(await handlePartNumberCallback(chatId, pnCb, person, deps));
+  }
+
+  const pwCb = parsePartWashCallback(data);
+  if (pwCb) {
+    if (!can(person.roles, "parts.move")) {
+      return { answer: "Недоступно", message: "«🚿 Помыл узлы» тебе сейчас недоступно. Скажи владельцу." };
+    }
+    return unwrap(await handlePartWashCallback(chatId, pwCb, person, deps));
   }
 
   const cleanCb = parseCleanCallback(data);

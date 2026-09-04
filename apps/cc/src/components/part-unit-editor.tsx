@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import type { PartUnit } from "../lib/core";
-import { retirePartUnit, savePartUnit, setPartNumber } from "../app/parts/actions";
+import { movePartUnit, retirePartUnit, savePartUnit, setPartNumber } from "../app/parts/actions";
 
 /**
  * Паспорт узла и номер. Номер отдельно от паспорта: подтверждение наклейки —
@@ -23,6 +23,17 @@ export function PartUnitEditor({ unit }: { unit: PartUnit }) {
   }
 
   const hopper = unit.partKind === "hopper";
+  const loc = unit.where?.location ?? null;
+  // Куда можно передвинуть с панели: узел вне автомата и не списан (У3).
+  // На автомате — только снятием через мастер замены; это не кнопка «на всякий».
+  const moves: { to: "washed" | "warehouse" | "drying" | "repair" | "washing"; label: string; okText: string }[] = [];
+  if (!unit.retiredAt && !unit.where?.machineId) {
+    if (loc === "washing") moves.push({ to: "washed", label: "Помыт", okText: "Помыт — ушёл дальше по цепочке" });
+    if (loc === "drying") moves.push({ to: "warehouse", label: "На склад", okText: "На складе" });
+    if (loc === "warehouse" || loc === "unknown" || loc === null) moves.push({ to: "repair", label: "В ремонт", okText: "В ремонте" });
+    if (loc === "repair" || loc === "unknown" || loc === null) moves.push({ to: "warehouse", label: "На склад", okText: "На складе" });
+    if (loc === "warehouse") moves.push({ to: "washing", label: "На мойку", okText: "На мойке" });
+  }
 
   return (
     <div className="card">
@@ -41,6 +52,23 @@ export function PartUnitEditor({ unit }: { unit: PartUnit }) {
           </button>
         )}
       </div>
+
+      {moves.length > 0 && (
+        <div className="form-actions" style={{ marginBottom: 12 }}>
+          {moves.map((m) => (
+            <button
+              key={m.to + m.label}
+              type="button"
+              className="btn sm"
+              disabled={pending}
+              onClick={() => start(async () => done(await movePartUnit(unit.id, m.to), m.okText))}
+            >
+              {m.label}
+            </button>
+          ))}
+          <small className="hint">Мойка → сушка → склад; склад ↔ ремонт. На автомат — только мастером замены.</small>
+        </div>
+      )}
 
       {!unit.retiredAt && (
         <div className="form">

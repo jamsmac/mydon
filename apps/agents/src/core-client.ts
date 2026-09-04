@@ -1,4 +1,5 @@
-import type { EnsureTaskInput, MaintenanceDueRow } from "./maintenance-monitor";
+import type { EnsureTaskInput, InstalledPartUnit, MaintenanceDueRow } from "./maintenance-monitor";
+import type { PartsQueueSnapshot } from "./parts-audit";
 import type {
   AutonomyTier,
   Domain,
@@ -993,6 +994,18 @@ export class AgentsCoreClient {
   /** Что подходит к сроку. Статус считается на чтении, нигде не хранится. */
   maintenanceDue(): Promise<MaintenanceDueRow[]> {
     return this.request("/maintenance/due");
+  }
+
+  // ── Узлы автоматов (спека vendhub-parts, У3) ──────────────────────────────
+
+  /** Узлы, стоящие на автомате сейчас, — по карточкам с инвентарными номерами. */
+  partsInstalled(machineId: string): Promise<InstalledPartUnit[]> {
+    return this.request(`/parts/installed?machineId=${encodeURIComponent(machineId)}`);
+  }
+
+  /** Очередь внимания к узлам: без номера, наклеить, неизвестно где, без тары, без фото. */
+  partsQueue(): Promise<PartsQueueSnapshot> {
+    return this.request("/parts/queue");
   }
 
   /**

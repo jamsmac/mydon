@@ -11,6 +11,7 @@ import type {
   OurvendHealth,
   OurvendSyncRun,
   ParityStreak,
+  PartLocation,
   PriceChangesReport,
   PriceGapReport,
   ProductFiscal,
@@ -2404,6 +2405,12 @@ export const core = {
   partUpdate: (id: string, patch: Record<string, unknown>) => send<PartUnit>(`/parts/${id}`, "PATCH", patch),
   partRetire: (id: string, reason: string, actorRef = "owner") =>
     send<PartUnit>(`/parts/${id}/retire`, "POST", { reason, actorRef }),
+  /** Перемещение узла вне автомата (У3): мойка → сушка → склад, склад ↔ ремонт. */
+  partMove: (id: string, input: { to: PartLocation; note?: string; actorRef?: string }) =>
+    send<{ unit: PartUnit; from: string | null; logId: string | null }>(`/parts/${id}/move`, "POST", input),
+  /** «Помыт»: с мойки на сушку или сразу на склад — по настройке Core. */
+  partWashed: (id: string, actorRef = "owner") =>
+    send<{ unit: PartUnit; from: string | null; logId: string | null }>(`/parts/${id}/washed`, "POST", { actorRef }),
   partsProvision: (input: { dryRun?: boolean; machineIds?: string[]; actorRef?: string }) =>
     send<PartsProvisionReport>("/parts/provision", "POST", input),
   /** История экземпляров по серийнику и/или модели — все периоды в обе стороны. */

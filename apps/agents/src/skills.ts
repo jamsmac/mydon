@@ -10,6 +10,7 @@ import { llmLedgerFromEnv } from "./llm-ledger";
 import type { AgentDefinition } from "./registry";
 import { assessIdeas, buildIdeasProposal, readIdeaChannels, type IdeasMemory } from "./ideas";
 import { modelGatewayFromEnv } from "./model-gateway";
+import { partsAudit } from "./parts-audit";
 import { isLlmSkill, llmSkill } from "./llm-skill";
 import { findSolutions } from "./solution-search";
 import type { TaskLlmSession } from "./task-llm-session";
@@ -362,6 +363,7 @@ const coachReview: Skill = async (agent, core, context) => {
 export const SKILLS: Record<string, Skill> = {
   "watch-receivables": watchReceivables,
   "monitor-stock": monitorStock,
+  "parts-audit": partsAudit,
   "morning-digest": morningDigest,
   "read-sources": readSources,
   "scan-ideas": scanIdeas,

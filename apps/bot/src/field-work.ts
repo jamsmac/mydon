@@ -21,7 +21,7 @@ import {
   type ProblemSymptom,
   type ProblemUrgency,
 } from "@mydon/shared";
-import type { CoreClient, PersonRow } from "./core-client";
+import type { CoreClient, PartUnitRow, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import { objectName, pickObject } from "./machine-picker";
 import { newRunId, onMachinePicked } from "./staff-refill";
@@ -86,10 +86,19 @@ export type PartReplaceCallback =
   | { kind: "installFrom"; partId: string }
   | { kind: "installNew" }
   | { kind: "slot"; slot: number | null }
+  /** Замена по узлам (У3): какой узел снят (null — «нет в списке», прежний путь). */
+  | { kind: "swapOld"; unitId: string | null }
+  /** Замена по узлам (У3): какой запасной поставлен. */
+  | { kind: "swapSpare"; unitId: string }
   | { kind: "cancel" };
 
 export function parsePartReplaceCallback(data: string): PartReplaceCallback | null {
   if (data === "pt:more") return { kind: "morePartsPage" };
+  if (data === "pt:old:0") return { kind: "swapOld", unitId: null };
+  const old = /^pt:old:([0-9a-f-]{36})$/.exec(data);
+  if (old) return { kind: "swapOld", unitId: old[1] };
+  const spare = /^pt:sp:([0-9a-f-]{36})$/.exec(data);
+  if (spare) return { kind: "swapSpare", unitId: spare[1] };
   if (data === "pt:s0") return { kind: "noSerial" };
   if (data === "pt:x") return { kind: "cancel" };
   if (data === "pt:new") return { kind: "installNew" };
@@ -162,6 +171,21 @@ function offLocationKeyboard(): NonNullable<StaffReply["keyboard"]> {
   return { inline_keyboard: rows };
 }
 
+/** Подпись узла в кнопке: номер и место — «M-017 · №1», без номера — серийник. */
+function unitButtonText(u: PartUnitRow): string {
+  const no = u.inventoryNo ?? (u.serialNumber ? `S/N ${u.serialNumber.slice(-8)}` : "без номера");
+  return `${no}${u.where?.slot ? ` · №${u.where.slot}` : ""}`;
+}
+
+/** Куда увозят снятый узел: мойка первой для того, что моют, склад — для остального. */
+function removedToKeyboard(kind: PartKind): NonNullable<StaffReply["keyboard"]> {
+  const washable: readonly PartKind[] = ["mixer", "hopper", "brewer", "grinder"];
+  const order: PartLocation[] = washable.includes(kind) ? ["washing", "warehouse", "repair"] : ["warehouse", "repair", "washing"];
+  const rows = order.map((l) => [{ text: PART_LOCATION_LABELS[l], callback_data: `pt:to:${l}` }]);
+  rows.push([{ text: "✖️ Отмена", callback_data: "pt:x" }]);
+  return { inline_keyboard: rows };
+}
+
 function slotKeyboard(kind: PartKind): NonNullable<StaffReply["keyboard"]> {
   const rows: { text: string; callback_data: string }[][] = [];
   if (MULTI_SLOT.includes(kind)) {
@@ -211,6 +235,12 @@ export function partReplaceStepHint(step: string): string {
       return "Выбери узел со склада или «Новый узел».";
     case "inslot":
       return "Выбери номер места кнопкой.";
+    case "swapold":
+      return "Выбери, какой узел снял, кнопкой.";
+    case "swapto":
+      return "Выбери, куда увёз снятый узел.";
+    case "swapnew":
+      return "Выбери запасной узел со склада или «Новый узел».";
     default:
       return "Продолжай по кнопкам.";
   }
@@ -328,6 +358,32 @@ export async function handlePartReplaceCallback(
     };
   }
 
+  if (cb.kind === "removeTo" && conv.step === "swapto") {
+    // Замена по узлам: снятый уезжает в cb.to; дальше — что поставили.
+    const partKind = String(conv.data.partKind ?? "other") as PartKind;
+    let spares: PartUnitRow[] = [];
+    try {
+      spares = (await deps.core.partsSpares(partKind)).filter((u) => !u.retiredAt);
+    } catch {
+      spares = [];
+    }
+    const map: Record<string, string> = {};
+    const rows = spares.slice(0, 10).map((u) => {
+      map[u.id] = u.label;
+      return [{ text: `${unitButtonText(u)} · склад`, callback_data: `pt:sp:${u.id}` }];
+    });
+    rows.push([{ text: "🆕 Новый узел (без карточки)", callback_data: "pt:new" }]);
+    rows.push([{ text: "✖️ Отмена", callback_data: "pt:x" }]);
+    deps.conversations.advance(chatId, "swapnew", { removedTo: cb.to, spares: map });
+    return {
+      answer: PART_LOCATION_LABELS[cb.to],
+      message: {
+        text: spares.length > 0 ? `Снятый — ${PART_LOCATION_LABELS[cb.to].toLowerCase()}. Что поставил? Запасные на складе:` : `Снятый — ${PART_LOCATION_LABELS[cb.to].toLowerCase()}. Запасных ${PART_LABELS[partKind].toLowerCase()} на складе не числится. Что поставил?`,
+        keyboard: { inline_keyboard: rows },
+      },
+    };
+  }
+
   if (cb.kind === "removeTo") {
     const entityId = String(conv.data.entityId ?? "");
     const partKind = String(conv.data.partKind ?? "");
@@ -384,9 +440,75 @@ export async function handlePartReplaceCallback(
     };
   }
 
+  if (cb.kind === "installNew" && conv.step === "swapnew") {
+    // Новый узел при замене по узлам: карточку заведёт Core, номер даст система.
+    const partKind = String(conv.data.partKind ?? "other") as PartKind;
+    deps.conversations.advance(chatId, "serial", { spareId: null });
+    return {
+      answer: "Новый узел",
+      message: {
+        text: `${PART_LABELS[partKind]}. Серийный номер нового узла?`,
+        keyboard: {
+          inline_keyboard: [
+            [{ text: "Не знаю / нет номера", callback_data: "pt:s0" }],
+            [{ text: "✖️ Отмена", callback_data: "pt:x" }],
+          ],
+        },
+      },
+    };
+  }
+
   if (cb.kind === "installNew") {
     deps.conversations.advance(chatId, "inpart", {});
     return { answer: "Новый узел", message: { text: "Какой узел ставишь?", keyboard: partKeyboard(false) } };
+  }
+
+  if (cb.kind === "swapOld") {
+    if (conv.step !== "swapold") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
+    const partKind = String(conv.data.partKind ?? "other") as PartKind;
+    if (cb.unitId === null) {
+      // Узла нет в списке — прежний путь: серийник → причина, Core заведёт карточку.
+      deps.conversations.advance(chatId, "serial", { oldUnitId: null });
+      return {
+        answer: "Не из списка",
+        message: {
+          text: `${PART_LABELS[partKind]}. Серийный номер нового узла?`,
+          keyboard: {
+            inline_keyboard: [
+              [{ text: "Не знаю / нет номера", callback_data: "pt:s0" }],
+              [{ text: "✖️ Отмена", callback_data: "pt:x" }],
+            ],
+          },
+        },
+      };
+    }
+    const olds = (conv.data.oldUnits ?? {}) as Record<string, { label: string; slot: number | null }>;
+    const old = olds[cb.unitId];
+    if (!old) {
+      deps.conversations.clear(chatId);
+      return { answer: "Кнопка устарела", message: { text: "Список узлов устарел — начни заново." } };
+    }
+    deps.conversations.advance(chatId, "swapto", { oldUnitId: cb.unitId, oldLabel: old.label, slot: old.slot });
+    return {
+      answer: old.label,
+      message: { text: `Снят ${old.label}. Куда увёз?`, keyboard: removedToKeyboard(partKind) },
+    };
+  }
+
+  if (cb.kind === "swapSpare") {
+    if (conv.step !== "swapnew") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
+    const spares = (conv.data.spares ?? {}) as Record<string, string>;
+    const label = spares[cb.unitId];
+    if (!label) {
+      deps.conversations.clear(chatId);
+      return { answer: "Кнопка устарела", message: { text: "Список склада устарел — начни заново." } };
+    }
+    deps.conversations.advance(chatId, "reason", { spareId: cb.unitId, spareLabel: label, newSerial: null });
+    return { answer: label, message: { text: `Поставлен ${label}. Почему меняли?`, keyboard: reasonKeyboard() } };
   }
 
   if (cb.kind === "slot") {
@@ -452,6 +574,30 @@ export async function handlePartReplaceCallback(
         },
       };
     }
+    // Замена по узлам (У3): если на автомате узлы этого вида заведены
+    // карточками, техник выбирает снятый по номеру — серийник не нужен.
+    // Нет карточек (старый автомат без автозаведения) — прежний путь.
+    const entityId = String(conv.data.entityId ?? "");
+    let installed: PartUnitRow[] = [];
+    try {
+      installed = (await deps.core.partsInstalled(entityId)).filter((u) => u.partKind === cb.part && !u.retiredAt);
+    } catch {
+      installed = [];
+    }
+    if (installed.length > 0) {
+      const map: Record<string, { label: string; slot: number | null }> = {};
+      const rows = installed.slice(0, 12).map((u) => {
+        map[u.id] = { label: u.label, slot: u.where?.slot ?? null };
+        return [{ text: unitButtonText(u), callback_data: `pt:old:${u.id}` }];
+      });
+      rows.push([{ text: "Нет в списке", callback_data: "pt:old:0" }]);
+      rows.push([{ text: "✖️ Отмена", callback_data: "pt:x" }]);
+      deps.conversations.advance(chatId, "swapold", { partKind: cb.part, oldUnits: map });
+      return {
+        answer: PART_LABELS[cb.part],
+        message: { text: `${PART_LABELS[cb.part]}. Какой узел снял?`, keyboard: { inline_keyboard: rows } },
+      };
+    }
     deps.conversations.advance(chatId, "serial", { partKind: cb.part });
     return {
       answer: PART_LABELS[cb.part],
@@ -486,29 +632,49 @@ export async function handlePartReplaceCallback(
   }
   const newSerial = conv.data.newSerial as string | null | undefined;
   const name = String(conv.data.entityName ?? "автомат");
+  // Замена по узлам (У3): снятый выбран по карточке — известны место и куда
+  // увезли; поставленный — запасной со склада или новый.
+  const oldUnitId = typeof conv.data.oldUnitId === "string" ? conv.data.oldUnitId : null;
+  const oldLabel = typeof conv.data.oldLabel === "string" ? conv.data.oldLabel : null;
+  const slot = typeof conv.data.slot === "number" ? conv.data.slot : undefined;
+  const removedTo = typeof conv.data.removedTo === "string" ? (conv.data.removedTo as PartLocation) : undefined;
+  const spareId = typeof conv.data.spareId === "string" ? conv.data.spareId : undefined;
+  const spareLabel = typeof conv.data.spareLabel === "string" ? conv.data.spareLabel : null;
 
   const res = await deps.core.swapPart({
     machineId: entityId,
     partKind,
+    ...(oldUnitId && slot !== undefined ? { slot } : {}),
     ...(newSerial ? { newSerial } : {}),
+    ...(spareId ? { partUnitId: spareId } : {}),
+    ...(removedTo ? { removedTo } : {}),
     reason: cb.reason,
     personId: person.id,
     ...masterClientKey("pt", conv.data, cb.reason),
     createdBy: `person:${person.id}`,
   });
 
-  const oldLine = res.removed?.serialNumber
-    ? `\n🔁 Снят: ${res.removed.serialNumber}`
-    : res.removed
-      ? "\n🔁 Снят прежний узел (номер не был записан)"
-      : "\n🆕 Первая установка — прежнего узла в реестре не было";
+  const oldLine = oldLabel
+    ? `\n🔁 Снят: ${oldLabel} → ${(PART_LOCATION_LABELS[removedTo ?? "warehouse"] ?? "склад").toLowerCase()}`
+    : res.removed?.serialNumber
+      ? `\n🔁 Снят: ${res.removed.serialNumber}`
+      : res.removed
+        ? "\n🔁 Снят прежний узел (номер не был записан)"
+        : "\n🆕 Первая установка — прежнего узла в реестре не было";
+  const newLine = spareLabel
+    ? `\n⬆️ Поставлен: ${spareLabel} (со склада)`
+    : newSerial
+      ? `\n🆔 Новый: ${newSerial}`
+      : oldLabel
+        ? "\n⬆️ Поставлен новый узел — номер ему дала система, наклейка ждёт в «🔢 Номера узлов»"
+        : "";
 
   return {
     answer: "Замена записана",
     message: {
       text:
-        `✅ Записал замену.\n🏷 ${name}\n🔧 ${PART_LABELS[partKind as PartKind]}` +
-        `${newSerial ? `\n🆔 Новый: ${newSerial}` : ""}${oldLine}\n` +
+        `✅ Записал замену.\n🏷 ${name}\n🔧 ${PART_LABELS[partKind as PartKind]}${slot !== undefined ? ` №${slot}` : ""}` +
+        `${newLine}${oldLine}\n` +
         `📋 Причина: ${SWAP_REASON_LABELS[cb.reason]}${photoHint()}`,
       keyboard: afterPhotoKeyboard(),
     },

@@ -9,6 +9,7 @@ import { isCoffeeConsumableTrigger } from "./coffee-returns";
 import { isCoffeeFixTrigger } from "./coffee-fix";
 import { isMyRecordsTrigger } from "./my-records";
 import { isPartNumberTrigger } from "./part-numbers";
+import { isPartWashTrigger } from "./part-wash";
 
 /**
  * Меню сотрудника: один реестр и для кнопок, и для текстовых триггеров.
@@ -107,6 +108,9 @@ export const STAFF_MENU: readonly MenuItem[] = [
   // Номера узлов — очередь «Наклеить номер» по одному (спека vendhub-parts,
   // R-PU-4): система присвоила, сотрудник наклеил и подтвердил.
   { id: "pnum", label: "🔢 Номера узлов", perm: "parts.number", ready: true, match: isPartNumberTrigger },
+  // Помыл узлы — снятые на мойку базы детали: мойка → сушка → склад (У3).
+  // Не путать с «🧼 Мойка бункера»: та про бункер на точке, эта про снятый узел.
+  { id: "pwash", label: "🚿 Помыл узлы", perm: "parts.move", ready: true, match: isPartWashTrigger },
   // Ряд 5 — периодическое.
   {
     id: "insp",

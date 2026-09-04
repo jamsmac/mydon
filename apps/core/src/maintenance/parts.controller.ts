@@ -120,6 +120,40 @@ export class ProvisionDto {
   actorRef?: string;
 }
 
+export class MovePartUnitDto {
+  @IsIn(["warehouse", "washing", "drying", "repair", "unknown"])
+  to!: "warehouse" | "washing" | "drying" | "repair" | "unknown";
+
+  @IsOptional() @IsUUID()
+  personId?: string;
+
+  @IsOptional() @IsUUID()
+  taskId?: string;
+
+  @IsOptional() @IsString() @MaxLength(2000)
+  note?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  clientKey?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actorRef?: string;
+}
+
+export class WashedPartUnitDto {
+  @IsOptional() @IsUUID()
+  personId?: string;
+
+  @IsOptional() @IsUUID()
+  taskId?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  clientKey?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actorRef?: string;
+}
+
 export class RetirePartUnitDto {
   @IsString() @MaxLength(500)
   reason!: string;
@@ -197,9 +231,30 @@ export class PartsController {
     return this.parts.spares(kind as PartKind, loc);
   }
 
+  /** Узлы вне автоматов по месту: мойка, сушка, склад, ремонт. */
+  @Get("at")
+  atLocation(@Query("location") location: string) {
+    const allowed = ["warehouse", "washing", "drying", "repair", "unknown"] as const;
+    if (!(allowed as readonly string[]).includes(location)) return [];
+    return this.parts.atLocation(location as (typeof allowed)[number]);
+  }
+
   @Get(":id")
   get(@Param("id", ParseUUIDPipe) id: string) {
     return this.parts.get(id);
+  }
+
+  /** Перемещение узла вне автомата: мойка → сушка → склад, склад ↔ ремонт. */
+  @Post(":id/move")
+  move(@Param("id", ParseUUIDPipe) id: string, @Body() dto: MovePartUnitDto) {
+    return this.parts.move(id, dto);
+  }
+
+  /** «Помыл»: с мойки на сушку или сразу на склад — по настройке PARTS_DRYING_STAGE. */
+  @Post(":id/washed")
+  async washed(@Param("id", ParseUUIDPipe) id: string, @Body() dto: WashedPartUnitDto) {
+    const to = await this.parts.afterWashLocation();
+    return this.parts.move(id, { ...dto, to, note: to === "drying" ? "помыт — на сушку" : "помыт — на склад" });
   }
 
   @Get(":id/history")

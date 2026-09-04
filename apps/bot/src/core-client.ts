@@ -1085,13 +1085,21 @@ export class CoreClient {
     partKind: string;
     slot?: number;
     newSerial?: string;
+    /** Карточка запасного узла со склада (У3). Пусто — Core заводит новый узел и даёт ему номер. */
+    partUnitId?: string;
+    /** Куда уходит снятый узел: мойка, склад, ремонт. Пусто — на склад. */
+    removedTo?: string;
     reason?: string;
     personId?: string;
     note?: string;
     /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
     clientKey?: string;
     createdBy?: string;
-  }): Promise<{ log: { id: string }; removed: { serialNumber: string | null } | null }> {
+  }): Promise<{
+    log: { id: string };
+    removed: { serialNumber: string | null; partUnitId?: string } | null;
+    installed?: { partUnitId: string; serialNumber: string | null };
+  }> {
     return this.request("/maintenance/part-swap", { method: "POST", body: JSON.stringify(input) });
   }
 
@@ -1159,6 +1167,27 @@ export class CoreClient {
   /** Запасные узлы вида: на складе (по умолчанию) или в указанном месте. */
   partsSpares(kind: string, location?: string): Promise<PartUnitRow[]> {
     return this.request(`/parts/spares?kind=${encodeURIComponent(kind)}${location ? `&location=${location}` : ""}`);
+  }
+
+  /** Узлы вне автоматов по месту: мойка, сушка, склад, ремонт. */
+  partsAt(location: "warehouse" | "washing" | "drying" | "repair" | "unknown"): Promise<PartUnitRow[]> {
+    return this.request(`/parts/at?location=${location}`);
+  }
+
+  /** Перемещение узла вне автомата: сушка → склад, склад ↔ ремонт. */
+  partMove(
+    id: string,
+    input: { to: "warehouse" | "washing" | "drying" | "repair" | "unknown"; personId?: string; note?: string; clientKey?: string; actorRef?: string },
+  ): Promise<{ unit: PartUnitRow; from: string | null; logId: string | null }> {
+    return this.request(`/parts/${id}/move`, { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** «Помыл»: с мойки на сушку или сразу на склад — решает настройка Core (PARTS_DRYING_STAGE). */
+  partWashed(
+    id: string,
+    input: { personId?: string; clientKey?: string; actorRef?: string },
+  ): Promise<{ unit: PartUnitRow; from: string | null; logId: string | null }> {
+    return this.request(`/parts/${id}/washed`, { method: "POST", body: JSON.stringify(input) });
   }
 
   /** Проставить / подтвердить / исправить номер узла. */
