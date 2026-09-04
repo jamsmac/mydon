@@ -687,6 +687,37 @@ describe("Вендинг Core: сводный закуп (§5.4–5.5)", () => {
       assert.ok(!s.items.some((i) => i.product === "Montella" || i.product === "18+"), "сырые имена не должны утекать в items");
     },
   );
+
+  /** Одна дверь (R-GS-1, R-GS-4): и purchase(), и plan() читают склад через `goodsStock()` леджера. */
+  function ledgerGoodsStub() {
+    const goods = {
+      warehouseId: "wh-1",
+      asOf: new Date("2026-09-01T01:00:00Z"),
+      rows: [
+        { productName: "Montella", productId: "p-m", cardId: "c-m", quantity: 1, countedAt: new Date("2026-09-01T01:00:00Z"), isActive: true },
+        { productName: "Pulpy", productId: "p-p", cardId: null, quantity: null, countedAt: null, isActive: true },
+      ],
+    };
+    return { source: async () => "ledger", goodsStock: async () => goods } as never;
+  }
+
+  it("закуп в ledger: остаток из одной двери вычитается, «неизвестно» не входит в buy (R-GS-3, R-GS-4)", async () => {
+    const svc = new VendingService(purchaseDb(slots, sales, products, []), undefined, ledgerGoodsStub());
+    const s = await svc.purchase();
+    const montella = s.items.find((i) => i.product === "Montella")!;
+    assert.equal(montella.stock, 1, "остаток из леджера вычтен");
+    assert.equal(montella.buy, 3, "need 4 − stock 1");
+    const pulpy = [...s.items, ...s.excludedNoSales, ...s.excludedByRule].find((i) => i.product === "Pulpy");
+    assert.equal(pulpy?.stock ?? 0, 0, "неизвестный остаток в расчёт не входит");
+  });
+
+  it("план в ledger: quantity null не вычитается и даёт предупреждение stock_unknown_card; asOf — из одной двери (R-GS-3)", async () => {
+    const svc = new VendingService(purchaseDb(slots, sales, products, []), undefined, ledgerGoodsStub());
+    const plan = await svc.plan();
+    assert.equal(plan.stock.unknown, 1);
+    assert.ok(plan.warnings.some((w) => w.code === "stock_unknown_card" && /Pulpy/.test(w.message)));
+    assert.equal(plan.stock.asOf, "2026-09-01T01:00:00.000Z");
+  });
 });
 
 describe("Вендинг Core: отправка закупа на утверждение (§5.7)", () => {
@@ -4016,5 +4047,38 @@ describe("Серия отказов сбора (R-P5b-8)", () => {
     const тревоги = м.events.filter((e) => e.type === "ourvend.sync_failed_streak");
     assert.equal(тревоги.length, 1);
     assert.equal(тревоги[0]!.payload.streak, 3);
+  });
+});
+
+describe("Остатки товаров в режиме ledger — одна дверь (R-GS-1, R-GS-4)", () => {
+  const goods = {
+    warehouseId: "wh-1",
+    asOf: new Date("2026-09-01T01:00:00Z"),
+    rows: [
+      { productName: "Bounty", productId: "p-b", cardId: "c-b", quantity: 0, countedAt: null, isActive: true },
+      { productName: "Pulpy", productId: "p-p", cardId: null, quantity: null, countedAt: null, isActive: true },
+      { productName: "Snickers", productId: "p-s", cardId: "c-s", quantity: 40, countedAt: new Date("2026-09-01T01:00:00Z"), isActive: true },
+    ],
+  };
+  const ledger = (source: "table" | "ledger") => ({ source: async () => source, goodsStock: async () => goods }) as never;
+
+  it("stockLevels(): в ledger — все активные позиции прайса, включая ноль и «неизвестно»", async () => {
+    const svc = new VendingService(readDb([]), undefined, ledger("ledger"));
+    const rows = await svc.stockLevels();
+    assert.deepEqual(rows.map((r) => [r.product, r.quantity, r.countedAt]), [
+      ["Bounty", 0, null],
+      ["Pulpy", null, null],
+      ["Snickers", 40, "2026-09-01T01:00:00.000Z"],
+    ]);
+  });
+
+  it("stockLevels(): в table — таблица, как раньше, одна дверь не вызывается", async () => {
+    const stub = { ...goods, rows: [] };
+    let called = 0;
+    const l = { source: async () => "table", goodsStock: async () => { called += 1; return stub; } } as never;
+    const svc = new VendingService(readDb([{ productName: "Snickers", quantity: 5, countedAt: new Date("2026-08-20T00:00:00Z") } as never]), undefined, l);
+    const rows = await svc.stockLevels();
+    assert.equal(called, 0);
+    assert.deepEqual(rows.map((r) => [r.product, r.quantity]), [["Snickers", 5]]);
   });
 });

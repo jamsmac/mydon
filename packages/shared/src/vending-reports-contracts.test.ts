@@ -473,7 +473,7 @@ describe("Формы усушки и плана закупа объявлены 
   it("PurchasePlan: ровно те поля, что читают Core, бот и панель", () => {
     const план: PurchasePlan = {
       generatedAt: "2026-08-25T09:00:00.000Z",
-      stock: { asOf: "2026-08-22T09:40:00.000Z", totalBefore: 120, use: 40, back: 12, totalAfter: 92, stale: false, unmatched: 0 },
+      stock: { asOf: "2026-08-22T09:40:00.000Z", totalBefore: 120, use: 40, back: 12, totalAfter: 92, stale: false, unmatched: 0, unknown: 0 },
       summary: {
         items: [], excludedNoSales: [], excludedByRule: [], noPrice: [],
         allocation: "purchase-first",
@@ -486,6 +486,6 @@ describe("Формы усушки и плана закупа объявлены 
       warnings: [{ code: "sales_partial", message: "автомата нет в свежем батче продаж" }],
     };
     assert.deepEqual(Object.keys(план).sort(), ["generatedAt", "machines", "routeConfigured", "stock", "summary", "warnings"]);
-    assert.deepEqual(Object.keys(план.stock).sort(), ["asOf", "back", "stale", "totalAfter", "totalBefore", "unmatched", "use"]);
+    assert.deepEqual(Object.keys(план.stock).sort(), ["asOf", "back", "stale", "totalAfter", "totalBefore", "unknown", "unmatched", "use"]);
   });
 });

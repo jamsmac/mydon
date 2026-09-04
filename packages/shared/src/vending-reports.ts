@@ -1426,7 +1426,9 @@ export interface PlanWarning {
     /** Автомата с потребностью нет в свежем батче продаж — «нет продаж» по нему ложное (I3/П5b-1). */
     | "sales_partial"
     /** В настройке маршрута есть серийники, которых нет среди автоматов (A4/UX#16). */
-    | "route_unknown_serial";
+    | "route_unknown_serial"
+    /** Позиции прайса без карточки склада: остаток неизвестен, в расчёт не вошёл (R-GS-3). */
+    | "stock_unknown_card";
   message: string;
 }
 
@@ -1450,6 +1452,8 @@ export interface PurchasePlan {
      * входят — иначе «станет N» не сходилось бы с арифметикой плана.
      */
     unmatched: number;
+    /** Позиции прайса с неизвестным остатком (нет карточки склада / склад не выбран, R-GS-3). */
+    unknown: number;
   };
   summary: PurchaseSummary;
   machines: PlanMachine[];
