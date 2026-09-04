@@ -92,6 +92,9 @@ export default async function PartsPage({
           <Link href="/parts/count" className="btn">
             Инвентаризация узлов
           </Link>
+          <Link href="/parts/washing" className="btn">
+            Мойка и сушка
+          </Link>
         </p>
       </section>
 
