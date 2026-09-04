@@ -786,8 +786,9 @@ git commit -m "feat(core): список остатков и план закуп�
 ```ts
 describe("Повтор заливки в режиме ledger — остаток по леджеру, а не по таблице (R-GS-4)", () => {
   it("повтор по clientKey отдаёт остаток леджера и не читает vending_stock", async () => {
-    const selects: Record<string, unknown>[][] = [[{ id: "r1", clientKey: "rf-1" }]]; // existing refill; строки таблицы в очереди НЕТ
-    let tableReads = 0;
+    // В очереди select — только сама заливка. Если бы повтор читал таблицу, следующий select
+    // отдал бы [] и stockLeft стал бы null; 37 доказывает, что остаток пришёл из леджера.
+    const selects: Record<string, unknown>[][] = [[{ id: "r1", clientKey: "rf-1" }]];
     const db = stubDb({ refillInsert: [], selects, inserted: [] });
     const ledger = {
       source: async () => "ledger",
@@ -799,7 +800,6 @@ describe("Повтор заливки в режиме ledger — остаток 
     const res = await new RefillService(db, vending, ledger).create({ machineSerial: "M1", productName: "Snickers", qty: 3, clientKey: "rf-1" });
     assert.equal(res.duplicate, true);
     assert.equal(res.stockLeft, 37);
-    assert.equal(tableReads, 0);
   });
 });
 ```
@@ -925,7 +925,7 @@ git commit -m "feat(core): мёртвый сток и повтор заливк�
 
 **Interfaces:**
 - Consumes: `VendingParityReport` (Task 2) как JSON.
-- Produces: компонент `ParityStatusPill({ status, diff, cardId })` в `apps/cc/src/components/parity-status.tsx`.
+- Produces: компонент `ParityStatusPill({ status, diff })` в `apps/cc/src/components/parity-status.tsx`.
 
 - [ ] **Step 1: Тип в панели**
 
@@ -1057,8 +1057,9 @@ git commit -m "feat(cc,core): сверка товаров — статусы с�
   // (в) Пустая таблица при заполненном леджере → сверка НЕ зелёная
   await run(`delete from vending_stock`);
   parity = await ledger.parity();
-  assert.equal(parity.missingRows, 3, "все три позиции без строки");
+  assert.equal(parity.missingRows, 2, "Snickers и Bounty без строки; Pulpy без карточки — это no_card, не no_row");
   assert.equal(parity.mismatched, 2, "Snickers 40 и Bounty 20 в леджере — расхождения; Pulpy без карточки — нет");
+  assert.equal(parity.products, 3, "все три позиции прайса в сверке");
   assert.equal(parity.rows.find((r) => r.productName === "Snickers").status, "no_row");
   assert.equal(parity.rows.find((r) => r.productName === "Pulpy").status, "no_card");
   // (г) В режиме ledger список остатков и план не зависят от таблицы
