@@ -2346,8 +2346,17 @@ export interface PartUnitPeriod extends MachinePart {
 export interface PartsProvisionReport {
   dryRun: boolean;
   template: { kind: string; count: number }[];
-  machines: { machineId: string; machineName: string; created: string[]; existing: number; hopperSetsFound: number }[];
+  machines: {
+    machineId: string;
+    machineName: string;
+    created: string[];
+    existing: number;
+    hopperSetsFound: number;
+    /** Стоявшим без номера присвоен номер: «Миксер №1 → M-006». */
+    numbered: string[];
+  }[];
   createdTotal: number;
+  numberedTotal: number;
 }
 
 export interface MaintenanceLogRow {
