@@ -2,6 +2,7 @@ import Link from "next/link";
 import { core, CoreUnavailable, type VendingParity } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { VendingCardsButton } from "../../../components/vending-cards-button";
+import { ParityStatusPill } from "../../../components/parity-status";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +33,7 @@ export default async function StockGoodsPage() {
         <p>
           Источник остатка сейчас: <b>{ledgerMode ? "леджер (катовер сделан)" : "строка vending_stock (двойная запись)"}</b>.
           {parity.warehouseId ? "" : " Центральный склад не выбран — пометь склад «приём по умолчанию» в карточке склада."}{" "}
-          Расхождений: {parity.mismatched} · без карточки реестра: {parity.unlinked} · товаров: {parity.rows.length}.
+          Позиций прайса: {parity.products} · без строки в таблице: {parity.missingRows} · расхождений: {parity.mismatched} · без карточки реестра: {parity.unlinked}.
         </p>
       </div>
 
@@ -49,8 +50,8 @@ export default async function StockGoodsPage() {
         </div>
         {parity.rows.length === 0 ? (
           <div className="empty">
-            <b>Строк склада нет</b>
-            Первый пересчёт — из бота («🧮 Инвентаризация», вкладка «Товары») или импортом `tools/import-warehouse-json.mjs`.
+            <b>Позиций прайса нет</b>
+            Заведи товары в прайсе вендинга.
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
@@ -67,16 +68,10 @@ export default async function StockGoodsPage() {
                 {parity.rows.map((r) => (
                   <tr key={r.productName}>
                     <td>{r.cardId ? <Link href={`/card/${r.cardId}`}>{r.productName}</Link> : r.productName}</td>
-                    <td className="mono">{r.table}</td>
+                    <td className="mono">{r.table ?? "—"}</td>
                     <td className="mono">{r.ledger ?? "—"}</td>
                     <td>
-                      {r.diff === null ? (
-                        <span className="pill act">{r.cardId ? "склад не выбран" : "нет карточки"}</span>
-                      ) : r.diff === 0 ? (
-                        <span className="pill ok">сходится</span>
-                      ) : (
-                        <span className="pill bad">{r.diff > 0 ? `+${r.diff}` : r.diff}</span>
-                      )}
+                      <ParityStatusPill status={r.status} diff={r.diff} />
                     </td>
                   </tr>
                 ))}
@@ -86,6 +81,7 @@ export default async function StockGoodsPage() {
         )}
         <p className="hint" style={{ marginTop: 8 }}>
           Разница = строка − леджер. Ненулевая после первого пересчёта значит ручное движение мимо проекции или заливку до заведения карточки — второй пересчёт выравнивает.
+          Строка «нет строки в таблице» с ненулевым леджером — расхождение: таблицу восстанавливает пересчёт из бота или импорт.
         </p>
       </section>
     </>
