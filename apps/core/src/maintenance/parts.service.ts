@@ -1,17 +1,33 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { attachment, auditLog, entity, machinePart, maintenanceLog, partUnit } from "@mydon/db";
+import {
+  attachment,
+  auditLog,
+  coffeeContainerTare,
+  coffeeRefill,
+  entity,
+  machineCard,
+  machinePart,
+  machinePlacement,
+  maintenanceLog,
+  partUnit,
+} from "@mydon/db";
 import {
   actorKindOf,
+  DEFAULT_COFFEE_PARTS_TEMPLATE,
   formatInventoryNo,
   isValidInventoryNo,
   normalizeInventoryNo,
+  parsePartsTemplate,
   partLabel,
+  planMissingParts,
   suggestInventoryNo,
   type PartAttention,
   type PartKind,
+  type PartsTemplateEntry,
 } from "@mydon/shared";
 import { and, asc, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { settingValue } from "../system/settings";
 import { todayInTz } from "./maintenance.service";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -89,6 +105,31 @@ export interface AssignNumberInput {
   /** Сотрудник подтверждает: наклейка на детали. */
   confirmLabel?: boolean;
   actorRef?: string;
+}
+
+export interface ProvisionInput {
+  /** Только посчитать, ничего не писать. */
+  dryRun?: boolean;
+  /** Ограничить автоматами (иначе — все кофейные). */
+  machineIds?: string[];
+  actorRef?: string;
+}
+
+export interface ProvisionMachineReport {
+  machineId: string;
+  machineName: string;
+  created: string[];
+  /** Узлов уже стояло — пропущено. */
+  existing: number;
+  /** Бункеры, у которых набор найден по последней заливке. */
+  hopperSetsFound: number;
+}
+
+export interface ProvisionReport {
+  dryRun: boolean;
+  template: PartsTemplateEntry[];
+  machines: ProvisionMachineReport[];
+  createdTotal: number;
 }
 
 /** Подпись узла: вид + номер, «без номера» — честно словами. */
@@ -366,6 +407,22 @@ export class PartsService {
       if ((values.setNumber !== undefined || values.hopperPosition !== undefined) && before.partKind !== "hopper") {
         throw new BadRequestException("Набор и позиция — только у бункера");
       }
+      // Бункер получил набор и позицию, а номер ещё системный счётчик и наклейки
+      // нет — переименовываем в H-<набор>-<позиция> (R-PU-2): наклейка будет одна.
+      const setNumber = values.setNumber !== undefined ? values.setNumber : before.setNumber;
+      const hopperPosition = values.hopperPosition !== undefined ? values.hopperPosition : before.hopperPosition;
+      if (
+        before.partKind === "hopper" &&
+        setNumber &&
+        hopperPosition &&
+        before.labelPending &&
+        before.inventoryNo !== null &&
+        /^H-\d+$/.test(before.inventoryNo)
+      ) {
+        const wanted = formatInventoryNo("hopper", 0, { setNumber, position: hopperPosition });
+        const busy = await this.takenBy(tx, wanted, id);
+        if (!busy) values.inventoryNo = wanted;
+      }
       const [after] = await tx.update(partUnit).set(values).where(eq(partUnit.id, id)).returning();
       await tx.insert(auditLog).values({
         actorKind: actorKindOf(actorRef),
@@ -491,6 +548,172 @@ export class PartsService {
       )
       .orderBy(asc(partUnit.inventoryNo));
     return this.toViews(this.db, rows.map((r) => r.unit));
+  }
+
+  /** Шаблон состава кофейного автомата: настройка PARTS_TEMPLATE_COFFEE, иначе дефолт. */
+  async coffeeTemplate(): Promise<PartsTemplateEntry[]> {
+    const raw = await settingValue(this.db, "PARTS_TEMPLATE_COFFEE");
+    return parsePartsTemplate(raw) ?? [...DEFAULT_COFFEE_PARTS_TEMPLATE];
+  }
+
+  /**
+   * Какой набор бункеров стоит на автомате по позициям — из последней заливки
+   * точки, где автомат стоит сейчас (набор записывается техником при заливке).
+   * Пусто — набор неизвестен, бункеры заведутся без набора (номер-счётчик).
+   */
+  private async hopperSetsOf(tx: Tx | Db, machineId: string): Promise<Map<number, number>> {
+    const [placement] = await tx
+      .select({ locationId: machinePlacement.locationId })
+      .from(machinePlacement)
+      .where(and(eq(machinePlacement.entityId, machineId), isNull(machinePlacement.endDate)))
+      .limit(1);
+    if (!placement) return new Map();
+    const rows = await tx
+      .select({ position: coffeeRefill.position, containerNumber: coffeeRefill.containerNumber, enteredDate: coffeeRefill.enteredDate })
+      .from(coffeeRefill)
+      .where(and(eq(coffeeRefill.locationId, placement.locationId), sql`${coffeeRefill.containerNumber} is not null`))
+      .orderBy(desc(coffeeRefill.enteredDate), desc(coffeeRefill.createdAt))
+      .limit(200);
+    const out = new Map<number, number>();
+    for (const r of rows) if (!out.has(r.position) && r.containerNumber !== null) out.set(r.position, r.containerNumber);
+    return out;
+  }
+
+  /**
+   * Автозаведение узлов по составу (R-PU-3). Идемпотентно по (автомат, вид,
+   * слот): повторный прогон ничего не дублирует. Номера присваивает система,
+   * наклейка — за сотрудником (очередь «Наклеить номер»). Бункер с известным
+   * набором получает номер H-<набор>-<позиция> и тару из матрицы; если такой
+   * бункер уже заведён и свободен — ставится он, а не дубль.
+   */
+  async provision(input: ProvisionInput = {}): Promise<ProvisionReport> {
+    const template = await this.coffeeTemplate();
+    const actorRef = input.actorRef ?? "owner";
+    const machines = await this.db
+      .select({ id: entity.id, name: entity.name })
+      .from(machineCard)
+      .innerJoin(entity, eq(entity.id, machineCard.entityId))
+      .where(
+        and(
+          eq(machineCard.kind, "coffee"),
+          ...(input.machineIds && input.machineIds.length > 0 ? [inArray(entity.id, input.machineIds)] : []),
+        ),
+      )
+      .orderBy(asc(entity.name));
+
+    const report: ProvisionReport = { dryRun: input.dryRun === true, template, machines: [], createdTotal: 0 };
+    for (const m of machines) {
+      const line = await this.db.transaction(async (tx) => {
+        const open = await tx
+          .select({ kind: machinePart.partKind, slot: machinePart.slot })
+          .from(machinePart)
+          .where(and(eq(machinePart.machineId, m.id), isNull(machinePart.removedOn)));
+        const missing = planMissingParts(template, open);
+        const sets = missing.some((x) => x.kind === "hopper") ? await this.hopperSetsOf(tx, m.id) : new Map<number, number>();
+        const created: string[] = [];
+        for (const slotKey of missing) {
+          const hopperSet = slotKey.kind === "hopper" && slotKey.slot !== null ? sets.get(slotKey.slot) : undefined;
+          let unit: PartUnitRow | null = null;
+          let closeOffMachine: string | null = null;
+          let setTaken = false;
+          if (hopperSet !== undefined) {
+            // Бункер набора: уже заведён? Свободный (лежит на складе/мойке или
+            // без периода) ставим его; стоящий на другом автомате — набор
+            // занят, заводим бункер без набора, чтобы не выдумать дубль.
+            const [existing] = await tx
+              .select()
+              .from(partUnit)
+              .where(and(eq(partUnit.setNumber, hopperSet), eq(partUnit.hopperPosition, slotKey.slot!), isNull(partUnit.retiredAt)))
+              .limit(1);
+            if (existing) {
+              const [open] = await tx
+                .select({ id: machinePart.id, machineId: machinePart.machineId })
+                .from(machinePart)
+                .where(and(eq(machinePart.partUnitId, existing.id), isNull(machinePart.removedOn)))
+                .limit(1);
+              if (open?.machineId) setTaken = true;
+              else {
+                unit = existing;
+                closeOffMachine = open?.id ?? null;
+              }
+            }
+          }
+          if (input.dryRun) {
+            created.push(
+              unit
+                ? `${partUnitLabel(unit)} (уже заведён, свободен — будет поставлен)`
+                : `${partLabel(slotKey.kind)}${slotKey.slot !== null ? ` №${slotKey.slot}` : ""}${hopperSet !== undefined ? ` · набор ${hopperSet}` : ""}`,
+            );
+            continue;
+          }
+          if (!unit) {
+            let tare: number | null = null;
+            if (hopperSet !== undefined && !setTaken) {
+              const [t] = await tx
+                .select({ tareWeight: coffeeContainerTare.tareWeight })
+                .from(coffeeContainerTare)
+                .where(and(eq(coffeeContainerTare.containerNumber, hopperSet), eq(coffeeContainerTare.position, slotKey.slot!)))
+                .limit(1);
+              tare = t?.tareWeight ?? null;
+            }
+            const view = await this.create(
+              {
+                partKind: slotKey.kind,
+                ...(hopperSet !== undefined && !setTaken ? { setNumber: hopperSet, hopperPosition: slotKey.slot! } : {}),
+                ...(tare !== null ? { tareWeight: tare } : {}),
+                origin: "auto",
+                labelPending: true,
+                note: setTaken
+                  ? `заведено автоматически по составу автомата; бункер набора ${hopperSet} стоит на другом автомате — набор не присвоен`
+                  : "заведено автоматически по составу автомата",
+                createdBy: actorRef,
+              },
+              tx,
+            );
+            unit = view;
+          }
+          if (closeOffMachine) {
+            await tx
+              .update(machinePart)
+              .set({ removedOn: todayInTz(), note: "закрыт автозаведением: узел поставлен на автомат по составу" })
+              .where(eq(machinePart.id, closeOffMachine));
+          }
+          await tx.insert(machinePart).values({
+            partUnitId: unit.id,
+            machineId: m.id,
+            location: "machine",
+            partKind: slotKey.kind,
+            slot: slotKey.slot,
+            serialNumber: unit.serialNumber,
+            model: unit.model,
+            installedOn: todayInTz(),
+            warrantyUntil: unit.warrantyUntil,
+            note: "период открыт автозаведением по составу автомата",
+            createdBy: actorRef,
+          });
+          created.push(partUnitLabel(unit));
+        }
+        return {
+          machineId: m.id,
+          machineName: m.name,
+          created,
+          existing: open.length,
+          hopperSetsFound: sets.size,
+        } satisfies ProvisionMachineReport;
+      });
+      report.machines.push(line);
+      report.createdTotal += line.created.length;
+    }
+    if (!input.dryRun && report.createdTotal > 0) {
+      await this.db.insert(auditLog).values({
+        actorKind: actorKindOf(actorRef),
+        actorRef,
+        action: "parts.provisioned",
+        target: "machine_card:coffee",
+        after: { createdTotal: report.createdTotal, machines: report.machines.length },
+      });
+    }
+    return report;
   }
 
   /** Записи журнала по узлу — мойки, ремонты, снятия. */

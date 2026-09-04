@@ -55,6 +55,14 @@ import {
   startMyRecords,
 } from "./my-records";
 import {
+  PART_NUMBER_FLOW,
+  handlePartNumberCallback,
+  handlePartNumberText,
+  parsePartNumberCallback,
+  partNumberStepHint,
+  startPartNumbers,
+} from "./part-numbers";
+import {
   handleRefillCallback,
   handleRefillCount,
   handleRefillProductText,
@@ -434,6 +442,12 @@ ${reply.text}`;
     }
     return { reply: { text: coffeeRefillStepHint(conv.step) } };
   }
+  if (conv?.flow === PART_NUMBER_FLOW) {
+    if (conv.step === "number" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await handlePartNumberText(chatId, clean, person, deps) };
+    }
+    return { reply: { text: partNumberStepHint(conv.step) } };
+  }
   if (conv?.flow === "part-replace") {
     if (conv.step === "object" && clean.length > 0 && !clean.startsWith("/")) {
       return { reply: await searchObjects(clean, deps) };
@@ -628,6 +642,8 @@ async function startMenuItem(
       return { reply: await startMyRecords(person, deps) };
     case "part":
       return { reply: await startPartReplace(chatId, person, deps) };
+    case "pnum":
+      return { reply: await startPartNumbers(chatId, person, deps) };
     case "clean":
       return { reply: await startClean(chatId, person, deps) };
     case "insp":
@@ -913,6 +929,14 @@ export async function handleStaffCallback(
   if (partCb) {
     const res = await handlePartReplaceCallback(chatId, partCb, person, deps);
     return unwrap(res);
+  }
+
+  const pnCb = parsePartNumberCallback(data);
+  if (pnCb) {
+    if (!can(person.roles, "parts.number")) {
+      return { answer: "Недоступно", message: "«🔢 Номера узлов» тебе сейчас недоступно. Скажи владельцу." };
+    }
+    return unwrap(await handlePartNumberCallback(chatId, pnCb, person, deps));
   }
 
   const cleanCb = parseCleanCallback(data);

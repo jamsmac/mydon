@@ -2220,6 +2220,61 @@ export interface MaintenancePlan {
   isActive: boolean;
 }
 
+// ── Узлы автоматов: карточки part_unit (спека vendhub-parts, У1–У2) ──
+
+export type PartAttention = "no_number" | "label_pending" | "unknown_location" | "no_tare" | "no_photo";
+
+export interface PartUnit {
+  id: string;
+  partKind: string;
+  inventoryNo: string | null;
+  labelPending: boolean;
+  serialNumber: string | null;
+  model: string | null;
+  manufacturer: string | null;
+  setNumber: number | null;
+  hopperPosition: number | null;
+  tareWeight: number | null;
+  purchaseDate: string | null;
+  purchasePrice: string | null;
+  warrantyUntil: string | null;
+  retiredAt: string | null;
+  retiredReason: string | null;
+  origin: "auto" | "manual" | "count" | "backfill";
+  note: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Где узел сейчас — открытый период; null — местонахождение неизвестно. */
+  where: {
+    location: string;
+    machineId: string | null;
+    machineName: string | null;
+    slot: number | null;
+    since: string;
+    periodId: string;
+  } | null;
+  attention: PartAttention[];
+  label: string;
+  photoCount: number;
+}
+
+export interface PartsQueue {
+  counts: Record<PartAttention, number>;
+  items: PartUnit[];
+}
+
+export interface PartUnitPeriod extends MachinePart {
+  machineName: string | null;
+}
+
+export interface PartsProvisionReport {
+  dryRun: boolean;
+  template: { kind: string; count: number }[];
+  machines: { machineId: string; machineName: string; created: string[]; existing: number; hopperSetsFound: number }[];
+  createdTotal: number;
+}
+
 export interface MaintenanceLogRow {
   id: string;
   entityId: string;
@@ -2325,6 +2380,32 @@ export const core = {
     get<MachinePart[]>(`/maintenance/parts?machineId=${machineId}`),
   /** Узлы вне автоматов: склад, мойка, сушка, ремонт. */
   machinePartsStorage: () => get<MachinePart[]>("/maintenance/parts/storage"),
+  // ── Узлы: карточки, очередь, номера ──
+  parts: (q: { kind?: string; location?: string; machineId?: string; attention?: boolean; retired?: boolean; q?: string } = {}) => {
+    const p = new URLSearchParams();
+    if (q.kind) p.set("kind", q.kind);
+    if (q.location) p.set("location", q.location);
+    if (q.machineId) p.set("machineId", q.machineId);
+    if (q.attention) p.set("attention", "1");
+    if (q.retired) p.set("retired", "1");
+    if (q.q) p.set("q", q.q);
+    const s = p.toString();
+    return get<PartUnit[]>(`/parts${s ? `?${s}` : ""}`);
+  },
+  partsQueue: () => get<PartsQueue>("/parts/queue"),
+  part: (id: string) => get<PartUnit>(`/parts/${id}`),
+  partUnitHistory: (id: string) => get<PartUnitPeriod[]>(`/parts/${id}/history`),
+  partLogs: (id: string) => get<MaintenanceLogRow[]>(`/parts/${id}/logs`),
+  partsInstalled: (machineId: string) => get<PartUnit[]>(`/parts/installed?machineId=${machineId}`),
+  partsSpares: (kind: string) => get<PartUnit[]>(`/parts/spares?kind=${encodeURIComponent(kind)}`),
+  partsTemplate: () => get<{ kind: string; count: number }[]>("/parts/template"),
+  partSetNumber: (id: string, input: { inventoryNo?: string; confirmLabel?: boolean; actorRef?: string }) =>
+    send<PartUnit>(`/parts/${id}/number`, "POST", input),
+  partUpdate: (id: string, patch: Record<string, unknown>) => send<PartUnit>(`/parts/${id}`, "PATCH", patch),
+  partRetire: (id: string, reason: string, actorRef = "owner") =>
+    send<PartUnit>(`/parts/${id}/retire`, "POST", { reason, actorRef }),
+  partsProvision: (input: { dryRun?: boolean; machineIds?: string[]; actorRef?: string }) =>
+    send<PartsProvisionReport>("/parts/provision", "POST", input),
   /** История экземпляров по серийнику и/или модели — все периоды в обе стороны. */
   partHistory: (q: { serial?: string; model?: string }) => {
     const qs = new URLSearchParams();

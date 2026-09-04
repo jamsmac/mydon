@@ -10,6 +10,8 @@
  * из панели реально перекрывает то, что задано в окружении контейнера.
  */
 
+import { DEFAULT_COFFEE_PARTS_TEMPLATE, validatePartsTemplate } from "@mydon/shared";
+
 export type ConfigKind = "select" | "text" | "number" | "bool";
 
 export interface ConfigSpec {
@@ -156,6 +158,46 @@ export function meteredLlmRouteEnabled(enabled: string, route: string): boolean 
 }
 
 export const CONFIG_SPECS: ConfigSpec[] = [
+  // ── Узлы автоматов VendHub (спека 2026-09-04-vendhub-parts-inventory) ──
+  {
+    key: "PARTS_TEMPLATE_COFFEE",
+    label: "Состав кофейного автомата (узлы)",
+    kind: "text",
+    fallback: JSON.stringify(DEFAULT_COFFEE_PARTS_TEMPLATE),
+    placeholder: '[{"kind":"mixer","count":4},{"kind":"hopper","count":8},…]',
+    help:
+      "Какие узлы заводятся автомату при автозаведении (R-PU-3): вид и количество. " +
+      "По умолчанию — слово владельца 04.09.2026: 4 миксера, гриндер, варка, 8 бункеров, фильтр воды. " +
+      "Правка только ДОВОДИТ недостающие узлы существующим автоматам, ничего не удаляет.",
+    validate: validatePartsTemplate,
+  },
+  {
+    key: "PARTS_COUNT_PHOTO_REQUIRED",
+    label: "Инвентаризация узлов: фото обязательно",
+    kind: "bool",
+    fallback: "1",
+    help: "1 — сотрудник обязан снять узел; пропустить фото можно только с причиной, и узел попадает в очередь «без фото». 0 — фото по желанию.",
+    validate: oneOf(["0", "1"]),
+  },
+  {
+    key: "PARTS_DRYING_STAGE",
+    label: "Узлы: этап «сушка» после мойки",
+    kind: "bool",
+    fallback: "1",
+    help: "1 — помытый узел идёт на сушку, затем на склад (два шага). 0 — сразу на склад.",
+    validate: oneOf(["0", "1"]),
+  },
+  {
+    key: "COFFEE_REFILL_CONSUMES",
+    label: "Кофе: заливка списывает ингредиент со склада",
+    kind: "bool",
+    fallback: "1",
+    help:
+      "1 — заливка бункера списывает со склада ровно то, что известно точно: число пачек × вес пачки, " +
+      "или разницу весов «после − до»; без этих данных расход не считается и заливка помечается. " +
+      "0 — склад по кофе ведётся только приходами, возвратами и инвентаризацией, как до среза У5.",
+    validate: oneOf(["0", "1"]),
+  },
   // ── Доступ: ужесточение owner-identity (P5, R-P5-4/5/6) ──
   {
     key: "OWNER_IDENTITY_ENFORCED",

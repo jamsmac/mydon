@@ -82,6 +82,23 @@ export interface TaskRow {
 }
 
 /** Строка сводки сроков — то же, что отдаёт Core в /maintenance/due. */
+/** Карточка узла с вычисленным состоянием — как её отдаёт Core `/parts` (спека vendhub-parts). */
+export interface PartUnitRow {
+  id: string;
+  partKind: string;
+  inventoryNo: string | null;
+  labelPending: boolean;
+  serialNumber: string | null;
+  setNumber: number | null;
+  hopperPosition: number | null;
+  tareWeight: number | null;
+  retiredAt: string | null;
+  where: { location: string; machineId: string | null; machineName: string | null; slot: number | null; since: string } | null;
+  attention: string[];
+  label: string;
+  photoCount: number;
+}
+
 export interface MaintenanceDueRow {
   planId: string;
   targetId: string;
@@ -1121,6 +1138,35 @@ export class CoreClient {
     createdBy?: string;
   }): Promise<{ log: { id: string }; removed: { serialNumber: string | null } }> {
     return this.request("/maintenance/part-remove", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  // ── Узлы: карточки, очередь, номера (спека vendhub-parts, У1–У3) ──
+
+  /** Очередь внимания к узлам: без номера, наклеить, неизвестно где, без тары, без фото. */
+  partsQueue(): Promise<{ counts: Record<string, number>; items: PartUnitRow[] }> {
+    return this.request("/parts/queue");
+  }
+
+  partUnit(id: string): Promise<PartUnitRow> {
+    return this.request(`/parts/${id}`);
+  }
+
+  /** Узлы, стоящие на автомате сейчас. */
+  partsInstalled(machineId: string): Promise<PartUnitRow[]> {
+    return this.request(`/parts/installed?machineId=${machineId}`);
+  }
+
+  /** Запасные узлы вида: на складе (по умолчанию) или в указанном месте. */
+  partsSpares(kind: string, location?: string): Promise<PartUnitRow[]> {
+    return this.request(`/parts/spares?kind=${encodeURIComponent(kind)}${location ? `&location=${location}` : ""}`);
+  }
+
+  /** Проставить / подтвердить / исправить номер узла. */
+  partSetNumber(
+    id: string,
+    input: { inventoryNo?: string; confirmLabel?: boolean; actorRef?: string },
+  ): Promise<PartUnitRow> {
+    return this.request(`/parts/${id}/number`, { method: "POST", body: JSON.stringify(input) });
   }
 
   /** Что подходит к сроку. Статус считается на чтении, нигде не хранится. */

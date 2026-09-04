@@ -8,6 +8,7 @@ import { isRefillTrigger } from "./staff-refill";
 import { isCoffeeConsumableTrigger } from "./coffee-returns";
 import { isCoffeeFixTrigger } from "./coffee-fix";
 import { isMyRecordsTrigger } from "./my-records";
+import { isPartNumberTrigger } from "./part-numbers";
 
 /**
  * Меню сотрудника: один реестр и для кнопок, и для текстовых триггеров.
@@ -103,6 +104,9 @@ export const STAFF_MENU: readonly MenuItem[] = [
     ready: true,
     match: (t) => /^(замен|поменял|поставил нов)/i.test(t.trim()),
   },
+  // Номера узлов — очередь «Наклеить номер» по одному (спека vendhub-parts,
+  // R-PU-4): система присвоила, сотрудник наклеил и подтвердил.
+  { id: "pnum", label: "🔢 Номера узлов", perm: "parts.number", ready: true, match: isPartNumberTrigger },
   // Ряд 5 — периодическое.
   {
     id: "insp",

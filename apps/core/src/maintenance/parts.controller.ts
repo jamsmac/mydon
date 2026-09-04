@@ -1,5 +1,7 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsIn,
   IsInt,
@@ -7,6 +9,7 @@ import {
   IsNumberString,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   MaxLength,
   Min,
@@ -106,6 +109,17 @@ export class AssignNumberDto {
   actorRef?: string;
 }
 
+export class ProvisionDto {
+  @IsOptional() @IsBoolean()
+  dryRun?: boolean;
+
+  @IsOptional() @IsArray() @ArrayMaxSize(200) @IsUUID(undefined, { each: true })
+  machineIds?: string[];
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actorRef?: string;
+}
+
 export class RetirePartUnitDto {
   @IsString() @MaxLength(500)
   reason!: string;
@@ -155,6 +169,18 @@ export class PartsController {
   async suggest(@Query("kind") kind: string) {
     if (!(PART_KINDS as readonly string[]).includes(kind)) return { inventoryNo: null };
     return { inventoryNo: await this.parts.suggestNumber(kind as PartKind) };
+  }
+
+  /** Автозаведение узлов по составу кофейного автомата (R-PU-3); dryRun — только план. */
+  @Post("provision")
+  provision(@Body() dto: ProvisionDto) {
+    return this.parts.provision(dto);
+  }
+
+  /** Шаблон состава (настройка PARTS_TEMPLATE_COFFEE или дефолт). */
+  @Get("template")
+  template() {
+    return this.parts.coffeeTemplate();
   }
 
   /** Узлы, стоящие на автомате сейчас. */
