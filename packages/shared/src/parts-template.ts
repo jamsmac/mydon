@@ -90,6 +90,38 @@ export function planMissingParts(
   return missing;
 }
 
+/** Узел, стоящий на автомате: ссылка на карточку + вид/слот + номер (null — номера нет). */
+export interface StandingPartRef extends PartSlotKey {
+  unitId: string;
+  inventoryNo: string | null;
+}
+
+/**
+ * Каким узлам автомата система должна ПРИСВОИТЬ номер (R-PU-2, У2).
+ *
+ * Бэкфилл 0084 восстановил узлы из журнала обслуживания без инвентарных
+ * номеров: они занимают слоты по составу, но в очередь «Наклеить номер» не
+ * попадают — очередь видит только `label_pending`. Автозаведение обязано
+ * довести и их: шаблонный вид, номера нет → номер от системы + наклейка.
+ * Порядок — как в шаблоне, внутри вида по слоту: номера выдаются подряд и
+ * предсказуемо (миксер №1 → M-001, №2 → M-002…). Узлы видов вне шаблона
+ * не трогаем: шаблон — слово владельца о составе, а не о всём парке.
+ */
+export function planUnnumberedParts(
+  template: readonly PartsTemplateEntry[],
+  standing: readonly StandingPartRef[],
+): StandingPartRef[] {
+  const out: StandingPartRef[] = [];
+  for (const entry of template) {
+    if (entry.count <= 0) continue;
+    const mine = standing
+      .filter((u) => u.kind === entry.kind && u.inventoryNo === null)
+      .sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0) || a.unitId.localeCompare(b.unitId));
+    out.push(...mine);
+  }
+  return out;
+}
+
 /** Сколько узлов даёт шаблон целиком (для приёмки: очередь после заведения = N × автоматов). */
 export function templateSize(template: readonly PartsTemplateEntry[]): number {
   return template.reduce((n, e) => n + Math.max(0, e.count), 0);

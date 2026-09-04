@@ -20,6 +20,7 @@ import {
   parsePartsTemplate,
   partLabel,
   planMissingParts,
+  planUnnumberedParts,
   suggestInventoryNo,
   type PartAttention,
   type PartKind,
@@ -123,6 +124,8 @@ export interface ProvisionMachineReport {
   existing: number;
   /** Бункеры, у которых набор найден по последней заливке. */
   hopperSetsFound: number;
+  /** Стоявшим БЕЗ номера (бэкфилл журнала) присвоен номер: «Миксер №1 → M-001». */
+  numbered: string[];
 }
 
 export interface ProvisionReport {
@@ -130,6 +133,8 @@ export interface ProvisionReport {
   template: PartsTemplateEntry[];
   machines: ProvisionMachineReport[];
   createdTotal: number;
+  /** Сколько стоявших узлов получили номер (и попали в очередь наклеек). */
+  numberedTotal: number;
 }
 
 /** Подпись узла: вид + номер, «без номера» — честно словами. */
@@ -612,71 +617,221 @@ export class PartsService {
       )
       .orderBy(asc(entity.name));
 
-    const report: ProvisionReport = { dryRun: input.dryRun === true, template, machines: [], createdTotal: 0 };
+    const report: ProvisionReport = { dryRun: input.dryRun === true, template, machines: [], createdTotal: 0, numberedTotal: 0 };
+
+    // НОМЕРА ЗА ОДИН ПРОГОН — ОДНИМ СПИСКОМ. Семя читается РАЗ и БЕЗ фильтра по
+    // виду: уникальность номера в базе глобальная, поэтому `M-003`, вписанный
+    // сотрудником на карточку фильтра, обязан сдвинуть серию миксеров. Дальше
+    // список пополняется выданным здесь же — иначе предпросмотр печатал бы
+    // M-001 каждому миксеру подряд (dry-run ничего не бронирует), а боевой
+    // прогон выдавал бы другие номера. `suggestInventoryNo` разбирает только
+    // свою серию, чужие номера в списке ему не мешают.
+    const taken: string[] = (
+      await this.db
+        .select({ no: partUnit.inventoryNo })
+        .from(partUnit)
+        .where(sql`${partUnit.inventoryNo} is not null`)
+    ).map((r) => r.no!);
+    // Бункеры набора, занятые ранее в ЭТОМ прогоне. Автоматы идут отдельными
+    // транзакциями, и в dry-run не пишется ничего: без этого списка два
+    // автомата, у которых последняя заливка называет один набор (набор уехал
+    // на мойку и вернулся на другую точку), получили бы В ПРЕДПРОСМОТРЕ один и
+    // тот же номер наклейки на два разных бункера.
+    const claimedSets = new Set<string>();
+    /**
+     * Следующий свободный номер серии.
+     *
+     * Занятость проверяется в ОБОИХ режимах и на каждой попытке: между
+     * автоматами номер мог занять сотрудник из бота или панели (там номер
+     * считается тем же `max+1`). Занят — берём следующий, а НЕ рвём прогон:
+     * иначе половина парка осталась бы закоммиченной, а вторая — нет.
+     */
+    const drawNumber = async (kind: PartKind, tx: Tx, exceptId?: string): Promise<string> => {
+      for (let attempt = 0; attempt < 64; attempt += 1) {
+        const no = suggestInventoryNo(kind, taken);
+        taken.push(no);
+        if (!(await this.takenBy(tx, no, exceptId))) return no;
+      }
+      throw new ConflictException(`Не удалось подобрать свободный номер серии «${partLabel(kind)}» — проверьте номера вручную`);
+    };
     for (const m of machines) {
       const line = await this.db.transaction(async (tx) => {
         const open = await tx
-          .select({ kind: machinePart.partKind, slot: machinePart.slot })
+          .select({ kind: machinePart.partKind, slot: machinePart.slot, unitId: machinePart.partUnitId })
           .from(machinePart)
           .where(and(eq(machinePart.machineId, m.id), isNull(machinePart.removedOn)));
         const missing = planMissingParts(template, open);
+
+        // Стоящие БЕЗ номера (бэкфилл 0084 восстановил узлы из журнала без
+        // инвентарных номеров). В очереди внимания они видны как «без номера»,
+        // но НАКЛЕИТЬ на них нечего: номера нет, а список печати (фильтр
+        // «наклеить» = label_pending) их не показывает. Система присваивает
+        // номер и ставит в очередь наклеек — как при заведении узла.
+        const unnumberedRows = open.length
+          ? await tx
+              .select({
+                id: partUnit.id,
+                // Вид берём с КАРТОЧКИ узла, а не с периода: если они разошлись,
+                // серия номера обязана соответствовать карточке — её и увидит
+                // сотрудник на наклейке.
+                partKind: partUnit.partKind,
+                labelPending: partUnit.labelPending,
+                setNumber: partUnit.setNumber,
+                hopperPosition: partUnit.hopperPosition,
+              })
+              .from(partUnit)
+              .where(and(inArray(partUnit.id, open.map((o) => o.unitId)), isNull(partUnit.inventoryNo)))
+          : [];
+        const unnumberedById = new Map(unnumberedRows.map((r) => [r.id, r]));
+        const toNumber = planUnnumberedParts(
+          template,
+          open
+            .filter((o) => unnumberedById.has(o.unitId))
+            .map((o) => ({ unitId: o.unitId, kind: o.kind, slot: o.slot, inventoryNo: null })),
+        );
+        const numbered: string[] = [];
+        for (const ref of toNumber) {
+          const row = unnumberedById.get(ref.unitId)!;
+          const kind = row.partKind;
+          let no: string | null = null;
+          if (kind === "hopper" && row.setNumber !== null && row.hopperPosition !== null) {
+            const bySetNo = formatInventoryNo("hopper", 0, { setNumber: row.setNumber, position: row.hopperPosition });
+            // Номер набора мог занять другой бункер (в том числе СПИСАННЫЙ:
+            // уникальный индекс списанные не исключает) — тогда серия-счётчик.
+            if (!(await this.takenBy(tx, bySetNo, ref.unitId))) no = bySetNo;
+          }
+          no ??= await drawNumber(kind, tx, ref.unitId);
+          if (!input.dryRun) {
+            // `inventory_no is null` в условии — застава от гонки: номер могли
+            // присвоить в панели или боте между выборкой и записью, и чужой
+            // номер (возможно, уже наклеенный) перезаписывать нельзя.
+            const [updated] = await tx
+              .update(partUnit)
+              .set({ inventoryNo: no, labelPending: true, updatedAt: new Date() })
+              .where(and(eq(partUnit.id, ref.unitId), isNull(partUnit.inventoryNo)))
+              .returning({ id: partUnit.id });
+            if (!updated) continue;
+            // Аудит НА КАЖДЫЙ номер и ВНУТРИ транзакции автомата — как у
+            // «Присвоить номер» в панели. Сводная запись ниже пишется после
+            // всего парка: упади прогон на тринадцатом автомате, и первые
+            // двенадцать остались бы переименованными без следа.
+            await tx.insert(auditLog).values({
+              actorKind: actorKindOf(actorRef),
+              actorRef,
+              action: "parts.number_assigned",
+              target: ref.unitId,
+              before: { inventoryNo: null, labelPending: row.labelPending },
+              after: { inventoryNo: no, labelPending: true, source: "provision", machineId: m.id },
+            });
+          }
+          numbered.push(`${partLabel(kind)}${ref.slot !== null ? ` №${ref.slot}` : ""} → ${no}`);
+        }
         const sets = missing.some((x) => x.kind === "hopper") ? await this.hopperSetsOf(tx, m.id) : new Map<number, number>();
         const created: string[] = [];
         for (const slotKey of missing) {
           const hopperSet = slotKey.kind === "hopper" && slotKey.slot !== null ? sets.get(slotKey.slot) : undefined;
           let unit: PartUnitRow | null = null;
           let closeOffMachine: string | null = null;
-          let setTaken = false;
+          /** Почему набор не присвоен — причина идёт в примечание узла. */
+          let setBlocked: "other_machine" | "same_run" | "retired" | "number_busy" | null = null;
+          const setKey = hopperSet !== undefined && slotKey.slot !== null ? `${hopperSet}:${slotKey.slot}` : null;
           if (hopperSet !== undefined) {
-            // Бункер набора: уже заведён? Свободный (лежит на складе/мойке или
-            // без периода) ставим его; стоящий на другом автомате — набор
-            // занят, заводим бункер без набора, чтобы не выдумать дубль.
-            const [existing] = await tx
-              .select()
-              .from(partUnit)
-              .where(and(eq(partUnit.setNumber, hopperSet), eq(partUnit.hopperPosition, slotKey.slot!), isNull(partUnit.retiredAt)))
-              .limit(1);
-            if (existing) {
-              const [open] = await tx
-                .select({ id: machinePart.id, machineId: machinePart.machineId })
-                .from(machinePart)
-                .where(and(eq(machinePart.partUnitId, existing.id), isNull(machinePart.removedOn)))
+            if (setKey !== null && claimedSets.has(setKey)) {
+              // Этот набор·позицию уже забрал автомат раньше в этом прогоне.
+              setBlocked = "same_run";
+            } else {
+              // Бункер набора: уже заведён? Свободный (лежит на складе/мойке или
+              // без периода) ставим его; стоящий на другом автомате — набор
+              // занят, заводим бункер без набора, чтобы не выдумать дубль.
+              //
+              // СПИСАННЫЕ ТОЖЕ СМОТРИМ. Уникальность `(set_number,
+              // hopper_position)` в базе списанные не исключает: с фильтром по
+              // `retired_at` поиск не находил списанный бункер набора, прогон
+              // заводил второй с тем же набором и вся транзакция автомата
+              // падала на индексе. Списанный бункер держит набор — заводим
+              // новый по серии-счётчику и говорим об этом в примечании.
+              const [existing] = await tx
+                .select()
+                .from(partUnit)
+                .where(and(eq(partUnit.setNumber, hopperSet), eq(partUnit.hopperPosition, slotKey.slot!)))
                 .limit(1);
-              if (open?.machineId) setTaken = true;
-              else {
-                unit = existing;
-                closeOffMachine = open?.id ?? null;
+              if (existing?.retiredAt) setBlocked = "retired";
+              else if (existing) {
+                const [open] = await tx
+                  .select({ id: machinePart.id, machineId: machinePart.machineId })
+                  .from(machinePart)
+                  .where(and(eq(machinePart.partUnitId, existing.id), isNull(machinePart.removedOn)))
+                  .limit(1);
+                if (open?.machineId) setBlocked = "other_machine";
+                else {
+                  unit = existing;
+                  closeOffMachine = open?.id ?? null;
+                }
               }
             }
           }
+          // Номер нового узла — из списка прогона (см. drawNumber), а не из базы
+          // в момент вставки: иначе предпросмотр и боевой прогон печатают разные
+          // номера, как только предыдущий автомат что-то завёл. Бункер с набором
+          // берёт номер от набора — но только если этот номер свободен: поиск
+          // выше пропускает СПИСАННЫЕ бункеры, а уникальный индекс — нет.
+          let bySet = hopperSet !== undefined && setBlocked === null && unit === null;
+          let plannedNo: string | null = null;
+          if (unit) {
+            if (setKey !== null) claimedSets.add(setKey);
+          } else if (bySet) {
+            const bySetNo = formatInventoryNo("hopper", 0, { setNumber: hopperSet!, position: slotKey.slot! });
+            if (await this.takenBy(tx, bySetNo)) {
+              bySet = false;
+              setBlocked = "number_busy";
+              plannedNo = await drawNumber(slotKey.kind, tx);
+            } else {
+              plannedNo = bySetNo;
+              if (setKey !== null) claimedSets.add(setKey);
+            }
+          } else {
+            plannedNo = await drawNumber(slotKey.kind, tx);
+          }
+          /** Набор, который реально уйдёт в карточку узла (null — номер-счётчик). */
+          const assignedSet: number | null = bySet ? hopperSet! : null;
+          const setNote =
+            setBlocked === "other_machine"
+              ? `; бункер набора ${hopperSet} стоит на другом автомате — набор не присвоен`
+              : setBlocked === "same_run"
+                ? `; бункер набора ${hopperSet} уже занят другим автоматом в этом прогоне — набор не присвоен`
+                : setBlocked === "retired"
+                  ? `; бункер набора ${hopperSet} списан — набор не присвоен`
+                  : setBlocked === "number_busy"
+                    ? `; номер набора ${hopperSet} занят другим бункером — набор не присвоен`
+                    : "";
           if (input.dryRun) {
             created.push(
               unit
                 ? `${partUnitLabel(unit)} (уже заведён, свободен — будет поставлен)`
-                : `${partLabel(slotKey.kind)}${slotKey.slot !== null ? ` №${slotKey.slot}` : ""}${hopperSet !== undefined ? ` · набор ${hopperSet}` : ""}`,
+                : `${partLabel(slotKey.kind)}${slotKey.slot !== null ? ` №${slotKey.slot}` : ""}${hopperSet !== undefined ? ` · набор ${hopperSet}` : ""} → ${plannedNo}`,
             );
             continue;
           }
           if (!unit) {
             let tare: number | null = null;
-            if (hopperSet !== undefined && !setTaken) {
+            if (assignedSet !== null) {
               const [t] = await tx
                 .select({ tareWeight: coffeeContainerTare.tareWeight })
                 .from(coffeeContainerTare)
-                .where(and(eq(coffeeContainerTare.containerNumber, hopperSet), eq(coffeeContainerTare.position, slotKey.slot!)))
+                .where(and(eq(coffeeContainerTare.containerNumber, assignedSet), eq(coffeeContainerTare.position, slotKey.slot!)))
                 .limit(1);
               tare = t?.tareWeight ?? null;
             }
             const view = await this.create(
               {
                 partKind: slotKey.kind,
-                ...(hopperSet !== undefined && !setTaken ? { setNumber: hopperSet, hopperPosition: slotKey.slot! } : {}),
+                ...(assignedSet !== null
+                  ? { setNumber: assignedSet, hopperPosition: slotKey.slot! }
+                  : { inventoryNo: plannedNo! }),
                 ...(tare !== null ? { tareWeight: tare } : {}),
                 origin: "auto",
                 labelPending: true,
-                note: setTaken
-                  ? `заведено автоматически по составу автомата; бункер набора ${hopperSet} стоит на другом автомате — набор не присвоен`
-                  : "заведено автоматически по составу автомата",
+                note: `заведено автоматически по составу автомата${setNote}`,
                 createdBy: actorRef,
               },
               tx,
@@ -710,18 +865,20 @@ export class PartsService {
           created,
           existing: open.length,
           hopperSetsFound: sets.size,
+          numbered,
         } satisfies ProvisionMachineReport;
       });
       report.machines.push(line);
       report.createdTotal += line.created.length;
+      report.numberedTotal += line.numbered.length;
     }
-    if (!input.dryRun && report.createdTotal > 0) {
+    if (!input.dryRun && (report.createdTotal > 0 || report.numberedTotal > 0)) {
       await this.db.insert(auditLog).values({
         actorKind: actorKindOf(actorRef),
         actorRef,
         action: "parts.provisioned",
         target: "machine_card:coffee",
-        after: { createdTotal: report.createdTotal, machines: report.machines.length },
+        after: { createdTotal: report.createdTotal, numberedTotal: report.numberedTotal, machines: report.machines.length },
       });
     }
     return report;

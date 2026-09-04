@@ -6,13 +6,19 @@ import { provisionParts } from "../app/parts/actions";
 
 interface Report {
   dryRun: boolean;
-  machines: { machineName: string; created: string[]; existing: number; hopperSetsFound: number }[];
+  machines: { machineName: string; created: string[]; existing: number; hopperSetsFound: number; numbered?: string[] }[];
   createdTotal: number;
+  numberedTotal?: number;
 }
 
 /**
  * Автозаведение узлов по составу (R-PU-3): сначала предпросмотр — что заведём
  * каждому автомату, потом заведение. Повтор безопасен: ничего не дублируется.
+ *
+ * Работы у прогона ДВЕ: завести недостающие узлы и присвоить номер стоящим без
+ * номера (узлы из бэкфилла журнала). Кнопка и текст считают обе: на полном
+ * парке заводить нечего, а номеров может ждать полторы сотни узлов — «состав
+ * полный» без второй половины было бы неправдой.
  */
 export function ProvisionButton({ compact = false }: { compact?: boolean }) {
   const router = useRouter();
@@ -39,21 +45,36 @@ export function ProvisionButton({ compact = false }: { compact?: boolean }) {
         <button type="button" className={compact ? "btn sm" : "btn"} disabled={pending} onClick={() => run(true)}>
           {pending ? "Считаю…" : "Посмотреть, что заведётся"}
         </button>
-        {report?.dryRun && report.createdTotal > 0 && (
+        {report?.dryRun && report.createdTotal + (report.numberedTotal ?? 0) > 0 && (
           <button type="button" className={compact ? "btn sm primary" : "btn primary"} disabled={pending} onClick={() => run(false)}>
-            Завести {report.createdTotal} узлов
+            {[
+              report.createdTotal > 0 ? `Завести ${report.createdTotal} узлов` : null,
+              (report.numberedTotal ?? 0) > 0 ? `присвоить ${report.numberedTotal} номеров` : null,
+            ]
+              .filter(Boolean)
+              .join(" и ")}
           </button>
         )}
       </span>
       {error && <span className="err-text">{error}</span>}
       {report && (
         <span className="hint">
-          {report.dryRun ? "План: " : "Заведено: "}
-          {report.createdTotal === 0
-            ? "нечего заводить — состав полный"
+          {report.dryRun ? "План: " : "Сделано: "}
+          {report.createdTotal + (report.numberedTotal ?? 0) === 0
+            ? "нечего заводить и нумеровать — состав полный, номера у всех"
             : report.machines
-                .filter((m) => m.created.length > 0)
-                .map((m) => `${m.machineName} — ${m.created.length}${m.hopperSetsFound ? ` (наборов найдено ${m.hopperSetsFound})` : ""}`)
+                .filter((m) => m.created.length > 0 || (m.numbered?.length ?? 0) > 0)
+                .map((m) =>
+                  [
+                    m.machineName,
+                    [
+                      m.created.length > 0 ? `${m.created.length} завести` : null,
+                      (m.numbered?.length ?? 0) > 0 ? `${m.numbered!.length} номеров` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(", ") + (m.hopperSetsFound ? ` (наборов найдено ${m.hopperSetsFound})` : ""),
+                  ].join(" — "),
+                )
                 .join(" · ")}
         </span>
       )}

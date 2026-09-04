@@ -4,6 +4,7 @@ import {
   DEFAULT_COFFEE_PARTS_TEMPLATE,
   parsePartsTemplate,
   planMissingParts,
+  planUnnumberedParts,
   templateSize,
   validatePartsTemplate,
 } from "./parts-template";
@@ -50,5 +51,20 @@ describe("Состав автомата (R-PU-3)", () => {
     assert.equal(parsePartsTemplate('[{"kind":"mixer","count":1},{"kind":"mixer","count":2}]'), null, "повтор вида");
     assert.equal(validatePartsTemplate(""), null, "пусто — сброс к дефолту");
     assert.match(validatePartsTemplate("[1]") ?? "", /нужен JSON/);
+  });
+  it("бэкфилл без номера: шаблонным узлам без inventory_no система присвоит номер — в порядке шаблона и слота", () => {
+    const plan = planUnnumberedParts(DEFAULT_COFFEE_PARTS_TEMPLATE, [
+      { unitId: "u-mixer-3", kind: "mixer", slot: 3, inventoryNo: null },
+      { unitId: "u-mixer-1", kind: "mixer", slot: 1, inventoryNo: null },
+      { unitId: "u-mixer-2", kind: "mixer", slot: 2, inventoryNo: "M-017" },
+      { unitId: "u-grinder", kind: "grinder", slot: null, inventoryNo: null },
+      { unitId: "u-other", kind: "other", slot: null, inventoryNo: null },
+    ]);
+    assert.deepEqual(
+      plan.map((p) => p.unitId),
+      ["u-mixer-1", "u-mixer-3", "u-grinder"],
+      "с номером и вне шаблона — не трогаем; миксеры раньше гриндера, по слоту",
+    );
+    assert.deepEqual(planUnnumberedParts(DEFAULT_COFFEE_PARTS_TEMPLATE, []), []);
   });
 });

@@ -39,15 +39,20 @@ async function main() {
   const report = await res.json();
   console.log(`Состав: ${report.template.map((t) => `${t.kind}×${t.count}`).join(", ")}`);
   for (const m of report.machines) {
-    const head = `${m.machineName}: стоит ${m.existing}, ${DRY ? "заведём" : "заведено"} ${m.created.length}`;
-    console.log(m.created.length ? `\n${head}${m.hopperSetsFound ? ` (наборов бункеров найдено ${m.hopperSetsFound})` : ""}` : head);
+    const numbered = m.numbered ?? [];
+    const head =
+      `${m.machineName}: стоит ${m.existing}, ${DRY ? "заведём" : "заведено"} ${m.created.length}` +
+      (numbered.length ? `, без номера ${numbered.length} — ${DRY ? "присвоим" : "присвоено"}` : "");
+    const busy = m.created.length + numbered.length;
+    console.log(busy ? `\n${head}${m.hopperSetsFound ? ` (наборов бункеров найдено ${m.hopperSetsFound})` : ""}` : head);
     for (const c of m.created) console.log(`  + ${c}`);
+    for (const n of numbered) console.log(`  № ${n}`);
   }
   console.log("");
   console.log(
     DRY
-      ? `Предпросмотр: автоматов ${report.machines.length}, узлов к заведению ${report.createdTotal}. Ничего не записано.`
-      : `Готово: автоматов ${report.machines.length}, заведено узлов ${report.createdTotal}. Дальше — очередь «Наклеить номер» в панели /parts/queue.`,
+      ? `Предпросмотр: автоматов ${report.machines.length}, узлов к заведению ${report.createdTotal}, номеров к присвоению ${report.numberedTotal ?? 0}. Ничего не записано.`
+      : `Готово: автоматов ${report.machines.length}, заведено узлов ${report.createdTotal}, присвоено номеров ${report.numberedTotal ?? 0}. Дальше — очередь «Наклеить номер» в панели /parts/queue.`,
   );
 }
 
