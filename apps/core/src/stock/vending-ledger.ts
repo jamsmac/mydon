@@ -132,7 +132,10 @@ export async function lastCountedByProduct(tx: Writer): Promise<{ byId: Map<stri
     .select({
       productId: vendingStockCount.productId,
       productName: vendingStockCount.productName,
-      last: sql<string>`max(${vendingStockCount.dt})`,
+      // `::text` уравнивает драйверы: postgres-js отдаёт `date` JS-объектом
+      // `Date` (String(...) даёт «Wed Sep 02 2026 …», .slice(0,10) — мусор,
+      // и дальше Invalid Date), pglite — строкой; текстом оба возвращают строку.
+      last: sql<string>`max(${vendingStockCount.dt})::text`,
     })
     .from(vendingStockCount)
     .where(видимая)

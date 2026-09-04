@@ -61,5 +61,13 @@ try {
   assert.equal((await vending.stockLevels()).find((r) => r.product === "Snickers").quantity, 42, "после катовера — леджер");
   const r3 = await refill.create({ machineSerial: "M1", productName: "Snickers", qty: 2, clientKey: "rf-2" });
   assert.equal(r3.stockLeft, 40, "остаток в ответе — по леджеру");
+
+  // Дата пересчёта из истории (R-GS-6): max(dt) приходит Date-объектом у postgres-js и строкой у pglite — ::text уравнивает
+  const gs = await ledger.goodsStock();
+  const snick = gs.rows.find((r) => r.productName === "Snickers");
+  assert.ok(snick.countedAt instanceof Date && !Number.isNaN(snick.countedAt.getTime()), "countedAt — настоящая дата, не Invalid Date");
+  assert.equal(snick.countedAt.toISOString().slice(0, 10), "2026-09-01", "дата пересчёта — 01.09, тот же день по ISO");
+  assert.equal(gs.asOf.toISOString().slice(0, 10), "2026-09-01");
+
   console.log(`У6 (${ENGINE}): карточки для прайса, товары в леджере, двойная запись (пересчёт, заливка), сверка, катовер ✔`);
 } finally { await close(); }
