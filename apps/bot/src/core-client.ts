@@ -1686,7 +1686,15 @@ export class CoreClient {
     returnedDate: string;
     locationNote?: string;
     createdBy?: string;
-  }): Promise<{ id: string }> {
+  }): Promise<{
+    id: string;
+    /** Приход на склад (У5): нетто по таре узла; `reason` — почему не проведён. Старый Core полей не отдаёт. */
+    unitLabel?: string | null;
+    netWeight?: number | null;
+    ingredientName?: string | null;
+    stockMovementId?: string | null;
+    reason?: string | null;
+  }> {
     return this.request("/coffee/container-return", {
       method: "POST",
       body: JSON.stringify(input),

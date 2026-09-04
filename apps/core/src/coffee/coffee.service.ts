@@ -307,6 +307,9 @@ export interface ContainerReturnRow {
   returnedDate: string;
   locationNote: string | null;
   createdBy: string | null;
+  /** Узел-бункер и приход на склад (У5). NULL — записи до среза или без тары. */
+  partUnitId: string | null;
+  stockMovementId: string | null;
 }
 
 export interface RecordWashInput {
@@ -1295,10 +1298,13 @@ export class CoffeeService {
       position: r.position,
       containerNumber: r.containerNumber,
       weight: r.weight,
-      netWeight: netWeight(r.weight, tareByKey.get(`${r.containerNumber}:${r.position}`) ?? null),
+      // Нетто, зафиксированное при возврате (У5), важнее пересчёта по матрице: тара могла поменяться.
+      netWeight: r.netWeight ?? netWeight(r.weight, tareByKey.get(`${r.containerNumber}:${r.position}`) ?? null),
       returnedDate: r.returnedDate,
       locationNote: r.locationNote,
       createdBy: r.createdBy,
+      partUnitId: r.partUnitId,
+      stockMovementId: r.stockMovementId,
     }));
   }
 

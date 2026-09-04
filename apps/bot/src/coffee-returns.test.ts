@@ -75,6 +75,31 @@ describe("Возвраты наборов в боте — привычный ф�
     assert.match(reply.text, /Кпп остатки/);
   });
 
+  it("ответ говорит, что оприходовано на склад, а что нет и почему (У5)", async () => {
+    let n = 0;
+    const { core } = stubCore({
+      recordContainerReturn: async (input: Record<string, unknown>) => {
+        n += 1;
+        return input.containerNumber === 26
+          ? { id: `ret-${n}`, unitLabel: "H-26-1", netWeight: 709, ingredientName: "Кофе зерновой", stockMovementId: "mv-1", reason: null }
+          : { id: `ret-${n}`, unitLabel: "H-7-7", netWeight: null, ingredientName: null, stockMovementId: null, reason: "нет тары" };
+      },
+    });
+    const parsed = tryParseContainerReturns("1. 026. 1119\n7. 007. 1116");
+    assert.ok(parsed);
+    const reply = await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
+    assert.match(reply.text, /📦 На склад: H-26-1: \+709 г Кофе зерновой\./);
+    assert.match(reply.text, /⚠️ Не оприходовано — H-7-7: нет тары/);
+  });
+
+  it("старый Core без полей прихода — ответ прежний, без строк про склад", async () => {
+    const { core } = stubCore();
+    const parsed = tryParseContainerReturns("1. 026. 1119");
+    assert.ok(parsed);
+    const reply = await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
+    assert.ok(!/На склад|Не оприходовано/.test(reply.text));
+  });
+
   it("кривые строки не теряются молча — в ответе предупреждение", async () => {
     const { core, calls } = stubCore();
     const parsed = tryParseContainerReturns("1. 026. 1119\n9. 030. 700");

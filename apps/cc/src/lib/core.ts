@@ -486,6 +486,9 @@ export interface CoffeeContainerReturnRow {
   returnedDate: string;
   locationNote: string | null;
   createdBy: string | null;
+  /** Узел-бункер и приход на склад (У5); старый Core полей не отдаёт. */
+  partUnitId?: string | null;
+  stockMovementId?: string | null;
 }
 
 /** Расход по наборам: сводка точки за период (заливка − возврат через тару). */

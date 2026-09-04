@@ -379,6 +379,91 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
     return row;
   }
 
+  /** Склад приёма по умолчанию — для автоматических приходов (возврат бункера) и списаний. */
+  async defaultWarehouseId(): Promise<string | null> {
+    return (await this.defaultWarehouse())?.id ?? null;
+  }
+
+  /**
+   * Возврат остатка со снятого бункера — приход (R-PU-9): партия «возврат из
+   * бункера H-27-1», открытая сегодня (FEFO берёт её первой), и движение
+   * `return` с ключом идемпотентности. Без цены: остаток уже был куплен.
+   */
+  async returnToStock(input: {
+    ingredientId: string;
+    warehouseId: string;
+    qty: number;
+    unit: string;
+    dt: string;
+    batchCode: string;
+    note?: string | null;
+    clientKey: string;
+    createdBy?: string | null;
+  }): Promise<{ movement: MovementRow; batchId: string; replay: boolean }> {
+    if (!(input.qty > 0)) throw new BadRequestException("Количество возврата должно быть больше нуля");
+    if (!isUnit(input.unit)) throw new BadRequestException(`Единица «${input.unit}» неизвестна`);
+    const ing = await this.cardOfType(input.ingredientId, "ingredient");
+    await this.cardOfType(input.warehouseId, "warehouse");
+    const base = this.baseUnitOf((ing.attrs ?? {}) as Record<string, unknown>);
+    if (base && input.unit !== base && convertQty(input.qty, input.unit, base) === null) {
+      throw new BadRequestException(`«${input.unit}» не перевести в базовую единицу ингредиента «${base}»`);
+    }
+    const [dup] = await this.db.select().from(stockMovement).where(eq(stockMovement.clientKey, input.clientKey)).limit(1);
+    if (dup) return { movement: dup, batchId: dup.batchId ?? "", replay: true };
+
+    return this.db.transaction(async (tx) => {
+      const [batch] = await tx
+        .insert(stockBatch)
+        .values({
+          ingredientId: input.ingredientId,
+          warehouseId: input.warehouseId,
+          batchCode: input.batchCode,
+          receivedOn: input.dt,
+          qtyReceived: String(input.qty),
+          unit: input.unit,
+          // Открыта сразу: это вскрытый остаток, а не запечатанная пачка — уходит первым.
+          openedOn: input.dt,
+          // opened_by — uuid сотрудника; актор вида person:<uuid> даёт его, «owner» — нет.
+          openedBy: /^person:([0-9a-f-]{36})$/.exec(input.createdBy ?? "")?.[1] ?? null,
+          baseUnitSnapshot: base,
+          source: "coffee-return",
+          note: input.note ?? null,
+        })
+        .returning();
+      const [movement] = await tx
+        .insert(stockMovement)
+        .values({
+          kind: "return",
+          ingredientId: input.ingredientId,
+          warehouseId: input.warehouseId,
+          batchId: batch.id,
+          dt: input.dt,
+          qty: String(input.qty),
+          unit: input.unit,
+          source: "coffee-return",
+          note: input.note ?? null,
+          clientKey: input.clientKey,
+          createdBy: input.createdBy ?? "owner",
+        })
+        .onConflictDoNothing({ target: stockMovement.clientKey })
+        .returning();
+      if (!movement) throw new BadRequestException("Повтор возврата ещё записывается — попробуй ещё раз через минуту");
+      return { movement, batchId: batch.id, replay: false };
+    });
+  }
+
+  /** Убрать возврат-приход целиком: движение и его партию (ошибочная строка возврата). */
+  async removeReturn(movementId: string): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      const [row] = await tx.delete(stockMovement).where(and(eq(stockMovement.id, movementId), eq(stockMovement.kind, "return"))).returning();
+      if (!row) return;
+      if (row.batchId) {
+        const [other] = await tx.select({ id: stockMovement.id }).from(stockMovement).where(eq(stockMovement.batchId, row.batchId)).limit(1);
+        if (!other) await tx.delete(stockBatch).where(eq(stockBatch.id, row.batchId));
+      }
+    });
+  }
+
   /** Удалить движение (правка ручного прихода). */
   async removeMovement(id: string): Promise<void> {
     const [row] = await this.db.delete(stockMovement).where(eq(stockMovement.id, id)).returning();

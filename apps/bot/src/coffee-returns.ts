@@ -99,9 +99,12 @@ export async function recordContainerReturns(
 
   let saved = 0;
   const failed: string[] = [];
+  // Приход на склад по каждому набору (У5): что оприходовано, что нет и почему.
+  const posted: string[] = [];
+  const unposted: string[] = [];
   for (const r of parsed.returns) {
     try {
-      await deps.core.recordContainerReturn({
+      const res = await deps.core.recordContainerReturn({
         position: r.position,
         containerNumber: r.containerNumber,
         weight: r.weight,
@@ -110,6 +113,9 @@ export async function recordContainerReturns(
         createdBy: `person:${person.id}`,
       });
       saved += 1;
+      const label = res.unitLabel ?? `H-${r.containerNumber}-${r.position}`;
+      if (res.stockMovementId) posted.push(`${label}: +${res.netWeight} г${res.ingredientName ? ` ${res.ingredientName}` : ""}`);
+      else if (res.reason) unposted.push(`${label}: ${res.reason}`);
     } catch {
       // Формат строки — тот же, каким её набирают: скопировал и отправил.
       failed.push(`${r.position}. ${String(r.containerNumber).padStart(3, "0")}. ${r.weight}`);
@@ -122,6 +128,10 @@ export async function recordContainerReturns(
     lines.push("⚠️ Сервер не ответил — ни одна строка не записана. Отправь сообщение ещё раз через минуту.");
   } else {
     lines.push(`✅ Остатки записал: ${saved} из ${parsed.returns.length} наборов${where}.`);
+    if (posted.length > 0) lines.push(`📦 На склад: ${posted.join("; ")}.`);
+    if (unposted.length > 0) {
+      lines.push(`⚠️ Не оприходовано — ${unposted.join("; ")}. Тара и ингредиент — на карточке узла в панели.`);
+    }
     if (failed.length > 0) {
       lines.push(
         "⚠️ Эти строки не прошли — отправь ТОЛЬКО их ещё раз:",

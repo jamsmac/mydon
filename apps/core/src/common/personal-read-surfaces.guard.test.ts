@@ -102,6 +102,10 @@ const REGISTRY: Record<string, { category: Category; reason: string }> = {
     category: "NON_PERSONAL_TABLES",
     reason: "join entity через coffeeIngredient/machinePlacement — обогащение имён кофе-контура",
   },
+  "coffee/coffee-ledger.service.ts": {
+    category: "NON_PERSONAL_TABLES",
+    reason: "возврат бункера → склад (У5): entity читается как имя точки заливки, карточки ингредиента и склада vendhub",
+  },
   "coffee/coffee-orders.service.ts": {
     category: "NON_PERSONAL_TABLES",
     reason: "join entity по coffeeOrder.machineId — имена автоматов кофе-контура",

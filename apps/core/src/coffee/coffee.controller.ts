@@ -19,6 +19,7 @@ import {
 import { Type } from "class-transformer";
 import { UNITS, type Unit } from "@mydon/shared";
 import { CoffeeService } from "./coffee.service";
+import { CoffeeLedgerService } from "./coffee-ledger.service";
 import { CoffeeOrdersService } from "./coffee-orders.service";
 
 /** Одна проданная чашка из выгрузки панели производителя. */
@@ -310,6 +311,7 @@ export class CoffeeController {
   constructor(
     private readonly coffee: CoffeeService,
     private readonly orders: CoffeeOrdersService,
+    private readonly ledger: CoffeeLedgerService,
   ) {}
 
   @Get("locations")
@@ -409,8 +411,30 @@ export class CoffeeController {
   // ── Ввод данных / Таблица ────────────────────────────────────────────
 
   @Post("refill")
-  submitRefill(@Body() dto: SubmitRefillDto) {
-    return this.coffee.submitRefill(dto);
+  async submitRefill(@Body() dto: SubmitRefillDto) {
+    const saved = await this.coffee.submitRefill(dto);
+    // Списание со склада — после записи заливки и НЕ вместо неё: сбой склада
+    // не должен терять факт заливки. Результат идёт в ответ, а не в лог.
+    let stock: Awaited<ReturnType<CoffeeLedgerService["consumeRefill"]>> | { error: string };
+    try {
+      stock = await this.ledger.consumeRefill(saved.id, dto.createdBy ?? "owner");
+    } catch (e) {
+      stock = { error: e instanceof Error ? e.message : String(e) };
+    }
+    return { ...saved, stock };
+  }
+
+  /** Заливки без списания за период — сверка «что не ушло со склада». */
+  @Get("refill/unconsumed")
+  unconsumedRefills(@Query("days") days?: string) {
+    const n = Number(days);
+    return this.ledger.unconsumedRefills(Number.isFinite(n) && n > 0 ? Math.min(n, 365) : 30);
+  }
+
+  /** Досписать одну заливку (после правки данных или включения тумблера). */
+  @Post("refill/:id/consume")
+  consumeRefill(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string) {
+    return this.ledger.consumeRefill(id, actor ?? "owner");
   }
 
   @Get("refill/recent")
@@ -457,9 +481,10 @@ export class CoffeeController {
 
   // ── Возвраты наборов ─────────────────────────────────────────────────
 
+  /** Возврат набора = приход на склад (R-PU-9): нетто по таре узла, движение `return`. */
   @Post("container-return")
   recordContainerReturn(@Body() dto: RecordContainerReturnDto) {
-    return this.coffee.recordContainerReturn(dto);
+    return this.ledger.recordContainerReturn(dto);
   }
 
   @Get("container-return")
@@ -467,10 +492,16 @@ export class CoffeeController {
     return this.coffee.containerReturns(limit ? Number(limit) : undefined);
   }
 
-  /** Удалить ошибочный возврат набора (строка целиком уходит в audit_log). */
+  /** Возвраты без прихода: нет тары, ингредиент неизвестен, склад не выбран. */
+  @Get("container-return/unposted")
+  unpostedReturns(@Query("limit") limit?: string) {
+    return this.ledger.unpostedReturns(limit ? Number(limit) : undefined);
+  }
+
+  /** Удалить ошибочный возврат набора вместе с его приходом (строка целиком уходит в audit_log). */
   @Delete("container-return/:id")
   deleteContainerReturn(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string, @Query("by") by?: string) {
-    return this.coffee.deleteContainerReturn(id, { ...(actor ? { actor } : {}), ...(by ? { onlyIfCreatedBy: by } : {}) });
+    return this.ledger.deleteContainerReturn(id, { ...(actor ? { actor } : {}), ...(by ? { onlyIfCreatedBy: by } : {}) });
   }
 
   /** Фактический расход по наборам за период: заливка − возврат через тару. */
