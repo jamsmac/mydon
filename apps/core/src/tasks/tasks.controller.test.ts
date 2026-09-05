@@ -10,6 +10,7 @@ import {
   AgentRunCommitDto,
   AgentRunInputSnapshotDto,
   ClaimAgentRunDto,
+  CreateTaskDto,
   EditTaskDto,
   EnsureAgentScheduleDto,
   EnsureForDayDto,
@@ -613,5 +614,39 @@ describe("DTO durable agent-run", () => {
       plainToInstance(SetStatusDto, { status: "done", agentRunId: "generation-1" }),
     );
     assert.equal(errors[0]?.property, "agentRunId");
+  });
+});
+
+/** Явный навык и параметры запуска в POST /tasks (R-SD-3/4). */
+describe("CreateTaskDto: навык агента и параметры запуска", () => {
+  const base = { title: "Навык parts-audit: запуск из deck", ownerKind: "agent" };
+
+  it("принимает навык по имени файла и известное усилие модели", async () => {
+    const dto = plainToInstance(CreateTaskDto, {
+      ...base,
+      agentSkill: "parts-audit",
+      runOptions: { modelEffort: "high" },
+    });
+    assert.deepEqual(await validate(dto), []);
+  });
+
+  it("оба поля необязательны — прежние клиенты не ломаются", async () => {
+    assert.deepEqual(await validate(plainToInstance(CreateTaskDto, base)), []);
+  });
+
+  it("отбивает имя навыка не по формату и чужое усилие", async () => {
+    for (const bad of ["Parts_Audit", "-parts", "x".repeat(65), "../etc"]) {
+      const dto = plainToInstance(CreateTaskDto, { ...base, agentSkill: bad });
+      assert.ok(
+        (await validate(dto)).some((e) => e.property === "agentSkill"),
+        `«${bad}» должен быть отклонён`,
+      );
+    }
+    const effort = plainToInstance(CreateTaskDto, {
+      ...base,
+      runOptions: { modelEffort: "ultra" },
+    });
+    const errors = await validate(effort);
+    assert.equal(errors[0]?.property, "runOptions", "вложенный DTO обязан проверяться");
   });
 });

@@ -334,6 +334,13 @@ export function durableTaskInputHash(row: TaskRow): string {
     due: row.due?.toISOString() ?? null,
     source: row.source,
     createdBy: row.createdBy,
+    // R-SD-10: ключи добавляются ТОЛЬКО когда заданы. Безусловный спред
+    // изменил бы хеш каждой старой задачи, и первый же startAgentRun после
+    // выката упёрся бы в «Task changed after claim».
+    ...(row.agentSkill ? { agentSkill: row.agentSkill } : {}),
+    ...(row.runOptions && Object.keys(row.runOptions).length > 0
+      ? { runOptions: row.runOptions }
+      : {}),
   });
 }
 
@@ -507,6 +514,18 @@ function notionReportPayload(
   return canonicalValue({ report }) as JsonObject;
 }
 
+/**
+ * Усилие модели у llm-навыка (R-SD-4). Список — контракт панели и рантайма
+ * агентов: значение уходит в `reasoningEffort` провайдера как есть.
+ */
+export const MODEL_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ModelEffort = (typeof MODEL_EFFORTS)[number];
+
+/** Параметры конкретного запуска. Код-навыки их игнорируют. */
+export interface TaskRunOptions {
+  modelEffort?: ModelEffort;
+}
+
 export interface CreateTaskInput {
   title: string;
   ownerKind: "human" | "agent";
@@ -521,6 +540,10 @@ export interface CreateTaskInput {
   entityId?: string;
   /** Ключ идемпотентности от клиента: ретрай не даёт дубль-задачу. */
   clientKey?: string;
+  /** Явный навык агента (R-SD-3): worker берёт его прежде угадывания по тексту. */
+  agentSkill?: string;
+  /** Параметры запуска из deck (R-SD-4). */
+  runOptions?: TaskRunOptions;
 }
 
 /**
@@ -563,6 +586,8 @@ interface AgentScheduleTaskIdentity {
   priority: "normal";
   createdBy: typeof AGENT_SCHEDULE_SOURCE;
   clientKey: string;
+  /** R-SD-3: задача по расписанию несёт навык явно, а не намёком в заголовке. */
+  agentSkill: string;
 }
 
 /** NULL-safe exclusion: SQL `source <> value` alone would also drop NULL. */
@@ -626,6 +651,7 @@ function agentScheduleIdentity(input: EnsureAgentScheduleInput): AgentScheduleTa
     priority: "normal",
     createdBy: AGENT_SCHEDULE_SOURCE,
     clientKey,
+    agentSkill: input.skill,
   };
 }
 
@@ -642,7 +668,11 @@ function assertAgentScheduleReplay(row: TaskRow, expected: AgentScheduleTaskIden
     row.priority === expected.priority &&
     row.createdBy === expected.createdBy &&
     row.clientKey === expected.clientKey;
-  if (!exact) {
+  // Строка, созданная ДО миграции 0087, навыка не несёт: это тот же самый
+  // occurrence, и повтор cron обязан остаться replay'ем. Чужой навык в занятом
+  // ключе — по-прежнему конфликт.
+  const skillMatches = row.agentSkill === null || row.agentSkill === expected.agentSkill;
+  if (!exact || !skillMatches) {
     throw new ConflictException(
       "Ключ cron occurrence уже занят задачей с другим immutable payload",
     );
@@ -808,6 +838,8 @@ export class TasksService {
           createdBy: input.createdBy ?? actorRef,
           entityId: input.entityId ?? null,
           clientKey: input.clientKey ?? null,
+          agentSkill: input.agentSkill ?? null,
+          runOptions: input.runOptions ?? null,
         })
         .onConflictDoNothing({ target: task.clientKey })
         .returning();
@@ -1095,6 +1127,9 @@ export class TasksService {
           title: claimed.title,
           ...(claimed.description ? { description: claimed.description } : {}),
           ...(claimed.domain ? { domain: claimed.domain } : {}),
+          // R-SD-3/4: worker берёт навык отсюда, а не угадывает по заголовку.
+          ...(claimed.agentSkill ? { agentSkill: claimed.agentSkill } : {}),
+          ...(claimed.runOptions ? { runOptions: claimed.runOptions } : {}),
         },
         agentExecution,
       };
