@@ -440,6 +440,12 @@ Scout (`untrusted.ts`, вердикт только с доказательств
 > `docs/superpowers/specs/2026-09-05-skills-deck-cron-llm-design.md`, решения с причинами —
 > `docs/decisions/2026-09-05-skills-deck-cron-llm.md`.
 
+> **05.09.2026:** навык `mydon-venture-factory` восстановлен из чата claude.ai (c2733a29) и перенесён в
+> репо; интерактивный режим: сессия 1 (Scout + Analyst) — `data/ventures/2026-09-05-session-1.json`,
+> отчёт `docs/ventures/2026-09-05-session-1.md`, импортёр `tools/import-ventures.mjs`. Референсы —
+> `apps/agents/shared/kb/venture-factory/`, реестр — `entity(type='venture_candidate')` в домене `mydon`;
+> решения с причинами — `docs/decisions/2026-09-05-venture-factory-interactive.md`.
+
 1. `CLAUDE.md` → главный роутер (цели, карта) + `routers/{globerent,vendhub,personal,mydon,ventures,dev}.md`
    + `memory/` — без кода, 2–3 часа.
 2. `apps/agents/shared/{COMPANY.md, kb/index.md}`, `engine/{autonomy.yaml, eval-rubric.md}` — закрыть
