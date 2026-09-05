@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { productIndex, resolveCatalogName } from "@mydon/shared";
 import { assembleGoodsStock, parityRows, type GoodsStock, type GoodsStockRow, type VendingParityRow } from "./goods-stock";
 
 const W = "wh-1";
@@ -68,17 +69,27 @@ describe("Сверка по объединению прайса и таблиц�
     ],
     ...over,
   });
-  const canon = (raw: string) => raw;
+  // Дверь имени — настоящий индекс каталога по позициям фикстуры и то же
+  // правило, что у `productIdResolver` (спор/промах → null): у сверки своего
+  // правила сопоставления нет, и тесты его не выдумывают.
+  const doorOf = (g: GoodsStock) => {
+    const index = productIndex(g.rows.map((r: GoodsStockRow) => ({ id: r.productId, name: r.productName })), []);
+    return (raw: string): string | null => {
+      const r = resolveCatalogName(index, raw);
+      return r.kind === "hit" ? r.id : null;
+    };
+  };
+  const resolve = doorOf(goods());
 
   it("таблица = леджер → ok; расхождение → mismatch с diff = таблица − леджер", () => {
-    const rows = parityRows(goods(), [{ productName: "Snickers 50gr", productId: "p-snickers", quantity: 35 }, { productName: "Bounty Coconut 55gr", productId: "p-bounty", quantity: 0 }], canon);
+    const rows = parityRows(goods(), [{ productName: "Snickers 50gr", productId: "p-snickers", quantity: 35 }, { productName: "Bounty Coconut 55gr", productId: "p-bounty", quantity: 0 }], resolve);
     const sn = rows.find((r: VendingParityRow) => r.productId === "p-snickers")!;
     assert.equal(sn.status, "mismatch"); assert.equal(sn.diff, -5); assert.equal(sn.isMismatch, true);
     assert.equal(rows.find((r: VendingParityRow) => r.productId === "p-bounty")?.status, "ok");
   });
 
   it("пустая таблица: все позиции no_row, расхождение — только у тех, где леджер ≠ 0", () => {
-    const rows = parityRows(goods(), [], canon);
+    const rows = parityRows(goods(), [], resolve);
     const noRow = rows.filter((r: VendingParityRow) => r.status === "no_row");
     assert.equal(noRow.length, 3, "Snickers, Bounty и неактивный Strobar с остатком; Pulpy без карточки — no_card");
     assert.equal(rows.filter((r: VendingParityRow) => r.isMismatch).length, 2, "Snickers 40 и Strobar 3");
@@ -86,26 +97,70 @@ describe("Сверка по объединению прайса и таблиц�
   });
 
   it("строка таблицы без карточки прайса — no_card, ledger null", () => {
-    const rows = parityRows(goods(), [{ productName: "Неизвестный", productId: null, quantity: 7 }], canon);
+    const rows = parityRows(goods(), [{ productName: "Неизвестный", productId: null, quantity: 7 }], resolve);
     const x = rows.find((r: VendingParityRow) => r.productName === "Неизвестный")!;
     assert.equal(x.status, "no_card"); assert.equal(x.ledger, null); assert.equal(x.table, 7); assert.equal(x.isMismatch, false);
   });
 
-  it("строка таблицы без product_id сопоставляется по канону имени", () => {
-    const rows = parityRows(goods(), [{ productName: "snickers 50GR", productId: null, quantity: 40 }], (raw: string) => (raw.toLowerCase().startsWith("snickers") ? "Snickers 50gr" : raw));
+  it("строка таблицы без product_id сопоставляется через дверь имени (тот же индекс, что у леджера)", () => {
+    const rows = parityRows(goods(), [{ productName: "snickers 50GR", productId: null, quantity: 40 }], resolve);
     assert.equal(rows.find((r: VendingParityRow) => r.productId === "p-snickers")?.status, "ok");
   });
 
   it("неактивная позиция: с остатком — inactive_with_stock и расхождение; без остатка и без строки — не показывается", () => {
-    const rows = parityRows(goods(), [{ productName: "Strobar 40gr", productId: "p-old", quantity: 3 }], canon);
+    const rows = parityRows(goods(), [{ productName: "Strobar 40gr", productId: "p-old", quantity: 3 }], resolve);
     assert.equal(rows.find((r: VendingParityRow) => r.productId === "p-old")?.status, "inactive_with_stock");
     const g0 = goods({ rows: goods().rows.map((r: GoodsStockRow) => (r.productId === "p-old" ? { ...r, quantity: 0 } : r)) });
-    assert.equal(parityRows(g0, [], canon).some((r: VendingParityRow) => r.productId === "p-old"), false);
+    assert.equal(parityRows(g0, [], resolve).some((r: VendingParityRow) => r.productId === "p-old"), false);
   });
 
   it("без склада — no_warehouse у позиций с карточкой, ничего не считается расхождением", () => {
-    const rows = parityRows(goods({ warehouseId: null, rows: goods().rows.map((r: GoodsStockRow) => ({ ...r, quantity: null })) }), [{ productName: "Snickers 50gr", productId: "p-snickers", quantity: 40 }], canon);
+    const rows = parityRows(goods({ warehouseId: null, rows: goods().rows.map((r: GoodsStockRow) => ({ ...r, quantity: null })) }), [{ productName: "Snickers 50gr", productId: "p-snickers", quantity: 40 }], resolve);
     assert.equal(rows.find((r: VendingParityRow) => r.productId === "p-snickers")?.status, "no_warehouse");
     assert.equal(rows.some((r: VendingParityRow) => r.isMismatch), false);
+  });
+  it("коллизия нормализованных имён двух позиций прайса: строка ложится туда, куда дверь кладёт леджер, вторая — no_row; своего правила у сверки нет", () => {
+    const g = goods({
+      rows: [
+        { productName: "Red Bull", productId: "p-rb-1", cardId: "c-rb-1", quantity: 5, countedAt: null, isActive: true },
+        { productName: "Red  Bull", productId: "p-rb-2", cardId: "c-rb-2", quantity: 5, countedAt: null, isActive: true },
+      ],
+    });
+    const table = [{ productName: "red bull", productId: null, quantity: 5 }];
+    const door = doorOf(g);
+    const chosen = door("red bull");
+    assert.ok(chosen === "p-rb-1" || chosen === "p-rb-2", "дверь выбрала одну из двух позиций");
+    const other = chosen === "p-rb-1" ? "p-rb-2" : "p-rb-1";
+    const rows = parityRows(g, table, door);
+    assert.equal(rows.find((r) => r.productId === chosen)?.status, "ok", "строка легла на позицию двери");
+    assert.equal(rows.find((r) => r.productId === other)?.status, "no_row");
+    // Дверь решила иначе — сверка идёт за ней, а не за порядком/коллацией прайса.
+    const flipped = parityRows(g, table, () => other);
+    assert.equal(flipped.find((r) => r.productId === other)?.status, "ok");
+    assert.equal(flipped.find((r) => r.productId === chosen)?.status, "no_row");
+  });
+
+  it("совпадение по product_id главнее совпадения по имени: строка с id занимает позицию, строка по имени уходит в сироты", () => {
+    const rows = parityRows(
+      goods(),
+      [
+        { productName: "Snickers 50gr", productId: null, quantity: 1 }, // по имени — идёт первой в таблице
+        { productName: "старое имя", productId: "p-snickers", quantity: 40 }, // по id — должна выиграть
+      ],
+      resolve,
+    );
+    const sn = rows.find((r) => r.productId === "p-snickers")!;
+    assert.equal(sn.table, 40, "занята строкой с product_id");
+    assert.equal(sn.status, "ok");
+    const orphan = rows.find((r) => r.productName === "Snickers 50gr" && r.status === "no_card");
+    assert.ok(orphan, "вторая строка на ту же позицию — сирота, а не молчаливая потеря");
+  });
+
+  it("сирота с висячим product_id (позиции нет в прайсе) — productId null и не считается позицией прайса", () => {
+    const rows = parityRows(goods(), [{ productName: "Удалённый товар", productId: "p-gone", quantity: 3 }], resolve);
+    const o = rows.find((r) => r.productName === "Удалённый товар")!;
+    assert.equal(o.status, "no_card");
+    assert.equal(o.productId, null);
+    assert.equal(rows.filter((r) => r.productId !== null).length, 4, "products = только позиции прайса");
   });
 });

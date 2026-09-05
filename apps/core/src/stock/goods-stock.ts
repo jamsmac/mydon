@@ -73,21 +73,43 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000;
 /**
  * Сверка по ОБЪЕДИНЕНИЮ прайса и строк таблицы (R-GS-5).
  *
- * Строка таблицы ищет свою позицию по `product_id`, без него — по канону
- * имени (тот же `resolveProduct`, что везде; R-G-1). Позиция без строки —
+ * Строка таблицы ищет свою позицию по `product_id`, без него — через ДВЕРЬ
+ * имени `resolveId` (тот же резолвер, что кладёт движения в леджер; R-G-1).
+ * Позиция без строки —
  * `no_row`: это факт о таблице, он виден всегда; расхождением считается только
  * когда в леджере не ноль. Пустая таблица при непустом леджере поэтому не может
  * дать «расхождений 0» — гейт катовера снова что-то проверяет.
  */
-export function parityRows(goods: GoodsStock, table: TableStockRow[], canon: (raw: string) => string): VendingParityRow[] {
+export function parityRows(goods: GoodsStock, table: TableStockRow[], resolveId: (raw: string) => string | null): VendingParityRow[] {
   const byId = new Map(goods.rows.map((r) => [r.productId, r]));
-  const byNorm = new Map(goods.rows.map((r) => [normalizeProductName(r.productName), r]));
+  // Строка без `product_id` ложится ТУДА ЖЕ, куда дверь кладёт движения по
+  // этому имени. Своего правила сопоставления у сверки нет намеренно: при двух
+  // позициях прайса с одним нормализованным ключом «первая по коллации» или
+  // «активная» — это уже другое правило, и строка с леджером разъезжались бы по
+  // разным позициям: сходящаяся таблица давала бы пару фантомных расхождений.
+  // Спор и промах у двери — `null`: строка остаётся сиротой, видимой.
+  //
+  // Строка таблицы занимает позицию в ДВА прохода: сначала те, что связаны с
+  // прайсом по `product_id`, потом остальные — через дверь имени. Иначе строка,
+  // сопоставленная лишь по имени, могла бы занять позицию раньше строки с
+  // настоящей связью, и та ушла бы в сироты. Вторая строка на ту же позицию —
+  // сирота: видимая, а не потерянная.
   const tableByProduct = new Map<string, TableStockRow>();
   const orphans: TableStockRow[] = [];
+  const claim = (t: TableStockRow, p: GoodsStockRow | undefined): boolean => {
+    if (!p || tableByProduct.has(p.productId)) return false;
+    tableByProduct.set(p.productId, t);
+    return true;
+  };
+  const byName: TableStockRow[] = [];
   for (const t of table) {
-    const p = (t.productId && byId.get(t.productId)) || byNorm.get(normalizeProductName(canon(t.productName)));
-    if (p && !tableByProduct.has(p.productId)) tableByProduct.set(p.productId, t);
-    else orphans.push(t);
+    if (t.productId && byId.has(t.productId)) {
+      if (!claim(t, byId.get(t.productId))) orphans.push(t);
+    } else byName.push(t);
+  }
+  for (const t of byName) {
+    const id = resolveId(t.productName);
+    if (!claim(t, id === null ? undefined : byId.get(id))) orphans.push(t);
   }
   const out: VendingParityRow[] = [];
   for (const p of goods.rows) {
@@ -109,7 +131,10 @@ export function parityRows(goods: GoodsStock, table: TableStockRow[], canon: (ra
     out.push({ productName: p.productName, productId: p.productId, cardId: p.cardId, table: t?.quantity ?? null, ledger, diff, status, isMismatch });
   }
   for (const o of orphans) {
-    out.push({ productName: o.productName, productId: o.productId, cardId: null, table: o.quantity, ledger: null, diff: null, status: "no_card", isMismatch: false });
+    // `productId` сироты — либо висячий (позиции нет в прайсе), либо дубль на
+    // уже занятую позицию: в обоих случаях это НЕ позиция прайса, и счётчик
+    // `products` её не считает.
+    out.push({ productName: o.productName, productId: null, cardId: null, table: o.quantity, ledger: null, diff: null, status: "no_card", isMismatch: false });
   }
   return out.sort((a, b) => a.productName.localeCompare(b.productName, "ru"));
 }

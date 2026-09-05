@@ -1,7 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { auditLog, entity, stockMovement, vendingAlias, vendingProduct, vendingStock, vendingStockCount } from "@mydon/db";
 import { normalizeProductName, productIndex, resolveCatalogName } from "@mydon/shared";
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { settingValue } from "../system/settings";
 import { assembleGoodsStock, parityRows, type GoodsStock, type VendingParityRow } from "./goods-stock";
@@ -276,18 +276,25 @@ export interface VendingParityReport {
 export async function vendingParity(db: Writer): Promise<VendingParityReport> {
   const [goods, table, products, aliases] = await Promise.all([
     goodsStock(db, { includeInactive: true }),
-    db.select({ productName: vendingStock.productName, productId: vendingStock.productId, quantity: vendingStock.quantity }).from(vendingStock),
+    // Порядок строк таблицы фиксирован именем: без него две строки на одну
+    // позицию (легаси до бэкфилла П4) занимали бы её в случайном порядке.
+    db
+      .select({ productName: vendingStock.productName, productId: vendingStock.productId, quantity: vendingStock.quantity })
+      .from(vendingStock)
+      .orderBy(asc(vendingStock.productName)),
     db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct),
     db.select({ productId: vendingAlias.productId, alias: vendingAlias.alias }).from(vendingAlias),
   ]);
-  // Канон имени — тот же индекс, что у закупа и импорта (R-G-1): строка таблицы
-  // без product_id должна найти свою позицию тем же правилом, что и везде.
+  // Дверь имени — тот же индекс и то же правило, что у приёма и бэкфилла
+  // (`productIdResolver`, R-G-1): строка таблицы без product_id должна найти
+  // свою позицию там же, где лежат движения леджера по этому имени. Спор и
+  // промах — одинаково `null`, как у двери, что пишет необратимое.
   const index = productIndex(products, aliases);
-  const canon = (raw: string) => {
+  const resolveId = (raw: string): string | null => {
     const r = resolveCatalogName(index, raw);
-    return r.kind === "hit" ? r.canon : r.kind === "conflict" ? r.byName : raw;
+    return r.kind === "hit" ? r.id : null;
   };
-  const rows = parityRows(goods, table, canon);
+  const rows = parityRows(goods, table, resolveId);
   return {
     warehouseId: goods.warehouseId,
     rows,

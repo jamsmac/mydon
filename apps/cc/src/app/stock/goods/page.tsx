@@ -32,9 +32,10 @@ export default async function StockGoodsPage() {
         <h1>Товары на складе: сверка с леджером</h1>
         <p>
           Источник остатка сейчас: <b>{ledgerMode ? "леджер (катовер сделан)" : "строка vending_stock (двойная запись)"}</b>.
-          {parity.warehouseId ? "" : " Центральный склад не выбран — пометь склад «приём по умолчанию» в карточке склада."}{" "}
-          Позиций прайса: {parity.products} · без строки в таблице: {parity.missingRows} · расхождений: {parity.mismatched} · без карточки реестра: {parity.unlinked}
-          {parity.noWarehouse > 0 ? ` · склад не выбран: ${parity.noWarehouse}` : ""}.
+          {parity.warehouseId
+            ? ""
+            : ` Центральный склад не выбран — ${parity.noWarehouse} поз. без сверки; пометь склад «приём по умолчанию» в карточке склада.`}{" "}
+          Позиций прайса: {parity.products} · без строки в таблице: {parity.missingRows} · расхождений: {parity.mismatched} · без карточки реестра: {parity.unlinked}.
         </p>
       </div>
 
@@ -67,7 +68,7 @@ export default async function StockGoodsPage() {
               </thead>
               <tbody>
                 {parity.rows.map((r) => (
-                  <tr key={r.productName}>
+                  <tr key={r.productId ?? `orphan:${r.productName}`}>
                     <td>{r.cardId ? <Link href={`/card/${r.cardId}`}>{r.productName}</Link> : r.productName}</td>
                     <td className="mono">{r.table ?? "—"}</td>
                     <td className="mono">{r.ledger ?? "—"}</td>
