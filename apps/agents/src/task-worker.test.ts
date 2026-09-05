@@ -4,7 +4,7 @@ import type { AgentsCoreClient, AgentTaskInvocation } from "./core-client";
 import { clearLlmSkills, registerLlmSkills } from "./llm-skill";
 import type { AgentDefinition } from "./registry";
 import type { SkillMeta } from "./skill-loader";
-import { requiredChatStep, runAgentTasks } from "./task-worker";
+import { requiredChatStep, resolveTaskSkill, runAgentTasks } from "./task-worker";
 
 const agent: AgentDefinition = {
   name: "coach-agent",
@@ -71,5 +71,47 @@ describe("requiredChatStep — навыки, которым metered-маршру
     };
     registerLlmSkills([meta], { sharedDir: "/nope", agentsDir: "/nope" }, () => false);
     assert.equal(requiredChatStep("qualify-lead"), "llm-skill:qualify-lead");
+  });
+});
+
+describe("resolveTaskSkill — явный навык побеждает угадывание (R-SD-3)", () => {
+  const multi: AgentDefinition = {
+    ...agent,
+    skills: ["coach-review", "parts-audit", "not-implemented-yet"],
+  };
+  // «разбор недел…» — подсказка кодового coach-review; так видно, что явный
+  // навык действительно ПЕРЕБИЛ угадывание, а не совпал с ним.
+  const claim = (agentSkill?: string) => ({
+    taskInput: {
+      title: "Разбор недели по агентам",
+      description: "Посмотри, что получилось",
+      ...(agentSkill !== undefined ? { agentSkill } : {}),
+    },
+  });
+
+  it("без agentSkill — прежнее поведение: подбор по тексту задачи", () => {
+    assert.equal(resolveTaskSkill(multi, claim()), "coach-review");
+  });
+
+  it("agentSkill закреплён за агентом и реализован — берём его", () => {
+    assert.equal(resolveTaskSkill(multi, claim("parts-audit")), "parts-audit");
+  });
+
+  it("чужой навык (не в карточке агента) игнорируется — fallback на подбор", () => {
+    assert.equal(resolveTaskSkill(multi, claim("watch-receivables")), "coach-review");
+  });
+
+  it("нереализованный навык игнорируется — fallback на подбор", () => {
+    assert.equal(resolveTaskSkill(multi, claim("not-implemented-yet")), "coach-review");
+  });
+
+  it("ни явного, ни подходящего навыка — null (агент честно вернёт задачу)", () => {
+    const other: AgentDefinition = { ...agent, skills: ["parts-audit"] };
+    assert.equal(
+      resolveTaskSkill(other, {
+        taskInput: { title: "Полей цветы", agentSkill: "watch-receivables" },
+      }),
+      null,
+    );
   });
 });

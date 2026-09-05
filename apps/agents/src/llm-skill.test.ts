@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -243,6 +244,29 @@ describe("llm-skill: контекст (R-LS-4, R-LS-7, R-LS-8)", () => {
     assert.equal(taskInputHash({ title: " Лид ", description: "x " }), taskInputHash({ title: "Лид", description: "x" }));
     assert.notEqual(taskInputHash({ title: "Лид", description: "x" }), taskInputHash({ title: "Лид", description: "y" }));
   });
+
+  it("hash обратно совместим: без новых полей канон прежний (R-SD-10)", () => {
+    // Пин старого канона: безусловный спред agentSkill/runOptions изменил бы
+    // хеш КАЖДОЙ старой задачи и сорвал бы сверку входа после выката.
+    const legacy = `sha256:${createHash("sha256")
+      .update(JSON.stringify({ title: "Лид", description: "x" }), "utf8")
+      .digest("hex")}`;
+    assert.equal(taskInputHash({ title: "Лид", description: "x" }), legacy);
+    assert.equal(
+      taskInputHash({ title: "Лид", description: "x", runOptions: {} }),
+      legacy,
+      "пустые runOptions — это отсутствие настройки, а не новое значение",
+    );
+  });
+
+  it("hash различает явный навык и усилие прогона (R-SD-10)", () => {
+    const base = taskInputHash({ title: "Лид", description: "x" });
+    assert.notEqual(taskInputHash({ title: "Лид", description: "x", agentSkill: "qualify-lead" }), base);
+    assert.notEqual(
+      taskInputHash({ title: "Лид", description: "x", runOptions: { modelEffort: "high" } }),
+      base,
+    );
+  });
 });
 
 describe("llm-skill: исполнитель как Skill (R-LS-1, R-LS-2, R-LS-3)", () => {
@@ -278,6 +302,56 @@ describe("llm-skill: исполнитель как Skill (R-LS-1, R-LS-2, R-LS-3
     } finally {
       d.cleanup();
     }
+  });
+
+  it("усилие прогона перебивает усилие паспорта (R-SD-4)", async () => {
+    const capture: CallModelInput[] = [];
+    const skill = buildLlmSkill(meta(), {
+      sharedDir: "/nope",
+      agentsDir: "/nope",
+      gateway: () => localGateway,
+      callModel: fakeCall({ text: GOOD_JSON, capture }),
+    });
+    await skill(
+      agent,
+      {} as never,
+      ctx({
+        taskInput: {
+          title: "Квалифицируй лид OLMA",
+          description: "срочно",
+          runOptions: { modelEffort: "high" },
+        },
+      }) as never,
+    );
+    assert.equal(capture[0].reasoningEffort, "high", "meta.modelEffort=medium перекрыт runOptions");
+  });
+
+  it("пустые runOptions не стирают усилие паспорта", async () => {
+    const capture: CallModelInput[] = [];
+    const skill = buildLlmSkill(meta(), {
+      sharedDir: "/nope",
+      agentsDir: "/nope",
+      gateway: () => localGateway,
+      callModel: fakeCall({ text: GOOD_JSON, capture }),
+    });
+    await skill(
+      agent,
+      {} as never,
+      ctx({ taskInput: { title: "Лид", runOptions: {} } }) as never,
+    );
+    assert.equal(capture[0].reasoningEffort, "medium");
+  });
+
+  it("нет усилия ни в паспорте, ни в прогоне — поле не уезжает провайдеру", async () => {
+    const capture: CallModelInput[] = [];
+    const skill = buildLlmSkill(meta({ modelEffort: undefined }), {
+      sharedDir: "/nope",
+      agentsDir: "/nope",
+      gateway: () => localGateway,
+      callModel: fakeCall({ text: GOOD_JSON, capture }),
+    });
+    await skill(agent, {} as never, ctx() as never);
+    assert.equal(Object.hasOwn(capture[0], "reasoningEffort"), false);
   });
 
   it("без входа задачи (legacy cron) — null: работать нечему", async () => {

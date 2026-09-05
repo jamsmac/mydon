@@ -20,13 +20,14 @@ import {
 } from "./polling";
 import { runOurvendAccounting } from "./ourvend-accounting";
 import { ourvendConfigFromEnv, runOurvendSync } from "./ourvend-sync";
-import { registerLlmSkills } from "./llm-skill";
+import { isLlmSkill, registerLlmSkills } from "./llm-skill";
 import { isKbPagePath, loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
 import { desiredJobs, jobKey, scheduledInvocationMode } from "./schedule";
 import { ScheduledOccurrenceRetryQueue } from "./scheduled-occurrence-queue";
+import { catalogFromMetas } from "./skill-catalog";
 import { loadSkillMeta, skillTierFloors } from "./skill-loader";
-import { hasCodeSkill } from "./skills";
+import { hasCodeSkill, hasSkill } from "./skills";
 import { applySystemOverrides } from "./system-config";
 import { buildTaskLlmWorkflowPlan } from "./task-llm-workflow";
 import { runAgentTasks } from "./task-worker";
@@ -221,6 +222,17 @@ async function main(): Promise<void> {
           `Паспорта перенесены в базу: заведено ${seed.seeded}, уже было ${seed.skipped}.`,
         );
       }
+      // Каталог навыков — зеркало файлов образа (R-SD-1): панель `/skills`
+      // читает только Core и не знает про диск контейнера. Пишем ПОСЛЕ сида
+      // (агенты уже есть в базе) и best-effort: каталог — витрина, из-за неё
+      // агенты стартовать не перестают. Не записался — панель покажет пустое
+      // состояние, а строка в логе скажет, почему.
+      try {
+        const synced = await core.putSkillCatalog(catalogFromMetas(skillMetas, hasCodeSkill));
+        console.log(`Каталог навыков в Core: ${synced.count}.`);
+      } catch (err) {
+        console.warn("Каталог навыков не записан в Core:", err);
+      }
       // Тумблеры системы накладываем вместе с настройками агентов: обе правки
       // владельца живут в базе и подхватываются одной перечиткой.
       await refreshSystemConfig();
@@ -307,10 +319,11 @@ async function main(): Promise<void> {
       return;
     }
 
-    // В расписание идут только навыки с кодом: llm-навык на cron заблокирован до
-    // допуска в DURABLE_SCHEDULED_SKILLS (R-LS-11) — иначе каждый тик падал бы
-    // на «metered scheduled skill … blocked» в лог.
-    const { jobs, notWired } = desiredJobs(agents, hasCodeSkill);
+    // В расписание идут навыки с любой реализацией — код ∨ llm (R-SD-5).
+    // llm-навык на cron идёт durable-задачей, а не in-process: деньги проходят
+    // через Core-ledger, а повтор тика — replay по clientKey. Раньше сюда
+    // передавался hasCodeSkill, и llm-навык в расписании молча не планировался.
+    const { jobs, notWired } = desiredJobs(agents, hasSkill);
     const want = new Set(jobs.map(jobKey));
 
     // Гасим то, чего в желаемом наборе больше нет.
@@ -342,6 +355,7 @@ async function main(): Promise<void> {
               const mode = scheduledInvocationMode(
                 j.skill,
                 () => buildTaskLlmWorkflowPlan(j.skill).steps.length > 0,
+                isLlmSkill,
               );
               if (mode === "durable-task") {
                 pendingScheduledOccurrences.enqueue(j, occurrence);

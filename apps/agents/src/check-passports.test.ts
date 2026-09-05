@@ -90,16 +90,14 @@ describe("Связи паспорта с навыками и KB (checkLinks, с�
     assert.deepEqual(problems, []);
   });
 
-  it("llm-навык в расписании — замечание (R-LS-11: cron для executor: llm закрыт до допуска)", () => {
+  it("llm-навык в расписании — НЕ замечание: cron открыт через durable-задачи (R-SD-5)", () => {
     const problems = checkLinks(
       { ...base, schedule: [{ cron: "0 8 * * 1", skill: "qualify-lead" }] },
       [{ name: "qualify-lead", executor: "llm" }],
       sharedDir,
       noCode,
     );
-    assert.equal(problems.length, 1);
-    assert.match(problems[0], /расписание зовёт llm-навык «qualify-lead»/);
-    assert.match(problems[0], /DURABLE_SCHEDULED_SKILLS/);
+    assert.deepEqual(problems, []);
   });
 
   it("executor: llm при наличии кода в SKILLS — двусмысленность, исполнится код", () => {

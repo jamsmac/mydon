@@ -7,7 +7,9 @@ import type {
   LlmBudgetSnapshot,
   LlmTokenUsage,
 } from "@mydon/shared";
+import type { ModelReasoningEffort } from "./model-gateway";
 import type { ClaimedOutboxDelivery } from "./outbox-dispatcher";
+import type { CatalogSkill } from "./skill-catalog";
 import type { TaskLlmJobKind, TaskLlmWorkflowPlan } from "./task-llm-workflow";
 
 /** Сводка Core — на её основе навыки решают, есть ли повод что-то предлагать. */
@@ -135,8 +137,18 @@ export interface AgentTaskClaim {
   claimedAt: string;
   /** Snapshot hash minted by Core at claim and repeated by /start. */
   taskInputHash?: string;
-  /** Atomic claim snapshot; list results are stale after the lease is won. */
-  taskInput: { title: string; description?: string; domain?: Domain };
+  /**
+   * Atomic claim snapshot; list results are stale after the lease is won.
+   * `agentSkill`/`runOptions` есть только когда владелец их задал (R-SD-3/R-SD-4):
+   * старые задачи приходят прежней формой и хешируются как раньше (R-SD-10).
+   */
+  taskInput: {
+    title: string;
+    description?: string;
+    domain?: Domain;
+    agentSkill?: string;
+    runOptions?: { modelEffort?: ModelReasoningEffort };
+  };
   /** Present after execution /start, including active takeover resume. */
   execution?: AgentTaskExecution;
   /** Есть после crash/takeover: навык нельзя вызывать повторно. */
@@ -436,6 +448,20 @@ export class AgentsCoreClient {
     return this.request<{ seeded: number; skipped: number }>("/agents/seed", {
       method: "POST",
       body: JSON.stringify({ agents }),
+    });
+  }
+
+  /**
+   * Полная перезапись каталога навыков в Core (R-SD-1).
+   *
+   * PUT, а не POST: каталог — зеркало файлов образа, и Core заменяет его
+   * целиком одной транзакцией. Зовём при каждом успешном старте, поэтому
+   * снятый из образа навык исчезает из панели сам, без ручной чистки.
+   */
+  putSkillCatalog(skills: CatalogSkill[]): Promise<{ count: number; syncedAt: string }> {
+    return this.request<{ count: number; syncedAt: string }>("/agents/skills/catalog", {
+      method: "PUT",
+      body: JSON.stringify({ skills }),
     });
   }
 

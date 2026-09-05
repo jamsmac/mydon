@@ -24,12 +24,22 @@ export type ScheduledInvocationMode = "durable-task" | "legacy";
  * A durable allowlisted skill always materializes a task. Any other skill may
  * use the legacy cron path only while its current workflow has no metered
  * provider steps. This keeps a newly metered route fail-closed.
+ *
+ * `executor: llm` тоже всегда durable (R-SD-5): его прогон — платный вызов
+ * модели, а legacy in-process путь ни денег через Core-ledger не проводит, ни
+ * повтор по clientKey не даёт. Поэтому llm-навык не «блокируется metered-гейтом»,
+ * а идёт задачей — cron для него открыт без allowlist.
+ *
+ * `isLlm` — параметр, а не импорт `llm-skill`: иначе `schedule` → `llm-skill` →
+ * `skills` → … замкнуло бы цикл импортов. Значение по умолчанию честно
+ * консервативное (llm нет), вызывающий (`index.ts`) передаёт `isLlmSkill`.
  */
 export function scheduledInvocationMode(
   skill: string,
   hasMeteredWorkflow: () => boolean,
+  isLlm: (skill: string) => boolean = () => false,
 ): ScheduledInvocationMode {
-  if ((DURABLE_SCHEDULED_SKILLS as readonly string[]).includes(skill)) {
+  if (isLlm(skill) || (DURABLE_SCHEDULED_SKILLS as readonly string[]).includes(skill)) {
     return "durable-task";
   }
   if (hasMeteredWorkflow()) {

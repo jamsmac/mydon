@@ -4,7 +4,7 @@ import path from "node:path";
 import { LlmLedgerUnavailableError, type Domain } from "@mydon/shared";
 import { callModel as callModelDefault, type CallModelInput, type CallModelResult } from "./llm";
 import { llmLedgerFromEnv } from "./llm-ledger";
-import { modelGatewayFromEnv, type ModelGateway } from "./model-gateway";
+import { modelGatewayFromEnv, type ModelGateway, type ModelReasoningEffort } from "./model-gateway";
 import type { AgentDefinition } from "./registry";
 import type { SkillMeta } from "./skill-loader";
 import type { Proposal, Skill, SkillRunContext } from "./skills";
@@ -176,6 +176,10 @@ export interface TaskInputLike {
   title: string;
   description?: string;
   domain?: Domain;
+  /** Явный навык задачи (R-SD-3). Подбор навыка — не дело исполнителя, но поле входит в хеш. */
+  agentSkill?: string;
+  /** Параметры ЭТОГО прогона (R-SD-4): усилие перекрывает усилие паспорта. */
+  runOptions?: { modelEffort?: ModelReasoningEffort };
 }
 
 /** Доверенная часть промпта: заголовок и направление. Описание уходит недоверенным блоком. */
@@ -259,7 +263,16 @@ export interface ProposalTrail {
 
 /** Стабильный hash входа задачи — основа дедупа (R-LS-9). */
 export function taskInputHash(input: TaskInputLike): string {
-  const canonical = JSON.stringify({ title: input.title.trim(), description: (input.description ?? "").trim() });
+  const effort = input.runOptions?.modelEffort;
+  // R-SD-10: новые ключи входят в канон ТОЛЬКО когда заданы. Безусловный спред
+  // сдвинул бы хеш каждой старой задачи, и дедуп предложений (signatureFacts)
+  // счёл бы повтор новым поводом — владелец получил бы дубли на ровном месте.
+  const canonical = JSON.stringify({
+    title: input.title.trim(),
+    description: (input.description ?? "").trim(),
+    ...(input.agentSkill ? { agentSkill: input.agentSkill } : {}),
+    ...(effort !== undefined ? { runOptions: { modelEffort: effort } } : {}),
+  });
   return `sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
 }
 
@@ -316,6 +329,7 @@ export function buildLlmSkill(meta: SkillMeta, deps: LlmSkillDeps): Skill {
     const requestKey = `${context?.requestKey ?? `agent:${agent.name}:${meta.name}`}:llm`;
     const traceKey = context?.traceKey ?? requestKey;
     const taskLlm = context?.task?.llm;
+    const effort = input.runOptions?.modelEffort ?? meta.modelEffort;
     const metered = gateway.billingMode === "metered";
     if (context?.task && metered && !taskLlm) {
       throw new LlmLedgerUnavailableError("Task-mode metered route не получил durable LLM session");
@@ -330,7 +344,9 @@ export function buildLlmSkill(meta: SkillMeta, deps: LlmSkillDeps): Skill {
       requestKey,
       traceKey,
       ...(meta.maxTokens !== undefined ? { maxTokens: meta.maxTokens } : {}),
-      ...(meta.modelEffort !== undefined ? { reasoningEffort: meta.modelEffort } : {}),
+      // R-SD-4: усилие прогона (запуск из deck) важнее объявленного в паспорте;
+      // нет ни того, ни другого — поле не уезжает провайдеру вовсе.
+      ...(effort !== undefined ? { reasoningEffort: effort } : {}),
       ...(context?.assertLease ? { assertLease: context.assertLease } : {}),
       ...(ledger ? { ledger } : {}),
       ...(taskLlm ? { taskLlm } : {}),

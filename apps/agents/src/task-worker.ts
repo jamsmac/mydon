@@ -1,5 +1,5 @@
 import { LlmLedgerUnavailableError, type AutonomyTier } from "@mydon/shared";
-import type { AgentsCoreClient, AgentTaskInvocation } from "./core-client";
+import type { AgentsCoreClient, AgentTaskClaim, AgentTaskInvocation } from "./core-client";
 import { isLlmSkill, llmSkillFeature, llmSkillTriggers } from "./llm-skill";
 import type { AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
@@ -86,6 +86,28 @@ export function matchSkill(agent: AgentDefinition, title: string): string | null
     if (re && re.test(text) && hasSkill(skill)) return skill;
   }
   return null;
+}
+
+/**
+ * Навык задачи: явный побеждает угадывание (R-SD-3).
+ *
+ * `agentSkill` ставят запуск из deck и задачи по расписанию — там навык ИЗВЕСТЕН,
+ * и угадывать его по заголовку было бы прямой потерей воли владельца. Но верим
+ * полю не на слово: навык должен быть закреплён за агентом (карточка — источник
+ * истины, снятый навык уважаем сразу) и иметь реализацию (код ∨ llm). Чужой или
+ * неподключённый навык — не ошибка задачи, а повод вернуться к прежнему подбору
+ * по тексту: пусть агент попробует, а «не умею» скажет уже по-настоящему.
+ */
+export function resolveTaskSkill(
+  agent: AgentDefinition,
+  claim: Pick<AgentTaskClaim, "taskInput">,
+): string | null {
+  const explicit = claim.taskInput.agentSkill;
+  if (explicit && agent.skills.includes(explicit) && hasSkill(explicit)) return explicit;
+  return matchSkill(
+    agent,
+    [claim.taskInput.title, claim.taskInput.description].filter(Boolean).join("\n"),
+  );
 }
 
 /**
@@ -179,12 +201,7 @@ export async function runAgentTasks(
       // task title or the agent's current skill list changed in the meantime.
       const claimedCheckpoint = claim.execution?.checkpoint ?? claim.checkpoint;
       const skill =
-        claim.execution?.skill ??
-        claimedCheckpoint?.skill ??
-        matchSkill(
-          agent,
-          [claim.taskInput.title, claim.taskInput.description].filter(Boolean).join("\n"),
-        );
+        claim.execution?.skill ?? claimedCheckpoint?.skill ?? resolveTaskSkill(agent, claim);
       if (skill === null) {
         // Честный отказ пишем в durable block самой задачи.
         // Отдельный comment здесь неидемпотентен: потеря ответа

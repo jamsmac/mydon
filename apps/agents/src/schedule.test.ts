@@ -78,4 +78,38 @@ describe("Планирование заданий агентов", () => {
       /blocked until it is allowlisted/,
     );
   });
+
+  it("llm-навык на cron идёт durable-задачей и не падает на metered-гейте (R-SD-5)", () => {
+    let routeChecked = false;
+    assert.equal(
+      scheduledInvocationMode(
+        "qualify-lead",
+        () => {
+          routeChecked = true;
+          return true;
+        },
+        () => true,
+      ),
+      "durable-task",
+    );
+    assert.equal(routeChecked, false, "llm решается до проверки metered-маршрута");
+  });
+
+  it("код-навык с metered-workflow вне allowlist по-прежнему бросает", () => {
+    assert.throws(
+      () => scheduledInvocationMode("future-metered-skill", () => true, () => false),
+      /blocked until it is allowlisted/,
+    );
+  });
+
+  it("llm-навык планируется: desiredJobs берёт код ∨ llm (R-SD-5)", () => {
+    const llm = agent({
+      skills: ["qualify-lead"],
+      schedule: [{ cron: "0 8 * * 1", skill: "qualify-lead" }],
+    });
+    const hasSkillLike = (s: string): boolean => s === "qualify-lead";
+    const { jobs, notWired } = desiredJobs([llm], hasSkillLike);
+    assert.deepEqual(jobs, [{ agent: "kass", skill: "qualify-lead", cron: "0 8 * * 1" }]);
+    assert.deepEqual(notWired, []);
+  });
 });
