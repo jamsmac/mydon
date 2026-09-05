@@ -1,4 +1,10 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { agent, agentSkillCatalog, auditLog, task } from "@mydon/db";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -338,6 +344,16 @@ export class AgentsService {
     items: CatalogSkillInput[],
     actorRef = "agents",
   ): Promise<{ count: number; syncedAt: string }> {
+    // Дубль пары (агент, навык) упёрся бы в первичный ключ и вернулся агентам
+    // безымянной 400-кой из драйвера. Называем виновника сами: каталог собирают
+    // из файлов, и «какой именно навык задвоился» — единственное, что помогает.
+    const seen = new Set<string>();
+    for (const item of items) {
+      const key = `${item.agent}/${item.skill}`;
+      if (seen.has(key)) throw new BadRequestException(`Дубль в каталоге: ${key}`);
+      seen.add(key);
+    }
+
     const syncedAt = new Date();
     const values = items.map((item) => ({
       agentName: item.agent,
@@ -393,16 +409,17 @@ export class AgentsService {
         problems: agentSkillCatalog.problems,
         syncedAt: agentSkillCatalog.syncedAt,
         agentStatus: agent.status,
+        agentArchivedAt: agent.archivedAt,
         business: agent.business,
         autonomyDefault: agent.autonomyDefault,
         agentSkills: agent.skills,
         schedule: agent.schedule,
       })
       .from(agentSkillCatalog)
-      .leftJoin(
-        agent,
-        and(eq(agent.name, agentSkillCatalog.agentName), isNull(agent.archivedAt)),
-      )
+      // Архивных НЕ отсекаем в JOIN: без карточки такой агент выглядел бы как
+      // «ещё не заведён» (draft), хотя его убрали из работы осознанно. Ниже он
+      // отдаётся как deprecated и не запускается.
+      .leftJoin(agent, eq(agent.name, agentSkillCatalog.agentName))
       .orderBy(asc(agentSkillCatalog.agentName), asc(agentSkillCatalog.skill));
 
     const [lastRuns, primaryRaw, fallbackRaw] = await Promise.all([
@@ -437,8 +454,9 @@ export class AgentsService {
 
     const items: SkillDeckItem[] = rows.map((row) => {
       const tier = asTier(row.tier);
-      const status = asAgentStatus(row.agentStatus);
-      const skills = stringList(row.agentSkills);
+      const archived = Boolean(row.agentArchivedAt);
+      const status = archived ? "deprecated" : asAgentStatus(row.agentStatus);
+      const skills = archived ? [] : stringList(row.agentSkills);
       const crons = (Array.isArray(row.schedule) ? row.schedule : [])
         .filter(
           (item): item is { cron: string; skill: string } =>
@@ -465,7 +483,8 @@ export class AgentsService {
         hasCode: row.hasCode,
         problems: stringList(row.problems),
         // Карточки нет — агент ещё не заведён: показываем как черновик и не
-        // приписываем ему автономии, которой никто не давал.
+        // приписываем ему автономии, которой никто не давал. Архивный —
+        // deprecated с пустыми навыками: запускать нечего.
         agentStatus: status ?? "draft",
         business: row.business ?? "shared",
         autonomyDefault: asTier(row.autonomyDefault) ?? "T0",
@@ -559,10 +578,11 @@ export class AgentsService {
 
     const actor = (input.actor ?? "").trim() || "owner";
     const text = (input.input ?? "").trim();
+    // Заголовок — одна строка в списке задач: переносы и двойные пробелы из
+    // textarea схлопываем, а описание сохраняет вход как есть.
+    const head = text.replace(/\s+/g, " ").trim().slice(0, RUN_TITLE_INPUT_LIMIT);
     const title =
-      text.length > 0
-        ? `Навык ${skill}: ${text.slice(0, RUN_TITLE_INPUT_LIMIT)}`
-        : `Навык ${skill}: запуск из deck`;
+      head.length > 0 ? `Навык ${skill}: ${head}` : `Навык ${skill}: запуск из deck`;
 
     const created = await this.tasks.create(
       {

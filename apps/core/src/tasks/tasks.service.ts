@@ -183,9 +183,36 @@ export interface AgentRunCommitResult {
   retryAt?: string;
 }
 
+/**
+ * Как параметры запуска ЛЕЖАТ в базе. `modelEffort` здесь просто текст:
+ * колонка jsonb без enum, и сузить его до {@link ModelEffort} кастом значило
+ * бы соврать — значение могло попасть в базу мимо DTO. {@link TaskRunOptions}
+ * остаётся типом ВХОДА (что позволено передать), этот — типом ВЫДАЧИ.
+ */
+export type StoredTaskRunOptions = NonNullable<TaskRow["runOptions"]>;
+
+/**
+ * Заданные параметры запуска, иначе `undefined`.
+ *
+ * Один предикат на хеш и на выдачу claim: раньше «пусто» понималось
+ * по-разному ({} не влиял на хеш, но уезжал worker'у), и расхождение было бы
+ * заметно только на проде.
+ */
+function presentRunOptions(row: TaskRow): StoredTaskRunOptions | undefined {
+  const options = row.runOptions;
+  return options && Object.keys(options).length > 0 ? options : undefined;
+}
+
 type ClaimedAgentRun = TaskRow & {
   taskInputHash: string;
-  taskInput: { title: string; description?: string; domain?: Domain };
+  taskInput: {
+    title: string;
+    description?: string;
+    domain?: Domain;
+    /** R-SD-3/4: явный навык и параметры запуска — часть durable-входа. */
+    agentSkill?: string;
+    runOptions?: StoredTaskRunOptions;
+  };
   agentExecution: AgentExecutionView | null;
 };
 
@@ -321,6 +348,7 @@ function normalizedNext(value: string[] | undefined): string[] | undefined {
 }
 
 export function durableTaskInputHash(row: TaskRow): string {
+  const runOptions = presentRunOptions(row);
   return canonicalHash({
     schemaVersion: 1,
     id: row.id,
@@ -338,9 +366,7 @@ export function durableTaskInputHash(row: TaskRow): string {
     // изменил бы хеш каждой старой задачи, и первый же startAgentRun после
     // выката упёрся бы в «Task changed after claim».
     ...(row.agentSkill ? { agentSkill: row.agentSkill } : {}),
-    ...(row.runOptions && Object.keys(row.runOptions).length > 0
-      ? { runOptions: row.runOptions }
-      : {}),
+    ...(runOptions ? { runOptions } : {}),
   });
 }
 
@@ -1117,6 +1143,7 @@ export class TasksService {
           );
         }
       }
+      const runOptions = presentRunOptions(claimed);
       return {
         ...claimed,
         taskInputHash: durableTaskInputHash(claimed),
@@ -1128,8 +1155,9 @@ export class TasksService {
           ...(claimed.description ? { description: claimed.description } : {}),
           ...(claimed.domain ? { domain: claimed.domain } : {}),
           // R-SD-3/4: worker берёт навык отсюда, а не угадывает по заголовку.
+          // Предикат тот же, что у хеша: пустые параметры — это их отсутствие.
           ...(claimed.agentSkill ? { agentSkill: claimed.agentSkill } : {}),
-          ...(claimed.runOptions ? { runOptions: claimed.runOptions } : {}),
+          ...(runOptions ? { runOptions } : {}),
         },
         agentExecution,
       };

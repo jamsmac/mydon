@@ -3276,6 +3276,12 @@ describe("Явный навык у задачи (R-SD-3/4/10)", () => {
       title: claimedBase.title,
       description: "сверить остатки",
     });
+
+    // Тот же предикат, что у хеша: пустые параметры — это их отсутствие.
+    const empty = await makeTasks(
+      stubDb({ updateResult: { ...claimedBase, agentSkill: null, runOptions: {} } }),
+    ).claimAgentRun(claimedBase.id, "vendhub-ops", new Date("2026-09-05T07:00:00.000Z"));
+    assert.equal("runOptions" in empty!.taskInput, false);
   });
 
   it("задача по расписанию несёт навык, а строка до миграции остаётся валидным replay", async () => {

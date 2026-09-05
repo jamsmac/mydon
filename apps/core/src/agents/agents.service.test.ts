@@ -173,6 +173,15 @@ describe("Каталог навыков — зеркало файлов (R-SD-1)
     assert.equal(row.agentName, "vendhub-ops");
   });
 
+  it("дубль пары «агент + навык» называется словами, а не безымянной 400 от драйвера", async () => {
+    const fixture = catalogDb();
+    await assert.rejects(
+      new AgentsService(fixture.db, noTasks).syncSkillCatalog([skill(), skill()]),
+      /Дубль в каталоге: vendhub-ops\/parts-audit/,
+    );
+    assert.deepEqual(fixture.store, [], "битый каталог не должен затереть рабочий");
+  });
+
   it("пустой список — пустой каталог (агенты не нашли ни одного навыка)", async () => {
     const fixture = catalogDb({ rows: [{ agentName: "old-agent", skill: "gone" }] });
     const result = await new AgentsService(fixture.db, noTasks).syncSkillCatalog([]);
@@ -217,6 +226,7 @@ describe("Deck навыков — что видит панель", () => {
     problems: [],
     syncedAt: new Date("2026-09-05T06:00:00.000Z"),
     agentStatus: "active",
+    agentArchivedAt: null,
     business: "vendhub",
     autonomyDefault: "T2",
     agentSkills: ["parts-audit"],
@@ -255,6 +265,7 @@ describe("Deck навыков — что видит панель", () => {
           catalogRow({
             agentName: "solution-scout",
             agentStatus: null,
+            agentArchivedAt: null,
             business: null,
             autonomyDefault: null,
             agentSkills: null,
@@ -268,6 +279,23 @@ describe("Deck навыков — что видит панель", () => {
     assert.equal(deck.items[0]?.agentStatus, "draft");
     assert.equal(deck.items[0]?.enabled, false);
     assert.deepEqual(deck.items[0]?.crons, []);
+  });
+
+  it("архивный агент — deprecated и выключен, а не «ещё не заведён»", async () => {
+    const deck = await new AgentsService(
+      deckDb({
+        joined: [
+          catalogRow({
+            agentStatus: "deprecated",
+            agentArchivedAt: new Date("2026-09-01T00:00:00.000Z"),
+          }),
+        ],
+      }),
+      noTasks,
+    ).skillDeck();
+
+    assert.equal(deck.items[0]?.agentStatus, "deprecated");
+    assert.equal(deck.items[0]?.enabled, false, "у убранного из работы агента запускать нечего");
   });
 
   it("одноимённые навыки у разных агентов: duplicates и тир не ниже максимума", async () => {
@@ -447,6 +475,18 @@ describe("Запуск навыка из панели (R-SD-2/6)", () => {
     );
     assert.equal(spy.calls[0]!.input.title, `Навык parts-audit: ${"я".repeat(60)}`);
     assert.equal(spy.calls[0]!.input.description, long);
+  });
+
+  it("переносы строк из textarea не уезжают в заголовок задачи", async () => {
+    const spy = tasksSpy();
+    const multiline = "Сверить узлы\n\n  на Kaffit-04";
+    await new AgentsService(runDb({ catalog, agent: card() }).db, spy.tasks).runSkill(
+      "vendhub-ops",
+      "parts-audit",
+      { input: multiline },
+    );
+    assert.equal(spy.calls[0]!.input.title, "Навык parts-audit: Сверить узлы на Kaffit-04");
+    assert.equal(spy.calls[0]!.input.description, multiline, "описание хранит вход как есть");
   });
 
   it("выключенный агент — отказ словами владельца (R-SD-6)", async () => {
