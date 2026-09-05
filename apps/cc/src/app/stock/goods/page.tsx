@@ -68,7 +68,7 @@ export default async function StockGoodsPage() {
               </thead>
               <tbody>
                 {parity.rows.map((r) => (
-                  <tr key={r.productName}>
+                  <tr key={r.productId ?? `orphan:${r.productName}`}>
                     <td>{r.cardId ? <Link href={`/card/${r.cardId}`}>{r.productName}</Link> : r.productName}</td>
                     <td className="mono">{r.table ?? "—"}</td>
                     <td className="mono">{r.ledger ?? "—"}</td>

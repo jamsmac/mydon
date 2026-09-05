@@ -73,24 +73,24 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000;
 /**
  * Сверка по ОБЪЕДИНЕНИЮ прайса и строк таблицы (R-GS-5).
  *
- * Строка таблицы ищет свою позицию по `product_id`, без него — по канону
- * имени (тот же `resolveProduct`, что везде; R-G-1). Позиция без строки —
+ * Строка таблицы ищет свою позицию по `product_id`, без него — через ДВЕРЬ
+ * имени `resolveId` (тот же резолвер, что кладёт движения в леджер; R-G-1).
+ * Позиция без строки —
  * `no_row`: это факт о таблице, он виден всегда; расхождением считается только
  * когда в леджере не ноль. Пустая таблица при непустом леджере поэтому не может
  * дать «расхождений 0» — гейт катовера снова что-то проверяет.
  */
-export function parityRows(goods: GoodsStock, table: TableStockRow[], canon: (raw: string) => string): VendingParityRow[] {
+export function parityRows(goods: GoodsStock, table: TableStockRow[], resolveId: (raw: string) => string | null): VendingParityRow[] {
   const byId = new Map(goods.rows.map((r) => [r.productId, r]));
-  // Коллизия нормализованных имён двух позиций прайса — выигрывает ПЕРВАЯ, как
-  // у карточек в плане закупа (`rulesKeyByNorm`): молча переехать на вторую
-  // хуже, чем остаться на той, по которой уже считали.
-  const byNorm = new Map<string, GoodsStockRow>();
-  for (const r of goods.rows) {
-    const k = normalizeProductName(r.productName);
-    if (!byNorm.has(k)) byNorm.set(k, r);
-  }
+  // Строка без `product_id` ложится ТУДА ЖЕ, куда дверь кладёт движения по
+  // этому имени. Своего правила сопоставления у сверки нет намеренно: при двух
+  // позициях прайса с одним нормализованным ключом «первая по коллации» или
+  // «активная» — это уже другое правило, и строка с леджером разъезжались бы по
+  // разным позициям: сходящаяся таблица давала бы пару фантомных расхождений.
+  // Спор и промах у двери — `null`: строка остаётся сиротой, видимой.
+  //
   // Строка таблицы занимает позицию в ДВА прохода: сначала те, что связаны с
-  // прайсом по `product_id`, потом остальные — по канону имени. Иначе строка,
+  // прайсом по `product_id`, потом остальные — через дверь имени. Иначе строка,
   // сопоставленная лишь по имени, могла бы занять позицию раньше строки с
   // настоящей связью, и та ушла бы в сироты. Вторая строка на ту же позицию —
   // сирота: видимая, а не потерянная.
@@ -108,7 +108,8 @@ export function parityRows(goods: GoodsStock, table: TableStockRow[], canon: (ra
     } else byName.push(t);
   }
   for (const t of byName) {
-    if (!claim(t, byNorm.get(normalizeProductName(canon(t.productName))))) orphans.push(t);
+    const id = resolveId(t.productName);
+    if (!claim(t, id === null ? undefined : byId.get(id))) orphans.push(t);
   }
   const out: VendingParityRow[] = [];
   for (const p of goods.rows) {
