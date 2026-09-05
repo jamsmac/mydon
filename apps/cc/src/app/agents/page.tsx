@@ -2,25 +2,11 @@ import Link from "next/link";
 import { core, CoreUnavailable, type AgentCard } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
 import { NewAgentForm } from "../../components/agent-new";
+// Подписи направления и тира переехали в lib/labels: их читают и клиентские
+// компоненты (витрина навыков), а эта страница тянет server-only через core.
+import { BUSINESS_LABEL, TIER_LABEL } from "../../lib/labels";
 
 export const dynamic = "force-dynamic";
-
-const BUSINESS_LABEL: Record<string, string> = {
-  globerent: "GLOBERENT",
-  vendhub: "VendHub",
-  personal: "Личное",
-  mydon: "MYDON",
-  shared: "Общий",
-};
-
-/** Что означает уровень самостоятельности — словами, а не буквой. */
-export const TIER_LABEL: Record<string, string> = {
-  T0: "только спрашивает",
-  T1: "предлагает, решаешь ты",
-  T2: "мелкое — сам",
-  T3: "многое — сам",
-  T4: "почти всё сам",
-};
 
 export default async function Agents() {
   let list: AgentCard[];

@@ -57,3 +57,27 @@ export const typeOne = (t: string): string => TYPE_ONE[t] ?? t;
 
 /** Поля, которые читаются как код: моноширинный шрифт, как в ПО владельца. */
 export const MONO_KEYS = new Set(["ИКПУ", "штрихкод", "упаковка", "серийник", "gid", "vhm_id"]);
+
+/**
+ * Уровень самостоятельности агента — словами, а не буквой (правило дизайна §6).
+ *
+ * Живёт здесь, а не в `app/agents/page.tsx`: подписи нужны и клиентским
+ * компонентам (`skills-deck`), а страница тянет `lib/core` с `server-only` —
+ * импорт из неё утащил бы серверный модуль в клиентский бандл.
+ */
+export const TIER_LABEL: Record<string, string> = {
+  T0: "только спрашивает",
+  T1: "предлагает, решаешь ты",
+  T2: "мелкое — сам",
+  T3: "многое — сам",
+  T4: "почти всё сам",
+};
+
+/** Направление агента. «shared» — общий для всех направлений, отдельного домена нет. */
+export const BUSINESS_LABEL: Record<string, string> = {
+  globerent: "GLOBERENT",
+  vendhub: "VendHub",
+  personal: "Личное",
+  mydon: "MYDON",
+  shared: "Общий",
+};
