@@ -133,9 +133,11 @@ export interface CommitAgentTaskOutcomeResult {
  * ЗДЕСЬ, на границе провода: рантайм дальше работает с уже чистыми значениями.
  */
 const AGENT_SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/; // маска сама держит длину ≤64
+// `minimal` в списке НЕТ: Core его не принимает и не исполняет. Пришедшее
+// откуда-то значение молча отбрасывается, и навык берёт усилие из паспорта —
+// это лучше, чем нести провайдеру заведомо отвергаемое поле.
 const MODEL_EFFORTS = new Set<ModelReasoningEffort>([
   "none",
-  "minimal",
   "low",
   "medium",
   "high",

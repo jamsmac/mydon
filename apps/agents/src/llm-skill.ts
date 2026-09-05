@@ -250,6 +250,8 @@ export function parseModelJson(text: string): LlmSkillOutput {
 export interface ProposalTrail {
   skill: string;
   inputHash: string;
+  /** Хеш собранного system-промпта (устав, роль, тело навыка, страницы KB). */
+  promptHash: string;
   model?: string;
   costUsd?: number;
   ledgerWarning?: string;
@@ -276,6 +278,19 @@ export function taskInputHash(input: TaskInputLike): string {
   return `sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
 }
 
+/**
+ * Хеш собранного system-промпта: устав, роль, тело навыка, страницы KB.
+ *
+ * Входит в `signatureFacts` рядом с `inputHash`, потому что «тот же вход» — ещё
+ * не «тот же вопрос»: правка KB, устава или самого файла навыка меняет ответ
+ * модели, и владелец обязан увидеть новое предложение, а не подавленный дубль.
+ * Обратное тоже важно: неизменённые вход И промпт дают тот же ответ, и повтор
+ * по расписанию честно закрывается как `no_change`.
+ */
+export function promptHashOf(system: string): string {
+  return `sha256:${createHash("sha256").update(system, "utf8").digest("hex")}`;
+}
+
 /** Ответ модели → Proposal; «нет повода» → null. Факты владельцу — полные, сигнатура — только вход задачи. */
 export function toProposal(out: LlmSkillOutput, trail: ProposalTrail): Proposal | null {
   if (out.summary.toLowerCase() === NO_SIGNAL_SUMMARY) return null;
@@ -299,7 +314,11 @@ export function toProposal(out: LlmSkillOutput, trail: ProposalTrail): Proposal 
       outputChars: trail.outputChars,
       inputHash: trail.inputHash,
     },
-    signatureFacts: { skill: trail.skill, inputHash: trail.inputHash },
+    signatureFacts: {
+      skill: trail.skill,
+      inputHash: trail.inputHash,
+      promptHash: trail.promptHash,
+    },
     ...(next.length ? { next: next.slice(0, 5) } : {}),
   };
 }
@@ -359,6 +378,7 @@ export function buildLlmSkill(meta: SkillMeta, deps: LlmSkillDeps): Skill {
     return toProposal(out, {
       skill: meta.name,
       inputHash: taskInputHash(input),
+      promptHash: promptHashOf(system),
       ...(res.model !== undefined ? { model: res.model } : {}),
       ...(res.costUsd !== undefined ? { costUsd: res.costUsd } : {}),
       ...(res.ledgerWarning ? { ledgerWarning: res.ledgerWarning } : {}),

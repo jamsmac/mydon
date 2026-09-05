@@ -141,6 +141,7 @@ describe("llm-skill: разбор ответа модели (R-LS-5)", () => {
     const trail = {
       skill: "qualify-lead",
       inputHash: "sha256:x",
+      promptHash: "sha256:p",
       kbPages: [],
       kbMissing: [],
       toolsIgnored: [],
@@ -152,7 +153,11 @@ describe("llm-skill: разбор ответа модели (R-LS-5)", () => {
     const p = toProposal(parseModelJson(GOOD_JSON), { ...trail, model: "gpt", costUsd: 0.01 });
     assert.ok(p);
     assert.equal(p.action.startsWith("Лид OLMA"), true);
-    assert.deepEqual(p.signatureFacts, { skill: "qualify-lead", inputHash: "sha256:x" }, "дедуп — по входу задачи (R-LS-9)");
+    assert.deepEqual(
+      p.signatureFacts,
+      { skill: "qualify-lead", inputHash: "sha256:x", promptHash: "sha256:p" },
+      "дедуп — по входу задачи И собранному промпту (R-LS-9)",
+    );
     assert.equal(p.facts.model, "gpt");
     assert.equal(p.facts.costUsd, 0.01);
     assert.equal(p.facts.details, "Лид: OLMA\nКласс: hot (score 9)");
@@ -161,7 +166,7 @@ describe("llm-skill: разбор ответа модели (R-LS-5)", () => {
   it("escalate: true ставит эскалацию первым пунктом next", () => {
     const p = toProposal(
       { summary: "s", details: "d", escalate: true, next: ["позвонить"] },
-      { skill: "q", inputHash: "h", kbPages: [], kbMissing: [], toolsIgnored: [], promptChars: 0, outputChars: 0, contextMissing: [] },
+      { skill: "q", inputHash: "h", promptHash: "p", kbPages: [], kbMissing: [], toolsIgnored: [], promptChars: 0, outputChars: 0, contextMissing: [] },
     );
     assert.deepEqual(p?.next, ["Эскалация владельцу: модель считает случай нестандартным", "позвонить"]);
   });
@@ -299,6 +304,44 @@ describe("llm-skill: исполнитель как Skill (R-LS-1, R-LS-2, R-LS-3
       assert.deepEqual(proposal.facts.kbMissing, ["shared/kb/nope.md"]);
       assert.deepEqual(proposal.facts.toolsIgnored, ["read_db"]);
       assert.equal(typeof proposal.facts.promptChars, "number");
+    } finally {
+      d.cleanup();
+    }
+  });
+
+  it("тот же вход и промпт → та же сигнатура; правка KB меняет promptHash", async () => {
+    // Дедуп по расписанию держится ровно на этом: одинаковый вход И одинаковый
+    // собранный промпт — повод тот же, предложение подавляется (`no_change`).
+    // Но «тот же вход» ещё не «тот же вопрос»: правка KB/устава/тела навыка
+    // меняет ответ модели, и владелец обязан увидеть новое предложение.
+    const d = makeDirs(FILES);
+    try {
+      const deps = {
+        sharedDir: d.shared,
+        agentsDir: d.agents,
+        gateway: () => localGateway,
+        callModel: fakeCall({ text: GOOD_JSON, model: "m1" }),
+      };
+      const skill = buildLlmSkill(meta(), deps);
+      const first = await skill(agent, {} as never, ctx() as never);
+      const again = await skill(agent, {} as never, ctx() as never);
+      assert.deepEqual(again?.signatureFacts, first?.signatureFacts, "вход и KB не менялись");
+
+      fs.writeFileSync(
+        path.join(d.shared, "kb/globerent/heli-models.md"),
+        "# HELI\nCPD25 снят с производства, актуален CPD30.",
+      );
+      const afterKb = await buildLlmSkill(meta(), deps)(agent, {} as never, ctx() as never);
+      assert.equal(
+        afterKb?.signatureFacts?.inputHash,
+        first?.signatureFacts?.inputHash,
+        "вход задачи не менялся",
+      );
+      assert.notEqual(
+        afterKb?.signatureFacts?.promptHash,
+        first?.signatureFacts?.promptHash,
+        "изменившаяся KB обязана заново открыть предложение",
+      );
     } finally {
       d.cleanup();
     }

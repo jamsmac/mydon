@@ -127,14 +127,21 @@ function SkillCard({ item }: { item: SkillDeckItem }) {
   const [error, setError] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
 
+  // Навык «реализован», если его есть чем исполнить: тело файла у модели или
+  // код в реестре агентов. `executor: code` без кода — строка каталога без
+  // исполнителя: раньше кнопка была активна, задача создавалась, а worker
+  // угадывал по заголовку СОСЕДНИЙ навык (решение Р-6).
+  const implemented = item.executor === "llm" || item.hasCode;
   // Запускается только закреплённый навык работающего агента: остальное Core
   // отклонит, и честнее не давать нажать, чем показать отказ после нажатия.
-  const canRun = item.agentStatus === "active" && item.enabled;
+  const canRun = item.agentStatus === "active" && item.enabled && implemented;
   const hint = canRun
     ? undefined
-    : item.agentStatus === "active"
-      ? "Впиши навык агенту в его карточке"
-      : "Включи агента в его карточке";
+    : !implemented
+      ? "навык ещё не реализован"
+      : item.agentStatus === "active"
+        ? "Впиши навык агенту в его карточке"
+        : "Включи агента в его карточке";
   // Архивный агент по расписанию не ходит, даже если строки в карточке остались.
   const crons = item.agentStatus === "deprecated" ? [] : item.crons;
 
@@ -184,6 +191,9 @@ function SkillCard({ item }: { item: SkillDeckItem }) {
         {/* Файл навыка обещает модель, а внутри код: важнее любой другой метки —
             владелец должен знать, что ответ придёт не от модели. */}
         {item.hasCode && item.executor === "llm" && <span className="pill warn">исполнится код</span>}
+        {/* Обратный случай: обещан код, а кода нет. Запускать нечем — метка
+            объясняет заблокированную кнопку прямо в карточке. */}
+        {!implemented && <span className="pill bad">не реализован</span>}
       </div>
 
       {item.problems.length > 0 && (

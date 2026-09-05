@@ -146,6 +146,27 @@ describe("loadSkillMeta — поля llm-исполнителя (executor / trig
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("model-effort: minimal — замечание, а не значение: провайдер его не исполняет", () => {
+    // Core с этим усилием задачу не примет, а provider-job отвергнет: тихо
+    // принятое в паспорте `minimal` уводило бы прогон в бесконечные повторы.
+    const dir = makeAgentsDir({
+      "a/skills/tiny.md": [
+        "---",
+        "name: tiny",
+        "description: d",
+        "requires-approval: T1",
+        "executor: llm",
+        "model-effort: minimal",
+        "---",
+        "тело",
+      ].join("\n"),
+    });
+    const [m] = loadSkillMeta(dir);
+    assert.equal(m.modelEffort, undefined);
+    assert.match(m.problems.join("; "), /неизвестный model-effort «minimal»/);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("executor: llm без requires-approval — замечание: llm-навык обязан объявить минимальный тир", () => {
     const dir = makeAgentsDir({ "a/skills/free.md": "---\nname: free\ndescription: d\nexecutor: llm\n---\nтело" });
     const [m] = loadSkillMeta(dir);

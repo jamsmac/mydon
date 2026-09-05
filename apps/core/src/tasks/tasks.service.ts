@@ -543,8 +543,13 @@ function notionReportPayload(
 /**
  * Усилие модели у llm-навыка (R-SD-4). Список — контракт панели и рантайма
  * агентов: значение уходит в `reasoningEffort` провайдера как есть.
+ *
+ * Без `minimal`: провайдерный валидатор task-llm-jobs его не принимает
+ * (`OPENAI_GPT_56_REASONING_EFFORTS`), и задача с таким усилием проходила DTO,
+ * а падала уже на диспетчере — то есть крутилась в повторах вместо отказа при
+ * вводе. Список принимаемого обязан совпадать со списком исполняемого.
  */
-export const MODEL_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const MODEL_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 export type ModelEffort = (typeof MODEL_EFFORTS)[number];
 
 /** Параметры конкретного запуска. Код-навыки их игнорируют. */
@@ -664,10 +669,11 @@ function agentScheduleIdentity(input: EnsureAgentScheduleInput): AgentScheduleTa
   const clientKey = `agent-schedule:v1:${digest}`;
   return {
     title: `По расписанию: ${input.skill}`,
-    description:
-      `Системный запуск навыка ${input.skill}.\n` +
-      `Cron: ${input.cron}\n` +
-      `Плановое время UTC: ${scheduledAt.toISOString()}`,
+    // Плановое время в описании НЕ повторяем: оно уже лежит в `due`, а описание
+    // уходит в хеш входа задачи (`taskInputHash`) — уникальная строка на каждый
+    // тик делала дедуп llm-предложений (`signatureFacts`) мёртвым: каждое
+    // срабатывание крона выглядело новым поводом и открывало новое согласование.
+    description: `Системный запуск навыка ${input.skill}.\nCron: ${input.cron}`,
     ownerKind: "agent",
     ownerRef: input.agentName,
     domain: null,

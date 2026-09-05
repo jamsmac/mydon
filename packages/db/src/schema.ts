@@ -363,6 +363,19 @@ export const task = pgTable(
       .where(
         sql`${t.source} = 'agent-schedule' and ${t.status} <> 'done' and ${t.status} <> 'cancelled'`,
       ),
+    /**
+     * «Последний запуск навыка» в deck (R-SD-7): `distinct on (owner_ref,
+     * agent_skill) … order by … created_at desc` берёт первую строку каждой
+     * группы прямо из индекса, без сортировки всей таблицы задач.
+     *
+     * Частичный: `agent_skill` есть только у задач из deck и расписаний —
+     * остальные (их подавляющее большинство) в индексе не нужны. Объявлен
+     * ЗДЕСЬ, а не только в SQL миграции: иначе следующая генерация увидела бы
+     * дрейф и попыталась создать индекс заново.
+     */
+    index("task_agent_skill_idx")
+      .on(t.ownerRef, t.agentSkill, t.createdAt.desc())
+      .where(sql`${t.agentSkill} is not null`),
     check("task_agent_run_generation_nonnegative", sql`${t.agentRunGeneration} >= 0`),
   ],
 );

@@ -114,6 +114,22 @@ describe("витрина навыков", () => {
     expect(button).toHaveAttribute("title", "Включи агента в его карточке");
   });
 
+  it("нереализованный навык (executor code без кода) не запускается из deck", () => {
+    render(<SkillsDeck deck={deck([item({ executor: "code", hasCode: false })])} />);
+
+    const button = screen.getByRole("button", { name: "Запустить" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "навык ещё не реализован");
+    expect(screen.getByText("не реализован")).toBeVisible();
+  });
+
+  it("llm-навык без кода реализован телом файла — запуск доступен", () => {
+    render(<SkillsDeck deck={deck([item({ executor: "llm", hasCode: false })])} />);
+
+    expect(screen.getByRole("button", { name: "Запустить" })).toBeEnabled();
+    expect(screen.queryByText("не реализован")).not.toBeInTheDocument();
+  });
+
   it("последний запуск виден словами, с причиной остановки и ссылкой в задачу", () => {
     render(
       <SkillsDeck

@@ -63,7 +63,9 @@ export type SkillExecutor = "code" | "llm";
 
 const TIERS = new Set(["T0", "T1", "T2", "T3", "T4"]);
 const EXECUTORS = new Set<SkillExecutor>(["code", "llm"]);
-const EFFORTS = new Set<ModelReasoningEffort>(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+// Без `minimal`: провайдерный маршрут его отвергает, поэтому `model-effort:
+// minimal` во frontmatter — замечание паспорта, а не рабочее значение.
+const EFFORTS = new Set<ModelReasoningEffort>(["none", "low", "medium", "high", "xhigh", "max"]);
 
 function asTier(value: unknown): AutonomyTier | undefined {
   const raw = typeof value === "string" ? value.trim().toUpperCase() : "";

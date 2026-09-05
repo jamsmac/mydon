@@ -517,4 +517,32 @@ describe("Запуск навыка из панели (R-SD-2/6)", () => {
     const svc = new AgentsService(runDb({ agent: card() }).db, noTasks);
     await assert.rejects(svc.runSkill("vendhub-ops", "нет-такого", {}), NotFoundException);
   });
+
+  it("навык обещает код, а кода нет — 409, а не задача под угадывание (Р-6)", async () => {
+    const spy = tasksSpy();
+    const svc = new AgentsService(
+      runDb({
+        catalog: { agentName: "vendhub-ops", skill: "parts-audit", executor: "code", hasCode: false },
+        agent: card(),
+      }).db,
+      spy.tasks,
+    );
+    await assert.rejects(
+      svc.runSkill("vendhub-ops", "parts-audit", {}),
+      /Навык "parts-audit" ещё не реализован — запуск невозможен/,
+    );
+    assert.deepEqual(spy.calls, [], "задача не создаётся: её всё равно некому выполнить");
+  });
+
+  it("llm-навык без кода запускается: его реализация — тело файла, а не реестр", async () => {
+    const spy = tasksSpy();
+    await new AgentsService(
+      runDb({
+        catalog: { agentName: "vendhub-ops", skill: "parts-audit", executor: "llm", hasCode: false },
+        agent: card(),
+      }).db,
+      spy.tasks,
+    ).runSkill("vendhub-ops", "parts-audit", {});
+    assert.equal(spy.calls.length, 1);
+  });
 });

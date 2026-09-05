@@ -16,6 +16,5 @@ CREATE TABLE "agent_skill_catalog" (
 );
 --> statement-breakpoint
 ALTER TABLE "task" ADD COLUMN "agent_skill" text;--> statement-breakpoint
-ALTER TABLE "task" ADD COLUMN "run_options" jsonb;
---> statement-breakpoint
-CREATE INDEX "task_agent_skill_idx" ON "task" ("owner_ref", "agent_skill", "created_at" DESC) WHERE "agent_skill" IS NOT NULL;
+ALTER TABLE "task" ADD COLUMN "run_options" jsonb;--> statement-breakpoint
+CREATE INDEX "task_agent_skill_idx" ON "task" USING btree ("owner_ref","agent_skill","created_at" DESC NULLS LAST) WHERE "task"."agent_skill" is not null;

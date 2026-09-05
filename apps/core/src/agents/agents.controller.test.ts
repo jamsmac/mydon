@@ -135,6 +135,11 @@ describe("Запуск навыка из панели — валидация (R-
     const dto = plainToInstance(RunSkillDto, { modelEffort: "ultra" });
     assert.ok((await problems(dto)).some((m) => /modelEffort/.test(m)));
   });
+
+  it("«minimal» отклоняется: список принимаемого совпадает со списком исполняемого", async () => {
+    const dto = plainToInstance(RunSkillDto, { modelEffort: "minimal" });
+    assert.ok((await problems(dto)).some((m) => /modelEffort/.test(m)));
+  });
 });
 
 describe("Порядок маршрутов: «skills» не должен уехать в :name", () => {

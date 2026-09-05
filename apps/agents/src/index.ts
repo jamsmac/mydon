@@ -23,11 +23,11 @@ import { ourvendConfigFromEnv, runOurvendSync } from "./ourvend-sync";
 import { isLlmSkill, registerLlmSkills } from "./llm-skill";
 import { isKbPagePath, loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
-import { desiredJobs, jobKey, scheduledInvocationMode } from "./schedule";
+import { desiredJobs, jobKey, llmCronAdmitted, scheduledInvocationMode } from "./schedule";
 import { ScheduledOccurrenceRetryQueue } from "./scheduled-occurrence-queue";
 import { catalogFromMetas } from "./skill-catalog";
 import { loadSkillMeta, skillTierFloors } from "./skill-loader";
-import { hasCodeSkill, hasSkill } from "./skills";
+import { hasCodeSkill } from "./skills";
 import { applySystemOverrides } from "./system-config";
 import { buildTaskLlmWorkflowPlan } from "./task-llm-workflow";
 import { runAgentTasks } from "./task-worker";
@@ -332,7 +332,16 @@ async function main(): Promise<void> {
     // llm-навык на cron идёт durable-задачей, а не in-process: деньги проходят
     // через Core-ledger, а повтор тика — replay по clientKey. Раньше сюда
     // передавался hasCodeSkill, и llm-навык в расписании молча не планировался.
-    const { jobs, notWired } = desiredJobs(agents, hasSkill);
+    //
+    // Но только при живом metered-маршруте: без него каждая созданная задача
+    // ушла бы в route_unavailable и повторялась бы Core каждые 60 секунд вечно.
+    // Маршрут проверяем на КАЖДОМ reconcile (раз в 10 минут) — включат ключ,
+    // и навык встанет в расписание сам, без перезапуска контейнера.
+    const { jobs, notWired } = desiredJobs(
+      agents,
+      (skill) =>
+        hasCodeSkill(skill) || (isLlmSkill(skill) && llmCronAdmitted(modelGatewayFromEnv())),
+    );
     const want = new Set(jobs.map(jobKey));
 
     // Гасим то, чего в желаемом наборе больше нет.
@@ -401,7 +410,16 @@ async function main(): Promise<void> {
       }
     }
 
-    const nw = notWired.join(", ");
+    // llm-навык без маршрута отказан по ДРУГОЙ причине, чем навык без тела:
+    // первое чинится ключом в окружении, второе — файлом навыка. Одна строка
+    // лога на оба случая заставляла бы гадать, что именно чинить.
+    const nw = notWired
+      .map((ref) =>
+        isLlmSkill(ref.slice(ref.indexOf("/") + 1))
+          ? `${ref} (LLM-маршрут выключен/не metered)`
+          : ref,
+      )
+      .join(", ");
     if (nw !== lastNotWired) {
       lastNotWired = nw;
       if (nw.length > 0) console.log(`Навыки без реализации (не планируются): ${nw}.`);

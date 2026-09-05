@@ -522,6 +522,25 @@ describe("Durable cron occurrence tasks", () => {
     );
   });
 
+  it("описание не несёт планового времени: иначе дедуп llm по расписанию мёртв", async () => {
+    const fixture = agentScheduleDb();
+    await makeTasks(fixture.db).ensureAgentSchedule(occurrence, observedAt);
+    const description = String(fixture.task?.description);
+    assert.equal(description, "Системный запуск навыка coach-review.\nCron: 0 10 * * 1");
+    assert.doesNotMatch(description, /2026-08-31T05:00/, "точное время живёт в due, а не в тексте");
+
+    // Следующий тик того же крона обязан дать ТОТ ЖЕ текст: описание входит в
+    // taskInputHash, а хеш — в signatureFacts предложения llm-навыка. Уникальная
+    // строка на каждое срабатывание делала бы каждый тик «новым поводом» и
+    // открывала владельцу новое согласование вместо no_change.
+    const nextWeek = agentScheduleDb();
+    await makeTasks(nextWeek.db).ensureAgentSchedule(
+      { ...occurrence, scheduledAt: new Date("2026-09-07T05:00:00.000Z") },
+      new Date("2026-09-07T05:00:30.000Z"),
+    );
+    assert.equal(nextWeek.task?.description, description);
+  });
+
   it("не принимает тот же ключ после изменения immutable payload", async () => {
     const fixture = agentScheduleDb();
     const service = makeTasks(fixture.db);

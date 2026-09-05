@@ -2084,6 +2084,8 @@ async function проверитьКаталогНавыковИDeck() {
   const агент = `smoke-deck-${stamp}`;
   const навыкLlm = "deck-llm";
   const навыкКод = "deck-code";
+  /** Строка каталога «обещан код, а кода нет»: запускать нечем. */
+  const навыкБезКода = "deck-no-impl";
   const крон = "17 9 * * 1";
 
   const строка = (skill, extra) => ({
@@ -2111,7 +2113,7 @@ async function проверитьКаталогНавыковИDeck() {
     status: "active",
     mission: "Дымовой прогон каталога навыков",
     autonomyDefault: "T0",
-    skills: [навыкLlm, навыкКод],
+    skills: [навыкLlm, навыкКод, навыкБезКода],
     // R-SD-5: llm-навык в расписании больше не ошибка — cron доезжает до deck.
     schedule: [{ cron: крон, skill: навыкLlm }],
   });
@@ -2134,9 +2136,10 @@ async function проверитьКаталогНавыковИDeck() {
       skills: [
         строка(навыкLlm, { executor: "llm", tier: "T2", modelEffort: "medium", maxTokens: 4096 }),
         строка(навыкКод, { executor: "code", hasCode: true, problems: ["нет тира"] }),
+        строка(навыкБезКода, { executor: "code", hasCode: false }),
       ],
     });
-    if (!синк.r.ok || синк.json?.count !== 2) {
+    if (!синк.r.ok || синк.json?.count !== 3) {
       throw new Error(`синк каталога → ${синк.r.status}: ${синк.text.slice(0, 200)}`);
     }
 
@@ -2213,6 +2216,15 @@ async function проверитьКаталогНавыковИDeck() {
     const послеЗапуска = найти(await deck(), навыкLlm);
     if (послеЗапуска?.lastRun?.taskId !== запуск.json.taskId) {
       throw new Error(`deck не показал последний запуск: ${JSON.stringify(послеЗапуска?.lastRun)}`);
+    }
+
+    // Навык обещан кодом, а кода нет: запускать нечего, и Core обязан сказать
+    // это ДО создания задачи. Иначе worker брал бы такую задачу и угадывал по
+    // заголовку СОСЕДНИЙ навык, а deck показывал бы его итог под нажатым
+    // именем (решение Р-6: молчаливая подмена хуже честного отказа).
+    const безКода = await jsonRequest("POST", `/agents/${агент}/skills/${навыкБезКода}/run`, {});
+    if (безКода.r.status !== 409 || !безКода.text.includes("ещё не реализован")) {
+      throw new Error(`нереализованный навык → ${безКода.r.status}: ${безКода.text.slice(0, 200)}`);
     }
 
     // Навыка нет в каталоге — 404 с подсказкой перезапустить агентов.

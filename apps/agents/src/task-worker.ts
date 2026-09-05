@@ -88,26 +88,53 @@ export function matchSkill(agent: AgentDefinition, title: string): string | null
   return null;
 }
 
+/** Итог выбора навыка: либо навык, либо честная причина, почему его нет. */
+export interface ResolvedTaskSkill {
+  skill: string | null;
+  /**
+   * Причина отказа для durable block-заметки задачи. Есть только когда отказ
+   * ОСОЗНАННЫЙ (явный навык без реализации); обычное «ничего не подобралось»
+   * причины не несёт — её формулирует вызывающий.
+   */
+  reason?: string;
+}
+
 /**
- * Навык задачи: явный побеждает угадывание (R-SD-3).
+ * Навык задачи: явный побеждает угадывание (R-SD-3, решение Р-6).
  *
  * `agentSkill` ставят запуск из deck и задачи по расписанию — там навык ИЗВЕСТЕН,
- * и угадывать его по заголовку было бы прямой потерей воли владельца. Но верим
- * полю не на слово: навык должен быть закреплён за агентом (карточка — источник
- * истины, снятый навык уважаем сразу) и иметь реализацию (код ∨ llm). Чужой или
- * неподключённый навык — не ошибка задачи, а повод вернуться к прежнему подбору
- * по тексту: пусть агент попробует, а «не умею» скажет уже по-настоящему.
+ * и угадывать его по заголовку было бы прямой потерей воли владельца. Поэтому у
+ * явного навыка НЕТ отката на `matchSkill`: подобранный по триггерам сосед — это
+ * другая работа, другой тир и другие деньги, а `task.agent_skill` и deck всё
+ * равно показывали бы нажатое имя. Такой молчаливый подлог хуже честного отказа
+ * (решение Р-6: «угадывание, поправляющее явное указание, — худший из отказов»).
+ *
+ * Закрепление навыка за агентом здесь НЕ проверяется: `agent.skills` — снимок из
+ * Core, который перечитывается раз в 10 минут и потому отстаёт, а членство уже
+ * проверил Core в момент создания задачи (R-SD-6, `runSkill`). Своя проверка по
+ * устаревшему снимку отменяла бы только что вписанный владельцем навык.
  */
 export function resolveTaskSkill(
   agent: AgentDefinition,
   claim: Pick<AgentTaskClaim, "taskInput">,
-): string | null {
+): ResolvedTaskSkill {
   const explicit = claim.taskInput.agentSkill;
-  if (explicit && agent.skills.includes(explicit) && hasSkill(explicit)) return explicit;
-  return matchSkill(
-    agent,
-    [claim.taskInput.title, claim.taskInput.description].filter(Boolean).join("\n"),
-  );
+  if (explicit) {
+    if (hasSkill(explicit)) return { skill: explicit };
+    const wired = agent.skills.filter(hasSkill).join(", ") || "нет";
+    return {
+      skill: null,
+      reason:
+        `Навык «${explicit}» задан явно, но не реализован — угадывать не буду. ` +
+        `Реализованные навыки: ${wired}.`,
+    };
+  }
+  return {
+    skill: matchSkill(
+      agent,
+      [claim.taskInput.title, claim.taskInput.description].filter(Boolean).join("\n"),
+    ),
+  };
 }
 
 /**
@@ -200,16 +227,22 @@ export async function runAgentTasks(
       // A durable checkpoint is authoritative after crash/takeover even if the
       // task title or the agent's current skill list changed in the meantime.
       const claimedCheckpoint = claim.execution?.checkpoint ?? claim.checkpoint;
-      const skill =
-        claim.execution?.skill ?? claimedCheckpoint?.skill ?? resolveTaskSkill(agent, claim);
+      const durableSkill = claim.execution?.skill ?? claimedCheckpoint?.skill;
+      const resolved =
+        durableSkill !== undefined ? { skill: durableSkill } : resolveTaskSkill(agent, claim);
+      const skill = resolved.skill;
       if (skill === null) {
         // Честный отказ пишем в durable block самой задачи.
         // Отдельный comment здесь неидемпотентен: потеря ответа
         // плодила бы комментарии на каждом poll. Core атомарно снимает
         // lease и блокирует новый claim до явного owner retry.
+        //
+        // Причина от `resolveTaskSkill` важнее общего «не умею»: владелец нажал
+        // конкретный навык, и ответ обязан назвать именно его, иначе владелец
+        // будет искать ошибку в задаче, а не в паспорте навыка.
         const note = (
-          `Не умею это делать. Мои навыки: ${agent.skills.join(", ") || "нет"}. ` +
-          `Уточни или переназначь задачу, затем запусти owner retry.`
+          (resolved.reason ?? `Не умею это делать. Мои навыки: ${agent.skills.join(", ") || "нет"}.`) +
+          ` Уточни или переназначь задачу, затем запусти owner retry.`
         ).slice(0, 1000);
         const blocked = await core.releaseAgentTask(
           t.id,

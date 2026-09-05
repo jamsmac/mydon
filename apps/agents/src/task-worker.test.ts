@@ -90,28 +90,43 @@ describe("resolveTaskSkill — явный навык побеждает угад
   });
 
   it("без agentSkill — прежнее поведение: подбор по тексту задачи", () => {
-    assert.equal(resolveTaskSkill(multi, claim()), "coach-review");
+    assert.deepEqual(resolveTaskSkill(multi, claim()), { skill: "coach-review" });
   });
 
   it("agentSkill закреплён за агентом и реализован — берём его", () => {
-    assert.equal(resolveTaskSkill(multi, claim("parts-audit")), "parts-audit");
+    assert.deepEqual(resolveTaskSkill(multi, claim("parts-audit")), { skill: "parts-audit" });
   });
 
-  it("чужой навык (не в карточке агента) игнорируется — fallback на подбор", () => {
-    assert.equal(resolveTaskSkill(multi, claim("watch-receivables")), "coach-review");
+  it("явный навык реализован, но карточка-снимок его ещё не знает — всё равно берём (F3)", () => {
+    // `agent.skills` перечитывается из Core раз в 10 минут: свежевписанный
+    // владельцем навык доедет до worker позже, чем задача по нему. Членство уже
+    // проверил Core при создании задачи — вторая проверка по устаревшему снимку
+    // отменяла бы явное указание владельца.
+    const stale: AgentDefinition = { ...agent, skills: ["coach-review"] };
+    assert.deepEqual(resolveTaskSkill(stale, claim("watch-receivables")), {
+      skill: "watch-receivables",
+    });
   });
 
-  it("нереализованный навык игнорируется — fallback на подбор", () => {
-    assert.equal(resolveTaskSkill(multi, claim("not-implemented-yet")), "coach-review");
+  it("нереализованный явный навык → null с причиной, без подбора (Р-6)", () => {
+    const res = resolveTaskSkill(multi, claim("not-implemented-yet"));
+    assert.equal(res.skill, null, "подбор по тексту не должен подменять явный навык");
+    assert.match(res.reason ?? "", /Навык «not-implemented-yet» задан явно, но не реализован/);
+    assert.match(res.reason ?? "", /Реализованные навыки: coach-review, parts-audit\./);
   });
 
-  it("ни явного, ни подходящего навыка — null (агент честно вернёт задачу)", () => {
-    const other: AgentDefinition = { ...agent, skills: ["parts-audit"] };
-    assert.equal(
-      resolveTaskSkill(other, {
-        taskInput: { title: "Полей цветы", agentSkill: "watch-receivables" },
-      }),
-      null,
+  it("у агента вообще нет реализованных навыков — причина говорит «нет»", () => {
+    const empty: AgentDefinition = { ...agent, skills: ["not-implemented-yet"] };
+    assert.match(
+      resolveTaskSkill(empty, claim("not-implemented-yet")).reason ?? "",
+      /Реализованные навыки: нет\./,
     );
+  });
+
+  it("ни явного, ни подходящего навыка — null без причины (агент честно вернёт задачу)", () => {
+    const other: AgentDefinition = { ...agent, skills: ["parts-audit"] };
+    assert.deepEqual(resolveTaskSkill(other, { taskInput: { title: "Полей цветы" } }), {
+      skill: null,
+    });
   });
 });

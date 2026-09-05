@@ -649,4 +649,14 @@ describe("CreateTaskDto: навык агента и параметры запу�
     const errors = await validate(effort);
     assert.equal(errors[0]?.property, "runOptions", "вложенный DTO обязан проверяться");
   });
+
+  it("«minimal» отбивается на входе: провайдерный маршрут его не исполняет", async () => {
+    // Раньше DTO его принимал, а валидатор provider-job — нет: задача уходила
+    // в бесконечные 60-секундные повторы вместо честного отказа при вводе.
+    const dto = plainToInstance(CreateTaskDto, {
+      ...base,
+      runOptions: { modelEffort: "minimal" },
+    });
+    assert.equal((await validate(dto))[0]?.property, "runOptions");
+  });
 });

@@ -1,5 +1,5 @@
 {
-  "id": "6dc83bba-7057-408a-ab91-056e2312137d",
+  "id": "5008b56c-580d-41d5-b4e5-0f8b3c018512",
   "prevId": "fdb3f646-6d94-43a6-8c1c-84f35af5c7e4",
   "version": "7",
   "dialect": "postgresql",
@@ -11074,6 +11074,34 @@
           ],
           "isUnique": false,
           "where": "\"task\".\"source\" = 'agent-schedule' and \"task\".\"status\" <> 'done' and \"task\".\"status\" <> 'cancelled'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "task_agent_skill_idx": {
+          "name": "task_agent_skill_idx",
+          "columns": [
+            {
+              "expression": "owner_ref",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "agent_skill",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"task\".\"agent_skill\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}

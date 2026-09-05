@@ -629,6 +629,10 @@ a.rowlink:hover { background: var(--surf-2); }
 .pill { font-family: var(--fm); font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--tx-2); white-space: nowrap; }
 .pill.ok { color: var(--ok); border-color: var(--ok-line); background: var(--ok-soft); }
 .pill.bad { color: var(--hot); border-color: var(--hot-line); background: var(--hot-soft); }
+/* Расхождение файла с реальностью («исполнится код» у llm-навыка): тот же
+   тревожный токен, что и у .bad — класс использовался в разметке без правила
+   и выглядел обычной серой меткой, то есть не предупреждал ни о чём. */
+.pill.warn { color: var(--hot); border-color: var(--hot-line); background: var(--hot-soft); }
 .pill.human { color: var(--tx-2); }
 .pill.agent { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
 /* Действие, которого ждут от человека («наклеить номер», «без тары»): оранжевое = нажми. */

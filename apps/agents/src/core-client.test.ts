@@ -318,6 +318,14 @@ describe("Клиент durable agent-run", () => {
     );
   });
 
+  it("«minimal» отбрасывается наравне с мусором: Core его не исполняет", async () => {
+    assert.deepEqual(
+      await claimWith({ title: "Разбор недели", runOptions: { modelEffort: "minimal" } }),
+      { title: "Разбор недели" },
+      "усилие вернётся к объявленному в паспорте, а не уедет отвергаемым провайдеру",
+    );
+  });
+
   it("fail-closed отклоняет неизвестный domain в atomic task input", async () => {
     globalThis.fetch = (async () =>
       new Response(
