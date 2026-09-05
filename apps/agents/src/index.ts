@@ -213,6 +213,12 @@ async function main(): Promise<void> {
   // и перечитываем базу по расписанию.
   let agents = fromFiles;
   let fromCoreOk = false;
+  // Каталог навыков пишется ОДИН РАЗ за старт процесса. `skillMetas` читаются из
+  // файлов образа и после старта не меняются, а `loadFromCore` зовёт ещё и
+  // перечитка раз в 10 минут — без этого флага Core получал бы ~144 одинаковых
+  // перезаписи в сутки и столько же строк аудита ни о чём. Флаг ставим ТОЛЬКО
+  // после успешной записи: не записалось — попробуем на следующем круге.
+  let catalogPushed = false;
 
   async function loadFromCore(): Promise<AgentDefinition[] | null> {
     try {
@@ -226,12 +232,15 @@ async function main(): Promise<void> {
       // читает только Core и не знает про диск контейнера. Пишем ПОСЛЕ сида
       // (агенты уже есть в базе) и best-effort: каталог — витрина, из-за неё
       // агенты стартовать не перестают. Не записался — панель покажет пустое
-      // состояние, а строка в логе скажет, почему.
-      try {
-        const synced = await core.putSkillCatalog(catalogFromMetas(skillMetas, hasCodeSkill));
-        console.log(`Каталог навыков в Core: ${synced.count}.`);
-      } catch (err) {
-        console.warn("Каталог навыков не записан в Core:", err);
+      // состояние, строка в логе скажет почему, а следующий круг попробует снова.
+      if (!catalogPushed) {
+        try {
+          const synced = await core.putSkillCatalog(catalogFromMetas(skillMetas, hasCodeSkill));
+          catalogPushed = true;
+          console.log(`Каталог навыков в Core: ${synced.count}.`);
+        } catch (err) {
+          console.warn("Каталог навыков не записан в Core:", err);
+        }
       }
       // Тумблеры системы накладываем вместе с настройками агентов: обе правки
       // владельца живут в базе и подхватываются одной перечиткой.

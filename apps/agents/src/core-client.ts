@@ -128,6 +128,21 @@ export interface CommitAgentTaskOutcomeResult {
   replay?: boolean;
 }
 
+/**
+ * Подсказки прогона, которые Core кладёт в claim (R-SD-3/R-SD-4). Проверяем их
+ * ЗДЕСЬ, на границе провода: рантайм дальше работает с уже чистыми значениями.
+ */
+const AGENT_SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/; // маска сама держит длину ≤64
+const MODEL_EFFORTS = new Set<ModelReasoningEffort>([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
 /** Durable lease, которым Core отдал agent-task одному worker. */
 export interface AgentTaskClaim {
   runId: string;
@@ -533,7 +548,13 @@ export class AgentsCoreClient {
           generation: number;
           claimedAt: string;
           taskInputHash?: string;
-          taskInput?: { title?: unknown; description?: unknown; domain?: unknown };
+          taskInput?: {
+            title?: unknown;
+            description?: unknown;
+            domain?: unknown;
+            agentSkill?: unknown;
+            runOptions?: unknown;
+          };
           execution?: AgentTaskExecution | null;
           checkpoint?: AgentTaskCheckpoint | null;
         }
@@ -565,6 +586,24 @@ export class AgentsCoreClient {
     ) {
       throw new Error(`Core claim задачи ${id} содержит невалидный taskInput.domain`);
     }
+    // Подсказки прогона чиним МОЛЧА, а не роняем claim, как title/domain: испорченная
+    // подсказка — не повод не сделать задачу. Навыка нет или он мусорный — worker
+    // вернётся к подбору по тексту (R-SD-3), усилия нет — к объявленному в паспорте
+    // (R-SD-4). Уронить claim здесь значило бы заблокировать задачу из-за пустяка.
+    const rawAgentSkill = response.taskInput?.agentSkill;
+    const agentSkill =
+      typeof rawAgentSkill === "string" && AGENT_SKILL_NAME.test(rawAgentSkill)
+        ? rawAgentSkill
+        : undefined;
+    const rawRunOptions = response.taskInput?.runOptions;
+    const rawEffort =
+      typeof rawRunOptions === "object" && rawRunOptions !== null
+        ? (rawRunOptions as { modelEffort?: unknown }).modelEffort
+        : undefined;
+    const modelEffort =
+      typeof rawEffort === "string" && MODEL_EFFORTS.has(rawEffort as ModelReasoningEffort)
+        ? (rawEffort as ModelReasoningEffort)
+        : undefined;
     return {
       runId: response.runId,
       executionAttemptId: response.executionAttemptId,
@@ -576,6 +615,8 @@ export class AgentsCoreClient {
           ? { description: claimedDescription }
           : {}),
         ...(claimedDomain !== undefined ? { domain: claimedDomain as Domain } : {}),
+        ...(agentSkill !== undefined ? { agentSkill } : {}),
+        ...(modelEffort !== undefined ? { runOptions: { modelEffort } } : {}),
       },
       ...(response.taskInputHash ? { taskInputHash: response.taskInputHash } : {}),
       ...(response.execution ? { execution: response.execution } : {}),

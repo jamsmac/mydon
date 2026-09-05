@@ -185,6 +185,8 @@ describe("Клиент durable agent-run", () => {
           title: "Найди готовое решение",
           description: "Telegram-бот для квалификации лидов в Узбекистане",
           domain: "mydon",
+          agentSkill: "parts-audit",
+          runOptions: { modelEffort: "high" },
         },
       },
       { renewed: true },
@@ -212,6 +214,10 @@ describe("Клиент durable agent-run", () => {
         title: "Найди готовое решение",
         description: "Telegram-бот для квалификации лидов в Узбекистане",
         domain: "mydon",
+        // R-SD-3/R-SD-4: явный навык и усилие прогона обязаны дойти до рантайма,
+        // иначе worker снова угадывает навык, а усилие из панели не действует.
+        agentSkill: "parts-audit",
+        runOptions: { modelEffort: "high" },
       },
     });
     assert.equal(await core.heartbeatAgentTask("t1", "receivables", RUN_ID), true);
@@ -267,6 +273,49 @@ describe("Клиент durable agent-run", () => {
         },
       },
     ]);
+  });
+
+  /** Один claim-ответ Core → taskInput клиента. */
+  async function claimWith(taskInput: Record<string, unknown>) {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          claimed: true,
+          runId: "run-1",
+          executionAttemptId: "attempt-1",
+          generation: 1,
+          claimedAt: "2026-08-29T10:00:00.000Z",
+          taskInput,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof globalThis.fetch;
+    const claim = await new AgentsCoreClient("http://core").claimAgentTask("t1", "vendhub-ops");
+    return claim?.taskInput;
+  }
+
+  it("старый Core без agentSkill/runOptions даёт прежнюю форму входа (R-SD-10)", async () => {
+    assert.deepEqual(await claimWith({ title: "Разбор недели" }), { title: "Разбор недели" });
+  });
+
+  it("мусорные agentSkill/усилие отбрасываются, а не роняют задачу", async () => {
+    // Ронять claim нельзя: подсказка испорчена — worker просто вернётся к
+    // подбору по тексту и усилию паспорта, а задача всё равно будет сделана.
+    assert.deepEqual(
+      await claimWith({
+        title: "Разбор недели",
+        agentSkill: "Parts Audit!",
+        runOptions: { modelEffort: "turbo" },
+      }),
+      { title: "Разбор недели" },
+    );
+    assert.deepEqual(
+      await claimWith({ title: "Разбор недели", agentSkill: "", runOptions: {} }),
+      { title: "Разбор недели" },
+    );
+    assert.deepEqual(
+      await claimWith({ title: "Разбор недели", agentSkill: "x".repeat(65) }),
+      { title: "Разбор недели" },
+    );
   });
 
   it("fail-closed отклоняет неизвестный domain в atomic task input", async () => {
