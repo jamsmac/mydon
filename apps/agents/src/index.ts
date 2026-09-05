@@ -297,6 +297,11 @@ async function main(): Promise<void> {
   const tasksPaused = (): boolean => assignedAgentTasksPaused(process.env);
   let lastSchedulesPaused = schedulesPaused();
   let lastTasksPaused = tasksPaused();
+  // Допуск llm-навыков на cron зависит от LLM-маршрута (R-SD-5). Маршрут — живая
+  // настройка панели, она не меняет ни карточки агентов, ни флаг паузы, поэтому
+  // без этого триггера перечитка не перестраивала бы расписания: включённый
+  // маршрут не запускал бы llm-cron до рестарта, выключенный — не гасил бы его.
+  let lastLlmCronAdmitted = llmCronAdmitted(modelGatewayFromEnv());
   if (lastSchedulesPaused) {
     console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания на паузе. Слежу за снятием (панель/env).");
   }
@@ -573,7 +578,17 @@ async function main(): Promise<void> {
             : "Пауза назначенных задач снята — worker возьмёт их в ближайший poll.",
         );
       }
-      if (changed || schedulesPauseFlipped) reconcileSchedules();
+      const llmCronAdmittedNow = llmCronAdmitted(modelGatewayFromEnv());
+      const llmCronFlipped = llmCronAdmittedNow !== lastLlmCronAdmitted;
+      if (llmCronFlipped) {
+        lastLlmCronAdmitted = llmCronAdmittedNow;
+        console.log(
+          llmCronAdmittedNow
+            ? "LLM-маршрут metered — llm-навыки допущены на cron, перестраиваю расписания."
+            : "LLM-маршрут выключен или не metered — llm-навыки снимаю с cron.",
+        );
+      }
+      if (changed || schedulesPauseFlipped || llmCronFlipped) reconcileSchedules();
     })();
   }, 10 * 60_000).unref();
 

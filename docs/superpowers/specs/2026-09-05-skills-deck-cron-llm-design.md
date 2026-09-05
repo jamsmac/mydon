@@ -104,7 +104,7 @@ completedAt, blockedReason, resultNote} | null}`. Агент из файлов, 
 `enabled: false`. Модели — `LLM_MODEL` / `LLM_FALLBACK_MODELS` через `settingValue`.
 
 `POST /tasks` (`CreateTaskDto`) принимает необязательные `agentSkill` (`^[a-z0-9-]+$`, ≤ 64) и `runOptions.modelEffort`
-(`none|minimal|low|medium|high|xhigh|max`). Claim (`POST /tasks/:id/agent-run/claim`) возвращает их в `taskInput`.
+(`none|low|medium|high|xhigh|max` — без `minimal`, его отвергает валидатор provider-job). Claim (`POST /tasks/:id/agent-run/claim`) возвращает их в `taskInput`.
 `ensureAgentSchedule` кладёт `agentSkill = input.skill`; проверка replay допускает `NULL` у строк, созданных до миграции.
 
 ## 6. Рантайм агентов

@@ -850,6 +850,26 @@ export class TasksService {
     assertPublicTaskSource(input.source);
     assertPublicTaskClientKey(input.clientKey);
     return this.db.transaction(async (tx) => {
+      // Явный навык (R-SD-3) обязан быть закреплён за агентом-исполнителем.
+      // Worker больше НЕ сверяет членство по своему снимку карточки (снимок
+      // отстаёт до 10 минут) и доверяет Core — значит, проверять обязан Core,
+      // и на ЛЮБОМ пути создания, а не только в runSkill/ensureAgentSchedule:
+      // иначе прямой POST /tasks с agentSkill исполнил бы навык, которого у
+      // агента нет в карточке.
+      if (input.agentSkill && input.ownerKind === "agent") {
+        const agentName = (input.ownerRef ?? "").trim();
+        const [card] = agentName
+          ? await tx.select().from(agent).where(eq(agent.name, agentName)).limit(1)
+          : [];
+        const carried = Array.isArray(card?.skills)
+          ? card.skills.filter((s): s is string => typeof s === "string")
+          : [];
+        if (!card || card.archivedAt !== null || !carried.includes(input.agentSkill)) {
+          throw new ConflictException(
+            `Навык "${input.agentSkill}" не закреплён за агентом "${agentName || "—"}"`,
+          );
+        }
+      }
       // Пустая строка от клиента (нет активного человека под рукой) не должна
       // осесть в базе как «занятая» задача — те же правила, что у PATCH
       // (setStatus/edit, см. ниже): "" нормализуется в null.

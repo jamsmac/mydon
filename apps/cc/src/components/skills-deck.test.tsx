@@ -119,7 +119,7 @@ describe("витрина навыков", () => {
 
     const button = screen.getByRole("button", { name: "Запустить" });
     expect(button).toBeDisabled();
-    expect(button).toHaveAttribute("title", "навык ещё не реализован");
+    expect(button).toHaveAttribute("title", "Навык ещё не реализован");
     expect(screen.getByText("не реализован")).toBeVisible();
   });
 

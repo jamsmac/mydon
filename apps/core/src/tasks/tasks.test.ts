@@ -3214,9 +3214,11 @@ describe("Явный навык у задачи (R-SD-3/4/10)", () => {
    */
   const LEGACY_HASH = "9dfa14e792149dd322ef40cbb031223aa20c578729e419b52953e3e572742854";
 
+  const deckAgent = { name: "vendhub-ops", status: "active", archivedAt: null, skills: ["parts-audit"] } as Row;
+
   it("create сохраняет навык и параметры запуска", async () => {
     const inserted: Row[] = [];
-    await makeTasks(stubDb({ inserted })).create({
+    await makeTasks(stubDb({ inserted, selectResult: [deckAgent] })).create({
       title: "Навык parts-audit: запуск из deck",
       ownerKind: "agent",
       ownerRef: "vendhub-ops",
@@ -3226,6 +3228,26 @@ describe("Явный навык у задачи (R-SD-3/4/10)", () => {
     });
     assert.equal(inserted[0]?.agentSkill, "parts-audit");
     assert.deepEqual(inserted[0]?.runOptions, { modelEffort: "high" });
+  });
+
+  it("create с явным навыком, которого нет в карточке агента, — 409, задача не создаётся", async () => {
+    const inserted: Row[] = [];
+    await assert.rejects(
+      makeTasks(stubDb({ inserted, selectResult: [deckAgent] })).create({
+        title: "Навык draft-quote: КП",
+        ownerKind: "agent",
+        ownerRef: "vendhub-ops",
+        agentSkill: "draft-quote",
+      }),
+      /не закреплён за агентом "vendhub-ops"/,
+    );
+    assert.equal(inserted.length, 0);
+    // Нет карточки вовсе — тот же отказ: worker членство больше не проверяет.
+    await assert.rejects(
+      makeTasks(stubDb({ inserted })).create({ title: "x", ownerKind: "agent", ownerRef: "ghost", agentSkill: "parts-audit" }),
+      /не закреплён/,
+    );
+    assert.equal(inserted.length, 0);
   });
 
   it("create без навыка кладёт NULL — прежние вызовы не меняют форму строки", async () => {

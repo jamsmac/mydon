@@ -138,7 +138,7 @@ function SkillCard({ item }: { item: SkillDeckItem }) {
   const hint = canRun
     ? undefined
     : !implemented
-      ? "навык ещё не реализован"
+      ? "Навык ещё не реализован"
       : item.agentStatus === "active"
         ? "Впиши навык агенту в его карточке"
         : "Включи агента в его карточке";
