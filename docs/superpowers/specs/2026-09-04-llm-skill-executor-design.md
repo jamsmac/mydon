@@ -70,7 +70,9 @@ circuit по `resolvedModel`. Подписочный путь остаётся �
   живут во frontmatter `SKILL.md` (файлы — часть образа, читаются на старте, `index.ts:171`). `kb_pages`
   переезжают из `config.yaml` в таблицу `agent` (колонка `kb_pages jsonb`), как уже сделано для `web_sources`,
   `break_glass`, `idea_channels` (`toPassport`/`fromCore`, `index.ts:38-90`): иначе агент, заведённый из панели, не имел бы KB.
-- **R-LS-11 Ноль магии в расписании.** `llm`-навык в `schedule:` паспорта — ошибка `check-passports` в этой
+- **R-LS-11 Ноль магии в расписании.** *(снято 05.09: спека skills-deck-cron-llm, R-SD-5 — cron для llm
+  разрешён через durable-задачу, аллоу-лист не нужен.)* `llm`-навык в `schedule:` паспорта — ошибка
+  `check-passports` в этой
   фазе (рантайм и так бросит `Metered scheduled skill … blocked until it is allowlisted`, `schedule.ts:35-39`).
   Разрешение cron — отдельный срез с записью в `DURABLE_SCHEDULED_SKILLS` (`schedule.ts:19`).
 - **R-LS-12 Наблюдаемость.** Каждый прогон оставляет в `facts`: `model`, `costUsd` (если провайдер сообщил),
@@ -181,7 +183,7 @@ circuit по `resolvedModel`. Подписочный путь остаётся �
 | `apps/agents/src/runner.ts:164` | `const impl = resolveSkill(skill)`; новый `skipReason: "llm_invalid_output"`. |
 | `apps/agents/src/task-worker.ts:50-67, 218-259` | `matchSkill` учитывает `triggers` из meta и `isWired`; обобщение `route_unavailable` (`:218-259`) на любой навык с пустым планом при metered-требовании. |
 | `apps/agents/src/task-llm-workflow.ts:73` | Ветка: `executor === "llm"` → один `chatStep("llm-skill:<skill>", …)`. |
-| `apps/agents/src/schedule.ts` | Без изменений в этой фазе (R-LS-11); допуск cron — отдельный срез. |
+| `apps/agents/src/schedule.ts` | Без изменений в этой фазе (R-LS-11); допуск cron — отдельный срез. *(снято 05.09: спека skills-deck-cron-llm, R-SD-5.)* |
 | `apps/agents/src/registry.ts:20-38` | `kbPages?: string[]` из `kb_pages` паспорта (валидация: относительный путь внутри `shared/`, без `..`). |
 | `apps/agents/src/index.ts:38-90, 171` | `toPassport`/`fromCore` переносят `kbPages`; `registerLlmSkills(loadSkillMeta(AGENTS_DIR))`; предзагрузка `COMPANY.md`/`ROLE.md`/KB в кэш. |
 | `packages/db/src/schema.ts` (`agent`, `:1601`) + миграция | `kb_pages jsonb default '[]' not null`. |
@@ -227,8 +229,10 @@ circuit по `resolvedModel`. Подписочный путь остаётся �
 - Нет инструментов у модели (tool calling), нет многошаговости, нет чтения Core «по запросу модели» — это MCP
   `mydon-core` (план §6.4). `read_db` в `allowed-tools` пока игнорируется (R-LS-7).
 - Нет cron для `llm`-навыков (R-LS-11): `hunt-leads`, `scan-*`, `business-brief`, `evening-standup` остаются
-  `not_implemented` на расписании до среза «durable cron для llm».
+  `not_implemented` на расписании до среза «durable cron для llm». *(снято 05.09: спека
+  skills-deck-cron-llm, R-SD-5.)*
 - Нет ручного запуска из панели (skills deck) — в этой фазе запуск = задача агенту. Deck — план §6.1 п. 5.
+  *(снято 05.09: спека skills-deck-cron-llm, R-SD-2 — `/skills` и `POST /agents/:name/skills/:skill/run`.)*
 - Нет подписочного маршрута для агентов (см. «Почему не Agent SDK»).
 - Нет per-agent `model_routing` из `config.yaml` (`globerent-sales/config.yaml` содержит `simple/complex:
   claude-p` — поле рантаймом не читается и в этой фазе не оживает; единственная ручка — `model-effort` навыка и

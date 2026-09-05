@@ -2070,6 +2070,208 @@ async function проверитьКарточкуАгента() {
   if (list.json.some((row) => row.name === name)) throw new Error("архивный агент остался в списке активных");
 }
 
+/**
+ * Каталог навыков и запуск из deck (волна S, R-SD-1…7).
+ *
+ * Ради живого Postgres сценарий и написан: `PUT /agents/skills/catalog` — это
+ * «удалить всю таблицу → вставить всё» одной транзакцией, витрина deck — LEFT
+ * JOIN каталога с карточкой агента, а «последний запуск» — `distinct on` по
+ * задачам с частичным индексом. Заглушка БД в юнит-тестах ни одну из трёх
+ * конструкций не исполняет: она возвращает заготовленный ответ на любой SQL.
+ */
+async function проверитьКаталогНавыковИDeck() {
+  const stamp = Date.now();
+  const агент = `smoke-deck-${stamp}`;
+  const навыкLlm = "deck-llm";
+  const навыкКод = "deck-code";
+  const крон = "17 9 * * 1";
+
+  const строка = (skill, extra) => ({
+    agent: агент,
+    skill,
+    description: `Дымовой навык ${skill}`,
+    triggers: ["дымовой прогон"],
+    allowedTools: ["read_core"],
+    hasCode: false,
+    problems: [],
+    ...extra,
+  });
+
+  const deck = async () => {
+    const { r, text, json } = await jsonRequest("GET", "/agents/skills");
+    if (!r.ok) throw new Error(`GET /agents/skills → ${r.status}: ${text.slice(0, 200)}`);
+    return json;
+  };
+  const найти = (витрина, skill) =>
+    витрина.items.find((item) => item.agent === агент && item.skill === skill);
+
+  const создан = await jsonRequest("POST", "/agents", {
+    name: агент,
+    business: "mydon",
+    status: "active",
+    mission: "Дымовой прогон каталога навыков",
+    autonomyDefault: "T0",
+    skills: [навыкLlm, навыкКод],
+    // R-SD-5: llm-навык в расписании больше не ошибка — cron доезжает до deck.
+    schedule: [{ cron: крон, skill: навыкLlm }],
+  });
+  if (!создан.r.ok) {
+    throw new Error(`создание агента → ${создан.r.status}: ${создан.text.slice(0, 200)}`);
+  }
+
+  try {
+    // Дубль пары (агент, навык) обязан назвать виновника: иначе первичный ключ
+    // вернул бы агентам безымянную 400 из драйвера, и «какой файл задвоился»
+    // осталось бы искать глазами.
+    const дубль = await jsonRequest("PUT", "/agents/skills/catalog", {
+      skills: [строка(навыкКод, { executor: "code" }), строка(навыкКод, { executor: "code" })],
+    });
+    if (дубль.r.status !== 400 || !дубль.text.includes(`Дубль в каталоге: ${агент}/${навыкКод}`)) {
+      throw new Error(`дубль в каталоге → ${дубль.r.status}: ${дубль.text.slice(0, 200)}`);
+    }
+
+    const синк = await jsonRequest("PUT", "/agents/skills/catalog", {
+      skills: [
+        строка(навыкLlm, { executor: "llm", tier: "T2", modelEffort: "medium", maxTokens: 4096 }),
+        строка(навыкКод, { executor: "code", hasCode: true, problems: ["нет тира"] }),
+      ],
+    });
+    if (!синк.r.ok || синк.json?.count !== 2) {
+      throw new Error(`синк каталога → ${синк.r.status}: ${синк.text.slice(0, 200)}`);
+    }
+
+    const первый = await deck();
+    if (первый.syncedAt === null) throw new Error("каталог записан, а syncedAt в deck пуст");
+    if (!первый.models || !Array.isArray(первый.models.fallbacks) || !("primary" in первый.models)) {
+      throw new Error(`цепочка моделей не доехала до панели: ${JSON.stringify(первый.models)}`);
+    }
+    const llm = найти(первый, навыкLlm);
+    const код = найти(первый, навыкКод);
+    if (!llm || !код) throw new Error("навыки агента не видны в deck");
+    for (const item of [llm, код]) {
+      if (item.enabled !== true) {
+        throw new Error(`навык ${item.skill} закреплён за агентом, а deck его не включает`);
+      }
+      if (item.agentStatus !== "active") {
+        throw new Error(`навык ${item.skill}: agentStatus=${item.agentStatus}, ожидали active`);
+      }
+      if (item.business !== "mydon" || item.autonomyDefault !== "T0") {
+        throw new Error(`навык ${item.skill}: карточка агента не доехала до deck`);
+      }
+      if (item.duplicates !== 1) {
+        throw new Error(`навык ${item.skill}: duplicates=${item.duplicates}, одноимённых нет`);
+      }
+      if (item.lastRun !== null) {
+        throw new Error(`навык ${item.skill}: запусков не было, а lastRun не пуст`);
+      }
+    }
+    if (llm.executor !== "llm" || llm.tier !== "T2" || llm.tierFloor !== "T2") {
+      throw new Error(
+        `llm-навык потерял исполнителя или тир: ${JSON.stringify({ executor: llm.executor, tier: llm.tier, tierFloor: llm.tierFloor })}`,
+      );
+    }
+    if (llm.modelEffort !== "medium" || llm.maxTokens !== 4096) {
+      throw new Error(`усилие/потолок навыка не доехали: ${llm.modelEffort} / ${llm.maxTokens}`);
+    }
+    if (JSON.stringify(llm.crons) !== JSON.stringify([крон])) {
+      throw new Error(`расписание llm-навыка не видно в deck: ${JSON.stringify(llm.crons)}`);
+    }
+    if (код.executor !== "code" || код.hasCode !== true || код.tierFloor !== null) {
+      throw new Error(
+        `код-навык прочитан неверно: ${JSON.stringify({ executor: код.executor, hasCode: код.hasCode, tierFloor: код.tierFloor })}`,
+      );
+    }
+    if (код.crons.length !== 0) {
+      throw new Error(`чужое расписание приписано код-навыку: ${JSON.stringify(код.crons)}`);
+    }
+
+    // Запуск из deck — обычная задача агенту (R-SD-2), а не обход политики.
+    const запуск = await jsonRequest("POST", `/agents/${агент}/skills/${навыкLlm}/run`, {
+      input: "проверка запуска из deck",
+      modelEffort: "low",
+      actor: "smoke",
+    });
+    if (!запуск.r.ok || typeof запуск.json?.taskId !== "string") {
+      throw new Error(`запуск навыка → ${запуск.r.status}: ${запуск.text.slice(0, 200)}`);
+    }
+    const задача = await jsonRequest("GET", `/tasks/${запуск.json.taskId}`);
+    if (!задача.r.ok) throw new Error(`задача запуска → ${задача.r.status}`);
+    if (задача.json.source !== "skills-deck") {
+      throw new Error(`source задачи: ${задача.json.source}, ожидали skills-deck`);
+    }
+    if (задача.json.agentSkill !== навыкLlm) {
+      throw new Error(`agentSkill задачи: ${задача.json.agentSkill} (угадывание по заголовку не отменено)`);
+    }
+    if (задача.json.runOptions?.modelEffort !== "low") {
+      throw new Error(`усилие per-run не сохранилось: ${JSON.stringify(задача.json.runOptions)}`);
+    }
+    if (задача.json.ownerKind !== "agent" || задача.json.ownerRef !== агент) {
+      throw new Error(`задача ушла не агенту: ${задача.json.ownerKind}/${задача.json.ownerRef}`);
+    }
+
+    // «Последний запуск» — факт из задач (R-SD-7), отдельного журнала нет.
+    const послеЗапуска = найти(await deck(), навыкLlm);
+    if (послеЗапуска?.lastRun?.taskId !== запуск.json.taskId) {
+      throw new Error(`deck не показал последний запуск: ${JSON.stringify(послеЗапуска?.lastRun)}`);
+    }
+
+    // Навыка нет в каталоге — 404 с подсказкой перезапустить агентов.
+    const внеКаталога = await jsonRequest("POST", `/agents/${агент}/skills/deck-missing/run`, {});
+    if (внеКаталога.r.status !== 404) {
+      throw new Error(`навык вне каталога → ${внеКаталога.r.status}, ожидали 404`);
+    }
+
+    // Навык в каталоге есть, но с агента снят — 409 (R-SD-6).
+    const снят = await jsonRequest("PATCH", `/agents/${агент}`, { skills: [навыкLlm] });
+    if (!снят.r.ok) throw new Error(`правка навыков агента → ${снят.r.status}`);
+    const незакреплён = await jsonRequest("POST", `/agents/${агент}/skills/${навыкКод}/run`, {});
+    if (незакреплён.r.status !== 409) {
+      throw new Error(`незакреплённый навык → ${незакреплён.r.status}, ожидали 409`);
+    }
+    if (найти(await deck(), навыкКод)?.enabled !== false) {
+      throw new Error("снятый с агента навык остался включённым в deck");
+    }
+
+    // Пауза уважается сразу, а не «worker всё равно не возьмёт» (R-SD-6).
+    const пауза = await jsonRequest("PATCH", `/agents/${агент}`, { status: "paused" });
+    if (!пауза.r.ok) throw new Error(`пауза агента → ${пауза.r.status}`);
+    const наПаузе = await jsonRequest("POST", `/agents/${агент}/skills/${навыкLlm}/run`, {});
+    if (наПаузе.r.status !== 409) {
+      throw new Error(`запуск у выключенного агента → ${наПаузе.r.status}, ожидали 409`);
+    }
+
+    // Архив = карточка уходит из deck по имени (архивация переименовывает
+    // агента в `<имя>#archived-<ts>`, JOIN по имени больше не сходится):
+    // строка каталога остаётся, но запускать нечего.
+    const архив = await jsonRequest("DELETE", `/agents/${агент}`);
+    if (!архив.r.ok) throw new Error(`архивация агента → ${архив.r.status}`);
+    const послеАрхива = найти(await deck(), навыкLlm);
+    if (!послеАрхива || послеАрхива.enabled !== false) {
+      throw new Error(`архивный агент остался запускаемым: ${JSON.stringify(послеАрхива)}`);
+    }
+    const послеАрхиваЗапуск = await jsonRequest("POST", `/agents/${агент}/skills/${навыкLlm}/run`, {});
+    if (послеАрхиваЗапуск.r.ok) throw new Error("навык архивного агента запустился из deck");
+
+    // Каталог, переписанный без наших навыков, обязан унести их из панели —
+    // иначе у владельца осталась бы кнопка «Запустить» у навыка, которого
+    // больше нет в файлах (R-SD-1).
+    const очистка = await jsonRequest("PUT", "/agents/skills/catalog", { skills: [] });
+    if (!очистка.r.ok || очистка.json?.count !== 0) {
+      throw new Error(`очистка каталога → ${очистка.r.status}: ${очистка.text.slice(0, 200)}`);
+    }
+    const пусто = await deck();
+    if (пусто.items.some((item) => item.agent === агент)) {
+      throw new Error("навыки исчезнувшего каталога остались в deck");
+    }
+  } finally {
+    // Убираем за собой при любом исходе: агент в архив (повтор безопасен),
+    // каталог — пустой, как до прогона. Здесь НЕ бросаем: иначе уборка
+    // затёрла бы настоящую причину провала выше.
+    await jsonRequest("DELETE", `/agents/${агент}`).catch(() => {});
+    await jsonRequest("PUT", "/agents/skills/catalog", { skills: [] }).catch(() => {});
+  }
+}
+
 /** Два этапа инкассации и защита от повторного приёма на живом SQL. */
 async function проверитьИнкассацию() {
   const machine = await jsonRequest("POST", "/entities", {
@@ -3099,6 +3301,15 @@ try {
   }
 
   try {
+    await проверитьКаталогНавыковИDeck();
+    console.log(
+      "  ok  сценарий: каталог навыков — deck, запуск из панели, пауза и архив отказывают",
+    );
+  } catch (e) {
+    провалы.push(`каталог навыков и deck: ${e.message}`);
+  }
+
+  try {
     await проверитьИнкассацию();
     console.log("  ok  сценарий: инкассация → приём → защита от повтора");
   } catch (e) {
@@ -3218,4 +3429,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 21 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 22 сценариев.`);
