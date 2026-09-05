@@ -275,8 +275,10 @@ export interface StockLevelRow {
   product: string;
   /** Карточка прайса, если имя строки известно справочнику (бэкфилл П4). */
   productId: string | null;
-  quantity: number;
-  countedAt: string;
+  /** null — остаток неизвестен: нет карточки склада или не выбран центральный склад (только в режиме ledger, R-GS-3). */
+  quantity: number | null;
+  /** null — ни разу не считали (только в режиме ledger). */
+  countedAt: string | null;
 }
 
 /**
@@ -608,11 +610,11 @@ export interface LatestSlotBatch {
   slots: Slot[];
 }
 
-/** Остаток склада строкой: имя, штуки и когда считали. */
+/** Остаток склада строкой: имя, штуки (null — неизвестно, R-GS-3) и когда считали (null — ни разу). */
 interface StockRow {
   product: string;
-  quantity: number;
-  countedAt: Date;
+  quantity: number | null;
+  countedAt: Date | null;
 }
 
 /**
@@ -635,6 +637,18 @@ interface PurchaseContext {
   stockRows: StockRow[];
   /** Строки склада без карточки прайса: в расчёт не вошли, но молчать о них нельзя. */
   unmatchedStock: StockRow[];
+  /** Позиции прайса с неизвестным остатком (нет карточки склада / склад не выбран): в расчёт не вошли, R-GS-3. */
+  unknownStock: StockRow[];
+  /**
+   * «Когда последний раз считали склад» — из ОДНОЙ ДВЕРИ (R-GS-1, §5.3), а не
+   * пересчитано из строк, отфильтрованных под потребность плана: в режиме
+   * `ledger` это `goodsStock().asOf` (максимум по ВСЕМ активным позициям
+   * прайса, включая карточные без движения), в `table` — прежний реduce по
+   * сопоставленным строкам склада (R-GS-4, число не меняется).
+   */
+  stockAsOf: Date | null;
+  /** Источник, которым посчитан склад в этом контексте — определяет текст `stock_stale`. */
+  stockSource: "table" | "ledger";
   /** Канон-имена из слотов с дефицитом, которых нет в прайсе вендинга. */
   unknownProducts: string[];
   /**
@@ -1755,8 +1769,9 @@ export class VendingService {
   /**
    * Источник остатка товаров: `table` — строка `vending_stock` (как раньше),
    * `ledger` — сумма движений леджера по карточке товара на центральном
-   * складе (после катовера У6). Строки без карточки в режиме леджера
-   * показываются по таблице — им в леджере лежать негде.
+   * складе (после катовера У6). Позиции без карточки склада в режиме леджера
+   * отдаются с остатком null («неизвестно», R-GS-3) — таблица в этом режиме
+   * не читается.
    */
   async stockSource(): Promise<"table" | "ledger"> {
     return this.ledger ? this.ledger.source() : "table";
@@ -1764,19 +1779,18 @@ export class VendingService {
 
   /** Текущий остаток склада по товарам (для панели/отчётов). */
   async stockLevels(): Promise<StockLevelRow[]> {
-    const rows = await this.db.select().from(vendingStock);
+    // Режим ledger — ОДНА ДВЕРЬ (R-GS-1): список позиций — прайс, а не строки
+    // таблицы; иначе товар без строки не существовал бы для панели.
     if (this.ledger && (await this.stockSource()) === "ledger") {
-      const warehouseId = await this.ledger.centralWarehouseId(this.db);
-      if (warehouseId) {
-        const out: StockLevelRow[] = [];
-        for (const r of rows) {
-          const cardId = r.productId ? await this.ledger.cardIdOf(this.db, r.productId) : null;
-          const quantity = cardId ? await this.ledger.qty(this.db, warehouseId, cardId) : r.quantity;
-          out.push({ product: r.productName, productId: r.productId, quantity, countedAt: r.countedAt.toISOString() });
-        }
-        return out.sort((a, b) => a.product.localeCompare(b.product, "ru"));
-      }
+      const goods = await this.ledger.goodsStock(this.db);
+      return goods.rows.map((r) => ({
+        product: r.productName,
+        productId: r.productId,
+        quantity: r.quantity,
+        countedAt: r.countedAt?.toISOString() ?? null,
+      }));
     }
+    const rows = await this.db.select().from(vendingStock);
     return rows
       // `productId` в ответе — не украшение: связь строки склада с карточкой
       // прайса иначе не видна ниоткуда, и её потерю (бэкфилл П4) нечем поймать
@@ -1888,9 +1902,24 @@ export class VendingService {
    * устарел» в плане. Дата пересчёта нужна здесь же: закуп молча вычитает
    * остаток из потребности, и если ему месяц, план врёт без единого признака.
    */
-  private async stockRows(): Promise<StockRow[]> {
+  private async stockRows(): Promise<{ rows: StockRow[]; asOf: Date | null; source: "table" | "ledger" }> {
+    if (this.ledger && (await this.stockSource()) === "ledger") {
+      const goods = await this.ledger.goodsStock(this.db);
+      return {
+        rows: goods.rows.map((r) => ({ product: r.productName, quantity: r.quantity, countedAt: r.countedAt })),
+        // Одна дверь (§5.3): давность — по ВСЕМ активным позициям прайса, а не
+        // только по тем, что попадут в потребность плана после сопоставления.
+        asOf: goods.asOf,
+        source: "ledger",
+      };
+    }
     const rows = await this.db.select().from(vendingStock);
-    return rows.map((r) => ({ product: r.productName, quantity: r.quantity, countedAt: r.countedAt }));
+    return {
+      rows: rows.map((r) => ({ product: r.productName, quantity: r.quantity, countedAt: r.countedAt })),
+      // table: давность считается ниже, тем же reduce по сопоставленным строкам, что и раньше (R-GS-4).
+      asOf: null,
+      source: "table",
+    };
   }
 
   /**
@@ -2023,9 +2052,11 @@ export class VendingService {
     // расчёт не идёт вовсе: у неё нет ни цены, ни кратности, ни правил, а
     // вычесть её из потребности значит молча поверить имени, которого система
     // не знает. Такие штуки план показывает отдельно (C2).
-    const allStockRows = await this.stockRows();
+    const stockDoor = await this.stockRows();
+    const allStockRows = stockDoor.rows;
     const stockRows: StockRow[] = [];
     const unmatchedStock: StockRow[] = [];
+    const unknownStock: StockRow[] = [];
     // Ключ карточки — НОРМАЛИЗОВАННОЕ имя (`findProductRow`/`setProductRules`),
     // а не точная строка: `vending_stock` ключуется именем, и «Red  Bull» с
     // двойным пробелом из копипасты объявлялся осиротевшим при живой карточке
@@ -2039,6 +2070,10 @@ export class VendingService {
       if (!rulesKeyByNorm.has(normalizeProductName(name))) rulesKeyByNorm.set(normalizeProductName(name), name);
     }
     for (const r of allStockRows) {
+      if (r.quantity === null) {
+        unknownStock.push(r);
+        continue;
+      }
       const canon = this.resolveProduct(r.product, catalog);
       const карточка = rulesKeyByNorm.get(normalizeProductName(canon));
       // Имя строки склада приводим к имени КАРТОЧКИ: потребность, цены и
@@ -2047,7 +2082,7 @@ export class VendingService {
       else unmatchedStock.push({ ...r, product: canon });
     }
     const stockByProduct = new Map<string, number>();
-    for (const r of stockRows) stockByProduct.set(r.product, (stockByProduct.get(r.product) ?? 0) + r.quantity);
+    for (const r of stockRows) stockByProduct.set(r.product, (stockByProduct.get(r.product) ?? 0) + (r.quantity ?? 0));
 
     // Прайс: только позиции с ценой попадают в карту — иначе калькулятор
     // пометит noPrice и выведет их на разбор менеджеру (§5.5).
@@ -2077,6 +2112,12 @@ export class VendingService {
     const nameBySerial = new Map(
       ok.map((m) => [m.machineId, nameByCanon.get(normalizeMachineSerial(m.machineId)) ?? m.machineId] as const),
     );
+    // Давность: ledger — из одной двери целиком (§5.3); table — прежний reduce
+    // ровно по сопоставленным строкам (R-GS-4, число не меняется).
+    const stockAsOf =
+      stockDoor.source === "ledger"
+        ? stockDoor.asOf
+        : stockRows.reduce<Date | null>((acc, r) => (r.countedAt && (!acc || r.countedAt > acc) ? r.countedAt : acc), null);
     return {
       summary,
       ok,
@@ -2084,7 +2125,10 @@ export class VendingService {
       skipped,
       stockRows,
       unmatchedStock,
+      unknownStock,
       unknownProducts,
+      stockAsOf,
+      stockSource: stockDoor.source,
       sales: { capturedAt: sold.capturedAt, serialsInBatch: sold.serials },
     };
   }
@@ -2142,8 +2186,10 @@ export class VendingService {
       slots: allocateBySlots(slotsBySerial.get(a.serial) ?? [], a),
     }));
 
-    // `asOf` — «когда последний раз считали хоть что-то» (для показа).
-    const asOf = ctx.stockRows.reduce<Date | null>((acc, r) => (!acc || r.countedAt > acc ? r.countedAt : acc), null);
+    // `asOf` — «когда последний раз считали хоть что-то» (для показа), из ОДНОЙ
+    // ДВЕРИ контекста (§5.3): в ledger это `goodsStock().asOf` по всем активным
+    // позициям прайса, а не только по тем, что вошли в потребность плана.
+    const asOf = ctx.stockAsOf;
 
     // А ДАВНОСТЬ — по строкам, которые план РЕАЛЬНО использует: остаток
     // товара, который сейчас уезжает в автоматы (`fromStock > 0`). Прежняя
@@ -2156,12 +2202,13 @@ export class VendingService {
       [...s.items, ...s.excludedByRule, ...s.excludedNoSales].filter((i) => i.fromStock > 0).map((i) => i.product),
     );
     const usedRows = ctx.stockRows.filter((r) => usedProducts.has(r.product));
-    const watched = usedRows.length > 0 ? usedRows : ctx.stockRows.filter((r) => r.quantity > 0);
+    // «Неизвестно» (null) — не залежалось и не пусто: такие строки сторож не смотрит (R-GS-3).
+    const watched = (usedRows.length > 0 ? usedRows : ctx.stockRows.filter((r) => (r.quantity ?? 0) > 0)).filter((r) => r.countedAt !== null);
     const staleRows = watched
-      .filter((r) => Date.now() - r.countedAt.getTime() > STOCK_STALE_DAYS * 86_400_000)
-      .sort((a, b) => a.countedAt.getTime() - b.countedAt.getTime());
+      .filter((r) => r.countedAt !== null && Date.now() - r.countedAt.getTime() > STOCK_STALE_DAYS * 86_400_000)
+      .sort((a, b) => (a.countedAt?.getTime() ?? 0) - (b.countedAt?.getTime() ?? 0));
     const stale = asOf === null || staleRows.length > 0;
-    const totalBefore = ctx.stockRows.reduce((a, r) => a + r.quantity, 0);
+    const totalBefore = ctx.stockRows.reduce((a, r) => a + (r.quantity ?? 0), 0);
 
     const warnings: PlanWarning[] = [];
     if (stale) {
@@ -2171,8 +2218,11 @@ export class VendingService {
         code: "stock_stale",
         message:
           asOf === null
-            ? "Склад ни разу не считали — план считает его пустым и покупает весь дефицит. " +
-              "Обнови в боте: «склад Montella 24, Fanta 12»"
+            ? ctx.stockSource === "ledger"
+              ? "Склад ни разу не считали — остаток берётся по леджеру, но давность ничем не подтверждена. " +
+                "Обнови в боте: «склад Montella 24, Fanta 12»"
+              : "Склад ни разу не считали — план считает его пустым и покупает весь дефицит. " +
+                "Обнови в боте: «склад Montella 24, Fanta 12»"
             : `Склад: ${staleRows.length} поз. старше ${STOCK_STALE_DAYS} дней (${имена.join(", ")}${ещё}) — ` +
               `обнови в боте: «склад ${имена[0] ?? "Montella"} 24»`,
       });
@@ -2180,12 +2230,22 @@ export class VendingService {
     if (ctx.unmatchedStock.length) {
       // Строка склада без карточки прайса в расчёт не вошла: её остаток не
       // вычитается из потребности, и владелец купит второй раз то, что лежит.
-      const шт = ctx.unmatchedStock.reduce((a, r) => a + r.quantity, 0);
+      const шт = ctx.unmatchedStock.reduce((a, r) => a + (r.quantity ?? 0), 0);
       warnings.push({
         code: "stock_unknown_product",
         message:
           `На складе есть строки без карточки прайса (в расчёт не вошли, ${шт} шт): ` +
           `${ctx.unmatchedStock.map((r) => r.product).join(", ")} — переименуй в боте: «склад <канон> N»`,
+      });
+    }
+    if (ctx.unknownStock.length) {
+      // Остаток неизвестен — не ноль: план не вычитает его и говорит об этом,
+      // иначе владелец купил бы «весь дефицит» по товару, который просто без карточки.
+      warnings.push({
+        code: "stock_unknown_card",
+        message:
+          `Без карточки склада: ${ctx.unknownStock.length} поз. — остаток не вычтен (${ctx.unknownStock.map((r) => r.product).slice(0, 5).join(", ")}` +
+          `${ctx.unknownStock.length > 5 ? ` и ещё ${ctx.unknownStock.length - 5}` : ""}). Заведи карточки: панель /stock/goods → «Карточки для товаров»`,
       });
     }
     const offline = ctx.skipped.filter((m) => m.status !== "no_data");
@@ -2282,7 +2342,8 @@ export class VendingService {
         back: s.totalToStock,
         totalAfter: totalBefore - s.totalFromStock + s.totalToStock,
         stale,
-        unmatched: ctx.unmatchedStock.reduce((a, r) => a + r.quantity, 0),
+        unmatched: ctx.unmatchedStock.reduce((a, r) => a + (r.quantity ?? 0), 0),
+        unknown: ctx.unknownStock.length,
       },
       summary: s,
       machines: planMachines,

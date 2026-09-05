@@ -573,6 +573,23 @@ describe("Аналитика: мёртвый сток (R-P5b-4)", () => {
       "молчание читалось бы как «мёртвого стока нет»",
     );
   });
+
+  it("мёртвый сток в ledger: склад — из одной двери, позиции с null не в отчёте, но в предупреждении", async () => {
+    const goods = {
+      warehouseId: "wh-1", asOf: null,
+      rows: [
+        { productName: "Snickers", productId: "p-s", cardId: "c-s", quantity: 11, countedAt: null, isActive: true },
+        { productName: "Pulpy", productId: "p-p", cardId: null, quantity: null, countedAt: null, isActive: true },
+      ],
+    };
+    const ledger = { source: async () => "ledger", goodsStock: async () => goods } as never;
+    const { db } = analyticsDb({ entities: ПАРК });
+    const svc = new AnalyticsService(db, new VendingService(db), ledger);
+    const r = await svc.deadStock(30, new Date("2026-09-05T06:00:00+05:00"));
+    assert.ok(r.warehouse.some((w) => w.product === "Snickers" && w.qty === 11));
+    assert.equal(r.warehouse.some((w) => w.product === "Pulpy"), false);
+    assert.ok(r.warnings.some((w) => w.code === "stock_unknown_card"));
+  });
 });
 
 describe("Аналитика: цены и витрина (R-P5b-5, R-P5b-6)", () => {

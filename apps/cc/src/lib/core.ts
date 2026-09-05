@@ -2270,12 +2270,27 @@ export interface PartsQueue {
   items: PartUnit[];
 }
 
+export type VendingParityStatus = "ok" | "mismatch" | "no_row" | "no_card" | "inactive_with_stock" | "no_warehouse";
+
 /** Сверка `vending_stock` с леджером по товарам (У6). */
 export interface VendingParity {
   warehouseId: string | null;
-  rows: { productName: string; productId: string | null; cardId: string | null; table: number; ledger: number | null; diff: number | null }[];
+  rows: {
+    productName: string;
+    productId: string | null;
+    cardId: string | null;
+    table: number | null;
+    ledger: number | null;
+    diff: number | null;
+    status: VendingParityStatus;
+    isMismatch: boolean;
+  }[];
   mismatched: number;
   unlinked: number;
+  missingRows: number;
+  products: number;
+  /** Карточных позиций без выбранного центрального склада (`status = "no_warehouse"`). */
+  noWarehouse: number;
 }
 
 /** Инвентаризация узлов (У4): сессия по месту и строки. */

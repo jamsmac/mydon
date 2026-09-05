@@ -12,7 +12,7 @@ const norm = (s: string): string => s.replace(/[\u00a0\u202f]/g, " ");
 
 const plan: VendingPlan = {
   generatedAt: "2026-08-25T04:00:00.000Z",
-  stock: { asOf: "2026-08-20T15:00:00.000Z", totalBefore: 134, use: 3, back: 4, totalAfter: 135, stale: true, unmatched: 0 },
+  stock: { asOf: "2026-08-20T15:00:00.000Z", totalBefore: 134, use: 3, back: 4, totalAfter: 135, stale: true, unmatched: 0, unknown: 0 },
   summary: {
     items: [
       {

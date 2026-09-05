@@ -1250,6 +1250,67 @@ async function проверитьУзлы() {
 }
 
 /**
+ * Одна дверь для остатков товаров (срез 05.09, R-GS-1…7): включаем
+ * `VENDING_STOCK_SOURCE=ledger` прямой записью в `system_config` (ключ —
+ * первичный ключ таблицы, настройка читается из БД на каждый вызов без
+ * кеша — рестарт Core не нужен) и проверяем, что `/vending/stock` и
+ * `/stock/vending-parity` на настоящем Postgres отвечают формой, которую
+ * ждёт панель, а не роняют сырой SQL леджера.
+ */
+async function проверитьОстаткиТоваровВЛеджере() {
+  // Запоминаем значение ДО переключения: `finally` обязан вернуть настройку
+  // в то состояние, в котором её застал прогон, а не всегда удалять строку —
+  // на проде/стейджинге ключ может быть уже выставлен вручную владельцем.
+  const прежняя = await sql`select value from system_config where key = 'VENDING_STOCK_SOURCE'`;
+  const былаСтрока = прежняя.length > 0;
+  const прежнееЗначение = былаСтрока ? прежняя[0].value : null;
+  await sql`
+    insert into system_config (key, value) values ('VENDING_STOCK_SOURCE', 'ledger')
+    on conflict (key) do update set value = excluded.value
+  `;
+  try {
+    const остатки = await читать("/vending/stock");
+    if (!Array.isArray(остатки)) {
+      throw new Error(`/vending/stock — не массив: ${JSON.stringify(остатки).slice(0, 200)}`);
+    }
+    for (const строка of остатки) {
+      if (typeof строка.product !== "string") {
+        throw new Error(`строка остатков без строкового product: ${JSON.stringify(строка).slice(0, 200)}`);
+      }
+      if (строка.quantity !== null && typeof строка.quantity !== "number") {
+        throw new Error(
+          `quantity «${строка.product}» не число и не null: ${JSON.stringify(строка.quantity)}`,
+        );
+      }
+    }
+    const сверка = await читать("/stock/vending-parity");
+    if (
+      typeof сверка.missingRows !== "number" ||
+      typeof сверка.products !== "number" ||
+      typeof сверка.noWarehouse !== "number"
+    ) {
+      throw new Error(
+        `/stock/vending-parity без числовых missingRows/products/noWarehouse: ${JSON.stringify(сверка).slice(0, 300)}`,
+      );
+    }
+    for (const строка of сверка.rows ?? []) {
+      if (typeof строка.status !== "string") {
+        throw new Error(`строка сверки без строкового status: ${JSON.stringify(строка).slice(0, 200)}`);
+      }
+    }
+  } finally {
+    // Вернуть настройку в исходное состояние, даже если проверка выше упала:
+    // была строка — восстановить её значение, не было — удалить, а не молча
+    // удалить и в том случае, когда до прогона там что-то уже стояло.
+    if (былаСтрока) {
+      await sql`update system_config set value = ${прежнееЗначение} where key = 'VENDING_STOCK_SOURCE'`;
+    } else {
+      await sql`delete from system_config where key = 'VENDING_STOCK_SOURCE'`;
+    }
+  }
+}
+
+/**
  * Спека vendhub-parts (У1–У6): узел заведён системой с номером → наклейка
  * подтверждена → снят на мойку по узлу → помыт → на складе → инвентаризация
  * находит его и «теряет» второй → применение → возврат бункера приходует
@@ -3003,6 +3064,13 @@ try {
   }
 
   try {
+    await проверитьОстаткиТоваровВЛеджере();
+    console.log("  ok  сценарий: остатки товаров в ledger — одна дверь и сверка по прайсу");
+  } catch (e) {
+    провалы.push(`остатки товаров в ledger: ${e.message}`);
+  }
+
+  try {
     await проверитьУзлыСНомерами();
     console.log("  ok  сценарий: узел с номером — наклейка, замена по узлу, мойка, инвентаризация, возврат бункера");
   } catch (e) {
@@ -3150,4 +3218,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 20 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 21 сценариев.`);

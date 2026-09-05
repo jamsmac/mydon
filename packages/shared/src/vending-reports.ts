@@ -867,7 +867,9 @@ export type AnalyticsWarningCode =
    * Чинится это не починкой сбора, а ожиданием, и читателю (бот, панель) надо
    * отличать одно от другого КОДОМ, а не разбором предложения.
    */
-  | "journal_short";
+  | "journal_short"
+  /** Позиция леджера без карточки товара — остаток «неизвестно», в отчёте по складу её нет. */
+  | "stock_unknown_card";
 
 export interface AnalyticsWarning {
   code: AnalyticsWarningCode;
@@ -1426,7 +1428,9 @@ export interface PlanWarning {
     /** Автомата с потребностью нет в свежем батче продаж — «нет продаж» по нему ложное (I3/П5b-1). */
     | "sales_partial"
     /** В настройке маршрута есть серийники, которых нет среди автоматов (A4/UX#16). */
-    | "route_unknown_serial";
+    | "route_unknown_serial"
+    /** Позиции прайса без карточки склада: остаток неизвестен, в расчёт не вошёл (R-GS-3). */
+    | "stock_unknown_card";
   message: string;
 }
 
@@ -1450,6 +1454,8 @@ export interface PurchasePlan {
      * входят — иначе «станет N» не сходилось бы с арифметикой плана.
      */
     unmatched: number;
+    /** Позиции прайса с неизвестным остатком (нет карточки склада / склад не выбран, R-GS-3). */
+    unknown: number;
   };
   summary: PurchaseSummary;
   machines: PlanMachine[];

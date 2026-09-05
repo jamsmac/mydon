@@ -91,7 +91,7 @@ const усушкаОбщая: SharedShrink = {
 
 const планОбщий: SharedPlan = {
   generatedAt: "2026-08-25T09:00:00.000Z",
-  stock: { asOf: "2026-08-22T09:40:00.000Z", totalBefore: 120, use: 40, back: 12, totalAfter: 92, stale: false, unmatched: 0 },
+  stock: { asOf: "2026-08-22T09:40:00.000Z", totalBefore: 120, use: 40, back: 12, totalAfter: 92, stale: false, unmatched: 0, unknown: 0 },
   summary: {
     items: [], excludedNoSales: [], excludedByRule: [], noPrice: [],
     allocation: "purchase-first",
