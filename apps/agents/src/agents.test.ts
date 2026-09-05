@@ -1146,6 +1146,50 @@ describe("Задачи агента и дневной потолок", () => {
     assert.deepEqual(commits, []);
   });
 
+  it("явный нереализованный навык — блок с честной причиной, а не подмена подбором (Р-6)", async () => {
+    // Заголовок нарочно попадает в HINTS кодового watch-receivables: раньше
+    // подбор молча увёл бы задачу в ДРУГОЙ навык, а `task.agent_skill` и deck
+    // продолжали бы показывать нажатое имя — отказ был бы невидим.
+    const releases: { reason?: string; detail?: string }[] = [];
+    let blocked = false;
+    const { client, commits } = stub({
+      claimAgentTask: async () => {
+        if (blocked) return null;
+        return {
+          runId: "11111111-1111-4111-8111-111111111111",
+          executionAttemptId: "22222222-2222-4222-8222-222222222222",
+          generation: 1,
+          claimedAt: "2026-09-05T10:00:00.000Z",
+          taskInput: { title: "проверь дебиторку", agentSkill: "draft-reminder" },
+        };
+      },
+      releaseAgentTask: async (
+        _id: string,
+        _agentName: string,
+        _runId: string,
+        _executionAttemptId: string,
+        reason?: string,
+        detail?: string,
+      ) => {
+        releases.push({ ...(reason ? { reason } : {}), ...(detail ? { detail } : {}) });
+        blocked = reason === "unsupported";
+        return true;
+      },
+    });
+
+    const res = await runAgentTasks(agent, client, "T0");
+
+    assert.equal(res[0]?.outcome, "returned");
+    assert.equal(releases[0]?.reason, "unsupported");
+    assert.equal(
+      releases[0]?.detail,
+      "Навык «draft-reminder» задан явно, но не реализован — угадывать не буду. " +
+        "Реализованные навыки: watch-receivables. " +
+        "Уточни или переназначь задачу, затем запусти owner retry.",
+    );
+    assert.deepEqual(commits, [], "ни один другой навык не выполнялся");
+  });
+
   it("под потолком — задача проходит: предложение владельцу, задача закрыта", async () => {
     const prev = process.env.AGENT_DAILY_ACTION_CAP;
     process.env.AGENT_DAILY_ACTION_CAP = "5";

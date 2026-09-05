@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -140,6 +141,7 @@ describe("llm-skill: разбор ответа модели (R-LS-5)", () => {
     const trail = {
       skill: "qualify-lead",
       inputHash: "sha256:x",
+      promptHash: "sha256:p",
       kbPages: [],
       kbMissing: [],
       toolsIgnored: [],
@@ -151,7 +153,11 @@ describe("llm-skill: разбор ответа модели (R-LS-5)", () => {
     const p = toProposal(parseModelJson(GOOD_JSON), { ...trail, model: "gpt", costUsd: 0.01 });
     assert.ok(p);
     assert.equal(p.action.startsWith("Лид OLMA"), true);
-    assert.deepEqual(p.signatureFacts, { skill: "qualify-lead", inputHash: "sha256:x" }, "дедуп — по входу задачи (R-LS-9)");
+    assert.deepEqual(
+      p.signatureFacts,
+      { skill: "qualify-lead", inputHash: "sha256:x", promptHash: "sha256:p" },
+      "дедуп — по входу задачи И собранному промпту (R-LS-9)",
+    );
     assert.equal(p.facts.model, "gpt");
     assert.equal(p.facts.costUsd, 0.01);
     assert.equal(p.facts.details, "Лид: OLMA\nКласс: hot (score 9)");
@@ -160,7 +166,7 @@ describe("llm-skill: разбор ответа модели (R-LS-5)", () => {
   it("escalate: true ставит эскалацию первым пунктом next", () => {
     const p = toProposal(
       { summary: "s", details: "d", escalate: true, next: ["позвонить"] },
-      { skill: "q", inputHash: "h", kbPages: [], kbMissing: [], toolsIgnored: [], promptChars: 0, outputChars: 0, contextMissing: [] },
+      { skill: "q", inputHash: "h", promptHash: "p", kbPages: [], kbMissing: [], toolsIgnored: [], promptChars: 0, outputChars: 0, contextMissing: [] },
     );
     assert.deepEqual(p?.next, ["Эскалация владельцу: модель считает случай нестандартным", "позвонить"]);
   });
@@ -243,6 +249,29 @@ describe("llm-skill: контекст (R-LS-4, R-LS-7, R-LS-8)", () => {
     assert.equal(taskInputHash({ title: " Лид ", description: "x " }), taskInputHash({ title: "Лид", description: "x" }));
     assert.notEqual(taskInputHash({ title: "Лид", description: "x" }), taskInputHash({ title: "Лид", description: "y" }));
   });
+
+  it("hash обратно совместим: без новых полей канон прежний (R-SD-10)", () => {
+    // Пин старого канона: безусловный спред agentSkill/runOptions изменил бы
+    // хеш КАЖДОЙ старой задачи и сорвал бы сверку входа после выката.
+    const legacy = `sha256:${createHash("sha256")
+      .update(JSON.stringify({ title: "Лид", description: "x" }), "utf8")
+      .digest("hex")}`;
+    assert.equal(taskInputHash({ title: "Лид", description: "x" }), legacy);
+    assert.equal(
+      taskInputHash({ title: "Лид", description: "x", runOptions: {} }),
+      legacy,
+      "пустые runOptions — это отсутствие настройки, а не новое значение",
+    );
+  });
+
+  it("hash различает явный навык и усилие прогона (R-SD-10)", () => {
+    const base = taskInputHash({ title: "Лид", description: "x" });
+    assert.notEqual(taskInputHash({ title: "Лид", description: "x", agentSkill: "qualify-lead" }), base);
+    assert.notEqual(
+      taskInputHash({ title: "Лид", description: "x", runOptions: { modelEffort: "high" } }),
+      base,
+    );
+  });
 });
 
 describe("llm-skill: исполнитель как Skill (R-LS-1, R-LS-2, R-LS-3)", () => {
@@ -278,6 +307,94 @@ describe("llm-skill: исполнитель как Skill (R-LS-1, R-LS-2, R-LS-3
     } finally {
       d.cleanup();
     }
+  });
+
+  it("тот же вход и промпт → та же сигнатура; правка KB меняет promptHash", async () => {
+    // Дедуп по расписанию держится ровно на этом: одинаковый вход И одинаковый
+    // собранный промпт — повод тот же, предложение подавляется (`no_change`).
+    // Но «тот же вход» ещё не «тот же вопрос»: правка KB/устава/тела навыка
+    // меняет ответ модели, и владелец обязан увидеть новое предложение.
+    const d = makeDirs(FILES);
+    try {
+      const deps = {
+        sharedDir: d.shared,
+        agentsDir: d.agents,
+        gateway: () => localGateway,
+        callModel: fakeCall({ text: GOOD_JSON, model: "m1" }),
+      };
+      const skill = buildLlmSkill(meta(), deps);
+      const first = await skill(agent, {} as never, ctx() as never);
+      const again = await skill(agent, {} as never, ctx() as never);
+      assert.deepEqual(again?.signatureFacts, first?.signatureFacts, "вход и KB не менялись");
+
+      fs.writeFileSync(
+        path.join(d.shared, "kb/globerent/heli-models.md"),
+        "# HELI\nCPD25 снят с производства, актуален CPD30.",
+      );
+      const afterKb = await buildLlmSkill(meta(), deps)(agent, {} as never, ctx() as never);
+      assert.equal(
+        afterKb?.signatureFacts?.inputHash,
+        first?.signatureFacts?.inputHash,
+        "вход задачи не менялся",
+      );
+      assert.notEqual(
+        afterKb?.signatureFacts?.promptHash,
+        first?.signatureFacts?.promptHash,
+        "изменившаяся KB обязана заново открыть предложение",
+      );
+    } finally {
+      d.cleanup();
+    }
+  });
+
+  it("усилие прогона перебивает усилие паспорта (R-SD-4)", async () => {
+    const capture: CallModelInput[] = [];
+    const skill = buildLlmSkill(meta(), {
+      sharedDir: "/nope",
+      agentsDir: "/nope",
+      gateway: () => localGateway,
+      callModel: fakeCall({ text: GOOD_JSON, capture }),
+    });
+    await skill(
+      agent,
+      {} as never,
+      ctx({
+        taskInput: {
+          title: "Квалифицируй лид OLMA",
+          description: "срочно",
+          runOptions: { modelEffort: "high" },
+        },
+      }) as never,
+    );
+    assert.equal(capture[0].reasoningEffort, "high", "meta.modelEffort=medium перекрыт runOptions");
+  });
+
+  it("пустые runOptions не стирают усилие паспорта", async () => {
+    const capture: CallModelInput[] = [];
+    const skill = buildLlmSkill(meta(), {
+      sharedDir: "/nope",
+      agentsDir: "/nope",
+      gateway: () => localGateway,
+      callModel: fakeCall({ text: GOOD_JSON, capture }),
+    });
+    await skill(
+      agent,
+      {} as never,
+      ctx({ taskInput: { title: "Лид", runOptions: {} } }) as never,
+    );
+    assert.equal(capture[0].reasoningEffort, "medium");
+  });
+
+  it("нет усилия ни в паспорте, ни в прогоне — поле не уезжает провайдеру", async () => {
+    const capture: CallModelInput[] = [];
+    const skill = buildLlmSkill(meta({ modelEffort: undefined }), {
+      sharedDir: "/nope",
+      agentsDir: "/nope",
+      gateway: () => localGateway,
+      callModel: fakeCall({ text: GOOD_JSON, capture }),
+    });
+    await skill(agent, {} as never, ctx() as never);
+    assert.equal(Object.hasOwn(capture[0], "reasoningEffort"), false);
   });
 
   it("без входа задачи (legacy cron) — null: работать нечему", async () => {

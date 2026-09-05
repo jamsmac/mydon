@@ -246,20 +246,24 @@ mydon/
    текста, Golos, моно для данных, «плитка = вопрос владельца, клик = ответ», «пустой экран говорит,
    что сделать»); `components.html` — примитивы; `examples/` — `design/dashboard-redesign/*.dc.html`.
    Результат как у `/robo`: «сделай экран /crons с /mydon-design» — консистентный экран за 1–2 промпта.
-4. **Мета-навыки владельца** в `.claude/skills/` (адаптация `robonuggets/skills`, `plan-for-goal`,
+4. **Мета-навыки владельца** — СДЕЛАНО 05.09 — в `.claude/skills/` (адаптация `robonuggets/skills`, `plan-for-goal`,
    идеи `gauntlet-loop`): `calibrate` (конец сессии: что исправлял владелец → предложения правок
    CLAUDE.md/routers/skills/memory), `onboard` (бриф по репо: CLAUDE.md → роутер направления →
    последние решения), `align` (вопросы до кода), `devil` (контр-мнение — «причина у каждого
    решения»), `burst` (N вариантов экрана), `plan-for-goal` (10 секций, совместим со спеками
    superpowers), `search-connectors` (официальный → CLI/API/MCP сообщества → проверка по
    `engine/security.md`; агентный аналог — `solution-scout`). Все на русском, с правилами MYDON.
-5. **Skills deck в CC** (`/skills`): карточка навыка (агент, описание, тир, `executor`), выбор
+5. **Skills deck в CC** (`/skills`) — СДЕЛАНО 05.09 — карточка навыка (агент, описание, тир, `executor`), выбор
    **модели** (цепочка `simple/complex` из `model-gateway`) и **усилия** (параметр `llm-skill`),
    кнопка «запустить» → задача агенту → предложение во Входящих; на карточке — последний отчёт
    (артефакт). Здесь же — карта навыков (Skill Tree: агент → навык → инструменты, дубли по имени
    через `skillTierFloors`).
-6. **Критерий готовности:** любой навык запускается из deck и даёт предложение во Входящих;
+6. **Критерий готовности** — ВЫПОЛНЕН 05.09: любой навык запускается из deck и даёт предложение во Входящих;
    `check:passports` зелёный; один экран сделан через `/mydon-design` без ручной правки токенов.
+   Как сделано: спека `docs/superpowers/specs/2026-09-05-skills-deck-cron-llm-design.md`, решения —
+   `docs/decisions/2026-09-05-skills-deck-cron-llm.md`, рунбук — `docs/AGENTS_ACTIVATION.md`
+   («Deck и cron для llm-навыков»). Выбор модели per-run сознательно не введён (решение Р-4);
+   вместо него — усилие per-run, цепочка моделей показывается только на чтение.
 
 ### 6.2 Волна M — память: роутеры, зеркала, мозг
 
@@ -429,6 +433,12 @@ Scout (`untrusted.ts`, вердикт только с доказательств
 > `kb_pages`/`web_sources`. Что проверить при первом входе — `docs/FIRST_LOGIN_CHECKLIST.md`. П. 5 (сессия
 > фабрики) — не начат. Остаток волны S: skills deck в CC (§6.1 п. 5), `devil`/`burst`/`plan-for-goal`/
 > `search-connectors`, cron-допуск для llm-навыков.
+
+> **05.09.2026:** остаток волны S закрыт — deck `/skills` (запуск любого навыка → задача → предложение
+> во Входящих), cron-допуск llm-навыков через durable-задачи (R-SD-5), мета-навыки `devil`/`burst`/
+> `plan-for-goal`/`search-connectors`; спека
+> `docs/superpowers/specs/2026-09-05-skills-deck-cron-llm-design.md`, решения с причинами —
+> `docs/decisions/2026-09-05-skills-deck-cron-llm.md`.
 
 1. `CLAUDE.md` → главный роутер (цели, карта) + `routers/{globerent,vendhub,personal,mydon,ventures,dev}.md`
    + `memory/` — без кода, 2–3 часа.

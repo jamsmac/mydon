@@ -1175,6 +1175,58 @@ export interface AgentCard {
   updatedAt: string;
 }
 
+/** Последний запуск навыка. Отдельного журнала запусков нет — это факт из задач. */
+export interface SkillLastRun {
+  taskId: string;
+  status: string;
+  createdAt: string;
+  completedAt: string | null;
+  blockedReason: string | null;
+  resultNote: string | null;
+}
+
+/**
+ * Строка витрины навыков: каталог из файлов агента + его карточка из базы.
+ *
+ * `tier`, `modelEffort`, `maxTokens` объявлены И необязательными, И nullable
+ * СОЗНАТЕЛЬНО: Core собирает эти ключи спредом по условию и при пустом
+ * значении не кладёт их в JSON вовсе (`agents.service.ts`, `skillDeck`).
+ * Пообещать здесь `| null` — значит соврать про провод и получить `undefined`
+ * там, где код ждёт `null`; поэтому панель обязана пережить обе формы.
+ */
+export interface SkillDeckItem {
+  agent: string;
+  skill: string;
+  description: string;
+  executor: "code" | "llm";
+  tier?: "T0" | "T1" | "T2" | "T3" | "T4" | null;
+  triggers: string[];
+  allowedTools: string[];
+  modelEffort?: string | null;
+  maxTokens?: number | null;
+  /** В файле навыка есть исполняемый код — тогда «модель» не значит «модель». */
+  hasCode: boolean;
+  problems: string[];
+  agentStatus: "active" | "paused" | "draft" | "deprecated";
+  business: string;
+  autonomyDefault: "T0" | "T1" | "T2" | "T3" | "T4";
+  /** Навык закреплён за агентом в карточке — только такой запускается. */
+  enabled: boolean;
+  crons: string[];
+  /** Самый строгий тир среди одноимённых навыков; null — тира нет ни у кого. */
+  tierFloor: "T0" | "T1" | "T2" | "T3" | "T4" | null;
+  /** Сколько агентов несут навык с этим именем, себя включая: 1 — уникальный. */
+  duplicates: number;
+  lastRun: SkillLastRun | null;
+}
+
+export interface SkillDeck {
+  syncedAt: string | null;
+  /** Цепочка моделей — глобальная настройка, панель её только показывает. */
+  models: { primary: string | null; fallbacks: string[] };
+  items: SkillDeckItem[];
+}
+
 /**
  * Заголовки записи в Core: тип тела и внутренний токен.
  *
@@ -2418,6 +2470,8 @@ export interface PartHistoryRow extends MachinePart {
 export const core = {
   briefing: () => get<Briefing>("/registry/briefing"),
   agents: () => get<AgentCard[]>("/agents"),
+  /** Витрина навыков: что агенты вообще умеют (R-SD-2). */
+  skillDeck: () => get<SkillDeck>("/agents/skills"),
 
   // ── Задачи ──
   // Личный контур (R-P5-4/R-P5-6): `/tasks?domain=personal` Core гейтит тем же
@@ -2569,6 +2623,21 @@ export const core = {
   updateAgent: (name: string, patch: Record<string, unknown>) =>
     send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "PATCH", patch, { owner: true }),
   archiveAgent: (name: string) => send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "DELETE"),
+  /**
+   * Ручной запуск навыка из панели. Обычная мутация под сервисным токеном:
+   * запуск не поднимает автономию — задача идёт тем же путём через политику
+   * и согласования, поэтому owner-пояса здесь нет.
+   */
+  runSkill: (
+    agent: string,
+    skill: string,
+    input: { input?: string; modelEffort?: string; actor?: string },
+  ) =>
+    send<{ taskId: string }>(
+      `/agents/${encodeURIComponent(agent)}/skills/${encodeURIComponent(skill)}/run`,
+      "POST",
+      input,
+    ),
 
   // ── Карточка автомата: вид и состояние ──
   /**

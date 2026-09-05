@@ -24,12 +24,22 @@ export type ScheduledInvocationMode = "durable-task" | "legacy";
  * A durable allowlisted skill always materializes a task. Any other skill may
  * use the legacy cron path only while its current workflow has no metered
  * provider steps. This keeps a newly metered route fail-closed.
+ *
+ * `executor: llm` тоже всегда durable (R-SD-5): его прогон — платный вызов
+ * модели, а legacy in-process путь ни денег через Core-ledger не проводит, ни
+ * повтор по clientKey не даёт. Поэтому llm-навык не «блокируется metered-гейтом»,
+ * а идёт задачей — cron для него открыт без allowlist.
+ *
+ * `isLlm` — параметр, а не импорт `llm-skill`: иначе `schedule` → `llm-skill` →
+ * `skills` → … замкнуло бы цикл импортов. Значение по умолчанию честно
+ * консервативное (llm нет), вызывающий (`index.ts`) передаёт `isLlmSkill`.
  */
 export function scheduledInvocationMode(
   skill: string,
   hasMeteredWorkflow: () => boolean,
+  isLlm: (skill: string) => boolean = () => false,
 ): ScheduledInvocationMode {
-  if ((DURABLE_SCHEDULED_SKILLS as readonly string[]).includes(skill)) {
+  if (isLlm(skill) || (DURABLE_SCHEDULED_SKILLS as readonly string[]).includes(skill)) {
     return "durable-task";
   }
   if (hasMeteredWorkflow()) {
@@ -38,6 +48,23 @@ export function scheduledInvocationMode(
     );
   }
   return "legacy";
+}
+
+/**
+ * Можно ли ставить llm-навык на расписание при текущем маршруте модели.
+ *
+ * Прогон llm-навыка — платный вызов; без metered-маршрута задача создаётся,
+ * worker уходит в `route_unavailable` и Core перезапускает её каждые 60 секунд —
+ * и так до бесконечности, по задаче на каждое срабатывание крона. Legacy-путь
+ * такую же ситуацию закрывает fail-closed ещё до планирования, и llm обязан
+ * вести себя так же: не запланировано лучше, чем запланировано вхолостую.
+ * Маршрут включат — reconcile раз в 10 минут подхватит навык сам.
+ *
+ * Параметром идёт структура, а не импорт `model-gateway`: функция обязана
+ * оставаться чистой и не тянуть в `schedule` ни env, ни реестр навыков.
+ */
+export function llmCronAdmitted(gateway: { billingMode: string } | null): boolean {
+  return gateway !== null && gateway.billingMode === "metered";
 }
 
 /**

@@ -7,19 +7,23 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   UseGuards,
 } from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsIn,
+  IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
   IsUrl,
   Matches,
+  Max,
   MaxLength,
   Min,
   ValidateNested,
@@ -27,11 +31,14 @@ import {
 import { Type } from "class-transformer";
 import { Cron } from "croner";
 import { OwnerMutationGuard } from "../common/owner-mutation.guard";
-import { AgentsService } from "./agents.service";
+import { MODEL_EFFORTS, type ModelEffort } from "../tasks/tasks.service";
+import { AGENT_STATUSES, AGENT_TIERS, AgentsService, type Tier } from "./agents.service";
 
-const STATUSES = ["active", "paused", "draft", "deprecated"] as const;
-const TIERS = ["T0", "T1", "T2", "T3", "T4"] as const;
+const STATUSES = AGENT_STATUSES;
+const TIERS = AGENT_TIERS;
 const STRATEGIES = ["pause", "downgrade", "ask"] as const;
+/** Имя агента и навыка — имя файла в паспорте: латиница, цифры, дефис. */
+const SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 export class ScheduleItemDto {
   @IsString() @IsNotEmpty() @MaxLength(64)
@@ -128,6 +135,63 @@ export class UpdateAgentDto extends CreateAgentDto {
   declare name: string;
 }
 
+/**
+ * Одна строка каталога навыков — зеркало frontmatter файла (R-SD-1).
+ * Присылают сами агенты при старте; панель эти строки только читает.
+ */
+export class CatalogSkillDto {
+  @Matches(SKILL_NAME, { message: "agent: латиница в нижнем регистре, цифры и дефис" })
+  agent!: string;
+
+  @Matches(SKILL_NAME, { message: "skill: латиница в нижнем регистре, цифры и дефис" })
+  skill!: string;
+
+  @IsString() @MaxLength(512)
+  description!: string;
+
+  @IsIn(["code", "llm"], { message: "executor: code или llm" })
+  executor!: "code" | "llm";
+
+  @IsOptional() @IsIn([...TIERS], { message: "tier: один из T0..T4" })
+  tier?: Tier;
+
+  @IsArray() @ArrayMaxSize(50) @IsString({ each: true }) @MaxLength(128, { each: true })
+  triggers!: string[];
+
+  @IsArray() @ArrayMaxSize(50) @IsString({ each: true }) @MaxLength(128, { each: true })
+  allowedTools!: string[];
+
+  @IsOptional() @IsString() @MaxLength(32)
+  modelEffort?: string;
+
+  @IsOptional() @IsInt() @Min(1) @Max(1_000_000)
+  maxTokens?: number;
+
+  @IsBoolean()
+  hasCode!: boolean;
+
+  @IsArray() @ArrayMaxSize(50) @IsString({ each: true }) @MaxLength(300, { each: true })
+  problems!: string[];
+}
+
+export class SyncCatalogDto {
+  @IsArray() @ArrayMaxSize(1000) @ValidateNested({ each: true }) @Type(() => CatalogSkillDto)
+  skills!: CatalogSkillDto[];
+}
+
+/** Запуск навыка из панели (R-SD-2). */
+export class RunSkillDto {
+  @IsOptional() @IsString() @MaxLength(4000)
+  input?: string;
+
+  @IsOptional()
+  @IsIn([...MODEL_EFFORTS], { message: `modelEffort: один из ${MODEL_EFFORTS.join(" | ")}` })
+  modelEffort?: ModelEffort;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+}
+
 /** Смена автономии агента — отдельное owner-действие (R-P5-5). */
 export class SetAutonomyDto {
   @IsIn([...TIERS], { message: "autonomyDefault: один из T0..T4" })
@@ -145,6 +209,41 @@ export class AgentsController {
   @Get()
   list(@Query("archived") archived?: string) {
     return this.agents.list({ includeArchived: archived === "1" });
+  }
+
+  /**
+   * Витрина навыков для панели.
+   *
+   * ОБЪЯВЛЕН ВЫШЕ `@Get(":name")` СОЗНАТЕЛЬНО: Nest сопоставляет маршруты по
+   * порядку объявления, и ниже «skills» уехал бы в параметр `:name` — панель
+   * получала бы «Агент "skills" не найден».
+   */
+  @Get("skills")
+  skills() {
+    return this.agents.skillDeck();
+  }
+
+  /**
+   * Полная перезапись каталога навыков — зовут сами агенты при старте (R-SD-1).
+   * PUT, а не POST: это замена всего ресурса целиком, а не добавление строк.
+   */
+  @Put("skills/catalog")
+  syncSkillCatalog(@Body() dto: SyncCatalogDto) {
+    return this.agents.syncSkillCatalog(
+      dto.skills.map((s) => ({
+        agent: s.agent,
+        skill: s.skill,
+        description: s.description,
+        executor: s.executor,
+        ...(s.tier !== undefined ? { tier: s.tier } : {}),
+        triggers: s.triggers,
+        allowedTools: s.allowedTools,
+        ...(s.modelEffort !== undefined ? { modelEffort: s.modelEffort } : {}),
+        ...(s.maxTokens !== undefined ? { maxTokens: s.maxTokens } : {}),
+        hasCode: s.hasCode,
+        problems: s.problems,
+      })),
+    );
   }
 
   @Get(":name")
@@ -194,6 +293,24 @@ export class AgentsController {
   @UseGuards(OwnerMutationGuard)
   setAutonomy(@Param("name") name: string, @Body() dto: SetAutonomyDto) {
     return this.agents.update(name, { autonomyDefault: dto.autonomyDefault });
+  }
+
+  /**
+   * Запуск навыка из панели — обычная мутация под общим SERVICE_TOKEN, как
+   * `POST /tasks`: owner-пояс здесь не нужен, потому что запуск не поднимает
+   * автономию — задача идёт тем же путём через политику и согласования.
+   */
+  @Post(":name/skills/:skill/run")
+  runSkill(
+    @Param("name") name: string,
+    @Param("skill") skill: string,
+    @Body() dto: RunSkillDto,
+  ) {
+    return this.agents.runSkill(name, skill, {
+      ...(dto.input !== undefined ? { input: dto.input } : {}),
+      ...(dto.modelEffort !== undefined ? { modelEffort: dto.modelEffort } : {}),
+      ...(dto.actor !== undefined ? { actor: dto.actor } : {}),
+    });
   }
 
   /** Удаление = архивация: история агента остаётся объяснимой. */

@@ -7,7 +7,9 @@ import type {
   LlmBudgetSnapshot,
   LlmTokenUsage,
 } from "@mydon/shared";
+import type { ModelReasoningEffort } from "./model-gateway";
 import type { ClaimedOutboxDelivery } from "./outbox-dispatcher";
+import type { CatalogSkill } from "./skill-catalog";
 import type { TaskLlmJobKind, TaskLlmWorkflowPlan } from "./task-llm-workflow";
 
 /** Сводка Core — на её основе навыки решают, есть ли повод что-то предлагать. */
@@ -126,6 +128,23 @@ export interface CommitAgentTaskOutcomeResult {
   replay?: boolean;
 }
 
+/**
+ * Подсказки прогона, которые Core кладёт в claim (R-SD-3/R-SD-4). Проверяем их
+ * ЗДЕСЬ, на границе провода: рантайм дальше работает с уже чистыми значениями.
+ */
+const AGENT_SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/; // маска сама держит длину ≤64
+// `minimal` в списке НЕТ: Core его не принимает и не исполняет. Пришедшее
+// откуда-то значение молча отбрасывается, и навык берёт усилие из паспорта —
+// это лучше, чем нести провайдеру заведомо отвергаемое поле.
+const MODEL_EFFORTS = new Set<ModelReasoningEffort>([
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
 /** Durable lease, которым Core отдал agent-task одному worker. */
 export interface AgentTaskClaim {
   runId: string;
@@ -135,8 +154,18 @@ export interface AgentTaskClaim {
   claimedAt: string;
   /** Snapshot hash minted by Core at claim and repeated by /start. */
   taskInputHash?: string;
-  /** Atomic claim snapshot; list results are stale after the lease is won. */
-  taskInput: { title: string; description?: string; domain?: Domain };
+  /**
+   * Atomic claim snapshot; list results are stale after the lease is won.
+   * `agentSkill`/`runOptions` есть только когда владелец их задал (R-SD-3/R-SD-4):
+   * старые задачи приходят прежней формой и хешируются как раньше (R-SD-10).
+   */
+  taskInput: {
+    title: string;
+    description?: string;
+    domain?: Domain;
+    agentSkill?: string;
+    runOptions?: { modelEffort?: ModelReasoningEffort };
+  };
   /** Present after execution /start, including active takeover resume. */
   execution?: AgentTaskExecution;
   /** Есть после crash/takeover: навык нельзя вызывать повторно. */
@@ -439,6 +468,20 @@ export class AgentsCoreClient {
     });
   }
 
+  /**
+   * Полная перезапись каталога навыков в Core (R-SD-1).
+   *
+   * PUT, а не POST: каталог — зеркало файлов образа, и Core заменяет его
+   * целиком одной транзакцией. Зовём при каждом успешном старте, поэтому
+   * снятый из образа навык исчезает из панели сам, без ручной чистки.
+   */
+  putSkillCatalog(skills: CatalogSkill[]): Promise<{ count: number; syncedAt: string }> {
+    return this.request<{ count: number; syncedAt: string }>("/agents/skills/catalog", {
+      method: "PUT",
+      body: JSON.stringify({ skills }),
+    });
+  }
+
   /** Настройки агентов из базы — то, что владелец видит и меняет в карточке. */
   listAgents(): Promise<
     {
@@ -507,7 +550,13 @@ export class AgentsCoreClient {
           generation: number;
           claimedAt: string;
           taskInputHash?: string;
-          taskInput?: { title?: unknown; description?: unknown; domain?: unknown };
+          taskInput?: {
+            title?: unknown;
+            description?: unknown;
+            domain?: unknown;
+            agentSkill?: unknown;
+            runOptions?: unknown;
+          };
           execution?: AgentTaskExecution | null;
           checkpoint?: AgentTaskCheckpoint | null;
         }
@@ -539,6 +588,24 @@ export class AgentsCoreClient {
     ) {
       throw new Error(`Core claim задачи ${id} содержит невалидный taskInput.domain`);
     }
+    // Подсказки прогона чиним МОЛЧА, а не роняем claim, как title/domain: испорченная
+    // подсказка — не повод не сделать задачу. Навыка нет или он мусорный — worker
+    // вернётся к подбору по тексту (R-SD-3), усилия нет — к объявленному в паспорте
+    // (R-SD-4). Уронить claim здесь значило бы заблокировать задачу из-за пустяка.
+    const rawAgentSkill = response.taskInput?.agentSkill;
+    const agentSkill =
+      typeof rawAgentSkill === "string" && AGENT_SKILL_NAME.test(rawAgentSkill)
+        ? rawAgentSkill
+        : undefined;
+    const rawRunOptions = response.taskInput?.runOptions;
+    const rawEffort =
+      typeof rawRunOptions === "object" && rawRunOptions !== null
+        ? (rawRunOptions as { modelEffort?: unknown }).modelEffort
+        : undefined;
+    const modelEffort =
+      typeof rawEffort === "string" && MODEL_EFFORTS.has(rawEffort as ModelReasoningEffort)
+        ? (rawEffort as ModelReasoningEffort)
+        : undefined;
     return {
       runId: response.runId,
       executionAttemptId: response.executionAttemptId,
@@ -550,6 +617,8 @@ export class AgentsCoreClient {
           ? { description: claimedDescription }
           : {}),
         ...(claimedDomain !== undefined ? { domain: claimedDomain as Domain } : {}),
+        ...(agentSkill !== undefined ? { agentSkill } : {}),
+        ...(modelEffort !== undefined ? { runOptions: { modelEffort } } : {}),
       },
       ...(response.taskInputHash ? { taskInputHash: response.taskInputHash } : {}),
       ...(response.execution ? { execution: response.execution } : {}),

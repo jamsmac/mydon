@@ -522,6 +522,25 @@ describe("Durable cron occurrence tasks", () => {
     );
   });
 
+  it("описание не несёт планового времени: иначе дедуп llm по расписанию мёртв", async () => {
+    const fixture = agentScheduleDb();
+    await makeTasks(fixture.db).ensureAgentSchedule(occurrence, observedAt);
+    const description = String(fixture.task?.description);
+    assert.equal(description, "Системный запуск навыка coach-review.\nCron: 0 10 * * 1");
+    assert.doesNotMatch(description, /2026-08-31T05:00/, "точное время живёт в due, а не в тексте");
+
+    // Следующий тик того же крона обязан дать ТОТ ЖЕ текст: описание входит в
+    // taskInputHash, а хеш — в signatureFacts предложения llm-навыка. Уникальная
+    // строка на каждое срабатывание делала бы каждый тик «новым поводом» и
+    // открывала владельцу новое согласование вместо no_change.
+    const nextWeek = agentScheduleDb();
+    await makeTasks(nextWeek.db).ensureAgentSchedule(
+      { ...occurrence, scheduledAt: new Date("2026-09-07T05:00:00.000Z") },
+      new Date("2026-09-07T05:00:30.000Z"),
+    );
+    assert.equal(nextWeek.task?.description, description);
+  });
+
   it("не принимает тот же ключ после изменения immutable payload", async () => {
     const fixture = agentScheduleDb();
     const service = makeTasks(fixture.db);
@@ -3163,4 +3182,187 @@ describe("Агрегатные чтения задач не утекают perso
       assert.match(text, /personal/);
     });
   }
+});
+
+/**
+ * Явный навык и параметры запуска у задачи (R-SD-3, R-SD-4, R-SD-10).
+ *
+ * Хеш durable-входа проверяется СНИМКОМ константы: если кто-то добавит новые
+ * ключи в `canonicalHash` безусловно, старые задачи (и их выполнения) начнут
+ * хешироваться иначе, и первый же `startAgentRun` после выката упрётся в
+ * «Task changed after claim».
+ */
+describe("Явный навык у задачи (R-SD-3/4/10)", () => {
+  /** Строка задачи БЕЗ новых полей — форма, в которой хеш считался до миграции 0087. */
+  const legacyRow = {
+    id: "11111111-1111-4111-8111-111111111111",
+    title: "Проверить дебиторку",
+    description: "Показать просроченные платежи",
+    ownerKind: "agent",
+    ownerRef: "receivables",
+    domain: "vendhub",
+    entityId: null,
+    priority: "normal",
+    due: null,
+    source: null,
+    createdBy: "owner",
+  } as Row;
+
+  /**
+   * Снимок формулы ДО правки. Менять это число нельзя: изменение означает, что
+   * старые задачи прода перестали совпадать со своим durable-хешем.
+   */
+  const LEGACY_HASH = "9dfa14e792149dd322ef40cbb031223aa20c578729e419b52953e3e572742854";
+
+  const deckAgent = { name: "vendhub-ops", status: "active", archivedAt: null, skills: ["parts-audit"] } as Row;
+
+  it("create сохраняет навык и параметры запуска", async () => {
+    const inserted: Row[] = [];
+    await makeTasks(stubDb({ inserted, selectResult: [deckAgent] })).create({
+      title: "Навык parts-audit: запуск из deck",
+      ownerKind: "agent",
+      ownerRef: "vendhub-ops",
+      source: "skills-deck",
+      agentSkill: "parts-audit",
+      runOptions: { modelEffort: "high" },
+    });
+    assert.equal(inserted[0]?.agentSkill, "parts-audit");
+    assert.deepEqual(inserted[0]?.runOptions, { modelEffort: "high" });
+  });
+
+  it("create с явным навыком, которого нет в карточке агента, — 409, задача не создаётся", async () => {
+    const inserted: Row[] = [];
+    await assert.rejects(
+      makeTasks(stubDb({ inserted, selectResult: [deckAgent] })).create({
+        title: "Навык draft-quote: КП",
+        ownerKind: "agent",
+        ownerRef: "vendhub-ops",
+        agentSkill: "draft-quote",
+      }),
+      /не закреплён за агентом "vendhub-ops"/,
+    );
+    assert.equal(inserted.length, 0);
+    // Нет карточки вовсе — тот же отказ: worker членство больше не проверяет.
+    await assert.rejects(
+      makeTasks(stubDb({ inserted })).create({ title: "x", ownerKind: "agent", ownerRef: "ghost", agentSkill: "parts-audit" }),
+      /не закреплён/,
+    );
+    assert.equal(inserted.length, 0);
+  });
+
+  it("create без навыка кладёт NULL — прежние вызовы не меняют форму строки", async () => {
+    const inserted: Row[] = [];
+    await makeTasks(stubDb({ inserted })).create({ title: "Снять показания", ownerKind: "human" });
+    assert.equal(inserted[0]?.agentSkill, null);
+    assert.equal(inserted[0]?.runOptions, null);
+  });
+
+  it("хеш задачи без навыка равен снимку формулы до миграции (R-SD-10)", () => {
+    assert.equal(durableTaskInputHash(legacyRow as never), LEGACY_HASH);
+    assert.equal(
+      durableTaskInputHash({ ...legacyRow, agentSkill: null, runOptions: null } as never),
+      LEGACY_HASH,
+      "NULL-поля не должны попадать в канонический объект",
+    );
+    assert.equal(
+      durableTaskInputHash({ ...legacyRow, agentSkill: null, runOptions: {} } as never),
+      LEGACY_HASH,
+      "пустые runOptions — это отсутствие параметров, а не новый вход",
+    );
+  });
+
+  it("хеш видит навык и параметры запуска, когда они заданы", () => {
+    const withSkill = durableTaskInputHash({ ...legacyRow, agentSkill: "parts-audit" } as never);
+    const withEffort = durableTaskInputHash({
+      ...legacyRow,
+      agentSkill: "parts-audit",
+      runOptions: { modelEffort: "high" },
+    } as never);
+    assert.notEqual(withSkill, LEGACY_HASH, "смена навыка — смена входа выполнения");
+    assert.notEqual(withEffort, withSkill, "усилие модели тоже часть входа");
+  });
+
+  it("claim отдаёт навык и параметры worker'у, а без них — прежний taskInput", async () => {
+    const claimedBase = {
+      id: "11111111-1111-4111-8111-111111111111",
+      title: "Навык parts-audit: сверить остатки",
+      description: "сверить остатки",
+      domain: null,
+      ownerKind: "agent",
+      ownerRef: "vendhub-ops",
+      status: "in_progress",
+      agentRunGeneration: 1,
+      agentExecutionAttemptId: "44444444-4444-4444-8444-444444444444",
+    };
+    const withSkill = await makeTasks(
+      stubDb({
+        updateResult: {
+          ...claimedBase,
+          agentSkill: "parts-audit",
+          runOptions: { modelEffort: "high" },
+        },
+      }),
+    ).claimAgentRun(claimedBase.id, "vendhub-ops", new Date("2026-09-05T07:00:00.000Z"));
+    assert.deepEqual(withSkill?.taskInput, {
+      title: claimedBase.title,
+      description: "сверить остатки",
+      agentSkill: "parts-audit",
+      runOptions: { modelEffort: "high" },
+    });
+
+    const plain = await makeTasks(
+      stubDb({ updateResult: { ...claimedBase, agentSkill: null, runOptions: null } }),
+    ).claimAgentRun(claimedBase.id, "vendhub-ops", new Date("2026-09-05T07:00:00.000Z"));
+    assert.deepEqual(plain?.taskInput, {
+      title: claimedBase.title,
+      description: "сверить остатки",
+    });
+
+    // Тот же предикат, что у хеша: пустые параметры — это их отсутствие.
+    const empty = await makeTasks(
+      stubDb({ updateResult: { ...claimedBase, agentSkill: null, runOptions: {} } }),
+    ).claimAgentRun(claimedBase.id, "vendhub-ops", new Date("2026-09-05T07:00:00.000Z"));
+    assert.equal("runOptions" in empty!.taskInput, false);
+  });
+
+  it("задача по расписанию несёт навык, а строка до миграции остаётся валидным replay", async () => {
+    const occurrence = {
+      agentName: "coach-agent",
+      skill: "coach-review",
+      cron: "0 10 * * 1",
+      scheduledAt: new Date("2026-08-31T05:00:00.000Z"),
+    };
+    const observedAt = new Date("2026-08-31T05:00:30.000Z");
+    const fixture = agentScheduleDb();
+    const service = makeTasks(fixture.db);
+
+    const first = await service.ensureAgentSchedule(occurrence, observedAt);
+    assert.equal(first.created, true);
+    assert.equal(fixture.task?.agentSkill, "coach-review");
+
+    // Задача, созданная ДО миграции 0087, навыка не несёт: повтор cron обязан
+    // остаться replay'ем, иначе первый же тик после выката упал бы 409.
+    fixture.mutateTask({ agentSkill: null });
+    const replay = await service.ensureAgentSchedule(occurrence, observedAt);
+    assert.equal(replay.replay, true);
+    assert.equal(replay.created, false);
+  });
+
+  it("чужой навык в занятом ключе cron по-прежнему 409", async () => {
+    const occurrence = {
+      agentName: "coach-agent",
+      skill: "coach-review",
+      cron: "0 10 * * 1",
+      scheduledAt: new Date("2026-08-31T05:00:00.000Z"),
+    };
+    const observedAt = new Date("2026-08-31T05:00:30.000Z");
+    const fixture = agentScheduleDb();
+    const service = makeTasks(fixture.db);
+    await service.ensureAgentSchedule(occurrence, observedAt);
+    fixture.mutateTask({ agentSkill: "morning-digest" });
+    await assert.rejects(
+      service.ensureAgentSchedule(occurrence, observedAt),
+      /immutable payload/,
+    );
+  });
 });

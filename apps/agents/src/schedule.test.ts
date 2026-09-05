@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { desiredJobs, jobKey, scheduledInvocationMode } from "./schedule";
+import { desiredJobs, jobKey, llmCronAdmitted, scheduledInvocationMode } from "./schedule";
 import type { AgentDefinition } from "./registry";
 
 const agent = (over: Partial<AgentDefinition> = {}): AgentDefinition => ({
@@ -77,5 +77,61 @@ describe("Планирование заданий агентов", () => {
       () => scheduledInvocationMode("future-metered-skill", () => true),
       /blocked until it is allowlisted/,
     );
+  });
+
+  it("llm-навык на cron идёт durable-задачей и не падает на metered-гейте (R-SD-5)", () => {
+    let routeChecked = false;
+    assert.equal(
+      scheduledInvocationMode(
+        "qualify-lead",
+        () => {
+          routeChecked = true;
+          return true;
+        },
+        () => true,
+      ),
+      "durable-task",
+    );
+    assert.equal(routeChecked, false, "llm решается до проверки metered-маршрута");
+  });
+
+  it("код-навык с metered-workflow вне allowlist по-прежнему бросает", () => {
+    assert.throws(
+      () => scheduledInvocationMode("future-metered-skill", () => true, () => false),
+      /blocked until it is allowlisted/,
+    );
+  });
+
+  it("llm-навык планируется: desiredJobs берёт код ∨ llm (R-SD-5)", () => {
+    const llm = agent({
+      skills: ["qualify-lead"],
+      schedule: [{ cron: "0 8 * * 1", skill: "qualify-lead" }],
+    });
+    const hasSkillLike = (s: string): boolean => s === "qualify-lead";
+    const { jobs, notWired } = desiredJobs([llm], hasSkillLike);
+    assert.deepEqual(jobs, [{ agent: "kass", skill: "qualify-lead", cron: "0 8 * * 1" }]);
+    assert.deepEqual(notWired, []);
+  });
+
+  it("llmCronAdmitted: без metered-маршрута llm на cron не ставится (fail-closed)", () => {
+    assert.equal(llmCronAdmitted({ billingMode: "metered" }), true);
+    assert.equal(llmCronAdmitted({ billingMode: "local" }), false, "локальный маршрут не платный");
+    assert.equal(llmCronAdmitted(null), false, "маршрут выключен вовсе");
+  });
+
+  it("llm-навык без metered-маршрута уходит в notWired, а не в вечные повторы", () => {
+    // Задача создалась бы на каждый тик, worker вернул бы route_unavailable, а
+    // Core повторял бы её каждые 60 секунд — навсегда. Не планировать честнее.
+    const llm = agent({
+      skills: ["qualify-lead"],
+      schedule: [{ cron: "0 8 * * 1", skill: "qualify-lead" }],
+    });
+    const gateway = { billingMode: "local" };
+    const { jobs, notWired } = desiredJobs(
+      [llm],
+      (s) => s === "code-skill" || (s === "qualify-lead" && llmCronAdmitted(gateway)),
+    );
+    assert.deepEqual(jobs, []);
+    assert.deepEqual(notWired, ["kass/qualify-lead"]);
   });
 });

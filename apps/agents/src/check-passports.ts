@@ -119,10 +119,13 @@ export function checkPassport(name: string, cfg: Passport, skills: string[]): Pa
 
 /**
  * Проверки, связывающие паспорт с навыками и файлами (спека llm-skill):
- *  • llm-навык в расписании — cron для executor: llm закрыт до допуска (R-LS-11);
  *  • executor: llm при наличии кода в SKILLS — двусмысленность, исполнится код;
  *  • kb_pages — каждая страница существует внутри shared/ (R-LS-8: иначе агент
  *    пойдёт к модели без знаний, и никто этого не заметит).
+ *
+ * llm-навыка в расписании здесь БОЛЬШЕ НЕТ: cron для `executor: llm` открыт
+ * через durable-задачи (R-SD-5), и прежнее замечание R-LS-11 стало ложной
+ * тревогой — оно ругало ровно ту конфигурацию, которую мы теперь и хотим.
  */
 export function checkLinks(
   cfg: Passport,
@@ -131,14 +134,6 @@ export function checkLinks(
   hasCode: (name: string) => boolean,
 ): string[] {
   const problems: string[] = [];
-  const executorOf = new Map(metas.map((m) => [m.name, m.executor]));
-  for (const s of cfg.schedule) {
-    if (s.skill && executorOf.get(s.skill) === "llm") {
-      problems.push(
-        `расписание зовёт llm-навык «${s.skill}» — cron для executor: llm закрыт до допуска в DURABLE_SCHEDULED_SKILLS (R-LS-11)`,
-      );
-    }
-  }
   for (const m of metas) {
     if (m.executor === "llm" && hasCode(m.name)) {
       problems.push(`навык ${m.name}: executor: llm, но есть код в SKILLS — исполняться будет код`);

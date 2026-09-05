@@ -31,17 +31,25 @@ import {
   Max,
   Min,
   ValidateIf,
+  ValidateNested,
 } from "class-validator";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { excludePersonal } from "../common/owner-enforcement";
 import { OwnerActionGuard } from "../common/owner-action.guard";
-import { TasksService } from "./tasks.service";
+import { MODEL_EFFORTS, TasksService, type ModelEffort } from "./tasks.service";
 
 const STATUSES = ["todo", "in_progress", "done", "cancelled"] as const;
 type Status = (typeof STATUSES)[number];
 const PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 type Priority = (typeof PRIORITIES)[number];
+
+/** Параметры запуска задачи (R-SD-4). Пока это только усилие модели. */
+export class RunOptionsDto {
+  @IsOptional()
+  @IsIn([...MODEL_EFFORTS], { message: `modelEffort: один из ${MODEL_EFFORTS.join(" | ")}` })
+  modelEffort?: ModelEffort;
+}
 
 export class CreateTaskDto {
   @IsString()
@@ -95,6 +103,22 @@ export class CreateTaskDto {
   @IsOptional()
   @IsUUID()
   entityId?: string;
+
+  /**
+   * Явный навык агента (R-SD-3): worker берёт его прежде угадывания по
+   * заголовку. Формат — имя файла навыка в паспорте агента (parts-audit.md).
+   */
+  @IsOptional()
+  @Matches(/^[a-z0-9][a-z0-9-]{0,63}$/, {
+    message: "agentSkill: латиница в нижнем регистре, цифры и дефис (например parts-audit)",
+  })
+  agentSkill?: string;
+
+  /** Параметры запуска (R-SD-4): усилие модели у llm-навыка. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RunOptionsDto)
+  runOptions?: RunOptionsDto;
 }
 
 export class ListTasksDto {
@@ -476,6 +500,12 @@ export class TasksController {
       ...(dto.createdBy ? { createdBy: dto.createdBy } : {}),
       ...(dto.entityId ? { entityId: dto.entityId } : {}),
       ...(dto.clientKey ? { clientKey: dto.clientKey } : {}),
+      ...(dto.agentSkill ? { agentSkill: dto.agentSkill } : {}),
+      // Пустой объект в базу не кладём: «параметров нет» и «параметры пустые» —
+      // одно и то же, а хеш durable-входа считает их отсутствием (R-SD-10).
+      ...(dto.runOptions?.modelEffort
+        ? { runOptions: { modelEffort: dto.runOptions.modelEffort } }
+        : {}),
     });
   }
 

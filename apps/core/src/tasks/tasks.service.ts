@@ -183,9 +183,36 @@ export interface AgentRunCommitResult {
   retryAt?: string;
 }
 
+/**
+ * Как параметры запуска ЛЕЖАТ в базе. `modelEffort` здесь просто текст:
+ * колонка jsonb без enum, и сузить его до {@link ModelEffort} кастом значило
+ * бы соврать — значение могло попасть в базу мимо DTO. {@link TaskRunOptions}
+ * остаётся типом ВХОДА (что позволено передать), этот — типом ВЫДАЧИ.
+ */
+export type StoredTaskRunOptions = NonNullable<TaskRow["runOptions"]>;
+
+/**
+ * Заданные параметры запуска, иначе `undefined`.
+ *
+ * Один предикат на хеш и на выдачу claim: раньше «пусто» понималось
+ * по-разному ({} не влиял на хеш, но уезжал worker'у), и расхождение было бы
+ * заметно только на проде.
+ */
+function presentRunOptions(row: TaskRow): StoredTaskRunOptions | undefined {
+  const options = row.runOptions;
+  return options && Object.keys(options).length > 0 ? options : undefined;
+}
+
 type ClaimedAgentRun = TaskRow & {
   taskInputHash: string;
-  taskInput: { title: string; description?: string; domain?: Domain };
+  taskInput: {
+    title: string;
+    description?: string;
+    domain?: Domain;
+    /** R-SD-3/4: явный навык и параметры запуска — часть durable-входа. */
+    agentSkill?: string;
+    runOptions?: StoredTaskRunOptions;
+  };
   agentExecution: AgentExecutionView | null;
 };
 
@@ -321,6 +348,7 @@ function normalizedNext(value: string[] | undefined): string[] | undefined {
 }
 
 export function durableTaskInputHash(row: TaskRow): string {
+  const runOptions = presentRunOptions(row);
   return canonicalHash({
     schemaVersion: 1,
     id: row.id,
@@ -334,6 +362,11 @@ export function durableTaskInputHash(row: TaskRow): string {
     due: row.due?.toISOString() ?? null,
     source: row.source,
     createdBy: row.createdBy,
+    // R-SD-10: ключи добавляются ТОЛЬКО когда заданы. Безусловный спред
+    // изменил бы хеш каждой старой задачи, и первый же startAgentRun после
+    // выката упёрся бы в «Task changed after claim».
+    ...(row.agentSkill ? { agentSkill: row.agentSkill } : {}),
+    ...(runOptions ? { runOptions } : {}),
   });
 }
 
@@ -507,6 +540,23 @@ function notionReportPayload(
   return canonicalValue({ report }) as JsonObject;
 }
 
+/**
+ * Усилие модели у llm-навыка (R-SD-4). Список — контракт панели и рантайма
+ * агентов: значение уходит в `reasoningEffort` провайдера как есть.
+ *
+ * Без `minimal`: провайдерный валидатор task-llm-jobs его не принимает
+ * (`OPENAI_GPT_56_REASONING_EFFORTS`), и задача с таким усилием проходила DTO,
+ * а падала уже на диспетчере — то есть крутилась в повторах вместо отказа при
+ * вводе. Список принимаемого обязан совпадать со списком исполняемого.
+ */
+export const MODEL_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
+export type ModelEffort = (typeof MODEL_EFFORTS)[number];
+
+/** Параметры конкретного запуска. Код-навыки их игнорируют. */
+export interface TaskRunOptions {
+  modelEffort?: ModelEffort;
+}
+
 export interface CreateTaskInput {
   title: string;
   ownerKind: "human" | "agent";
@@ -521,6 +571,10 @@ export interface CreateTaskInput {
   entityId?: string;
   /** Ключ идемпотентности от клиента: ретрай не даёт дубль-задачу. */
   clientKey?: string;
+  /** Явный навык агента (R-SD-3): worker берёт его прежде угадывания по тексту. */
+  agentSkill?: string;
+  /** Параметры запуска из deck (R-SD-4). */
+  runOptions?: TaskRunOptions;
 }
 
 /**
@@ -563,6 +617,8 @@ interface AgentScheduleTaskIdentity {
   priority: "normal";
   createdBy: typeof AGENT_SCHEDULE_SOURCE;
   clientKey: string;
+  /** R-SD-3: задача по расписанию несёт навык явно, а не намёком в заголовке. */
+  agentSkill: string;
 }
 
 /** NULL-safe exclusion: SQL `source <> value` alone would also drop NULL. */
@@ -613,10 +669,11 @@ function agentScheduleIdentity(input: EnsureAgentScheduleInput): AgentScheduleTa
   const clientKey = `agent-schedule:v1:${digest}`;
   return {
     title: `По расписанию: ${input.skill}`,
-    description:
-      `Системный запуск навыка ${input.skill}.\n` +
-      `Cron: ${input.cron}\n` +
-      `Плановое время UTC: ${scheduledAt.toISOString()}`,
+    // Плановое время в описании НЕ повторяем: оно уже лежит в `due`, а описание
+    // уходит в хеш входа задачи (`taskInputHash`) — уникальная строка на каждый
+    // тик делала дедуп llm-предложений (`signatureFacts`) мёртвым: каждое
+    // срабатывание крона выглядело новым поводом и открывало новое согласование.
+    description: `Системный запуск навыка ${input.skill}.\nCron: ${input.cron}`,
     ownerKind: "agent",
     ownerRef: input.agentName,
     domain: null,
@@ -626,6 +683,7 @@ function agentScheduleIdentity(input: EnsureAgentScheduleInput): AgentScheduleTa
     priority: "normal",
     createdBy: AGENT_SCHEDULE_SOURCE,
     clientKey,
+    agentSkill: input.skill,
   };
 }
 
@@ -642,7 +700,11 @@ function assertAgentScheduleReplay(row: TaskRow, expected: AgentScheduleTaskIden
     row.priority === expected.priority &&
     row.createdBy === expected.createdBy &&
     row.clientKey === expected.clientKey;
-  if (!exact) {
+  // Строка, созданная ДО миграции 0087, навыка не несёт: это тот же самый
+  // occurrence, и повтор cron обязан остаться replay'ем. Чужой навык в занятом
+  // ключе — по-прежнему конфликт.
+  const skillMatches = row.agentSkill === null || row.agentSkill === expected.agentSkill;
+  if (!exact || !skillMatches) {
     throw new ConflictException(
       "Ключ cron occurrence уже занят задачей с другим immutable payload",
     );
@@ -788,6 +850,26 @@ export class TasksService {
     assertPublicTaskSource(input.source);
     assertPublicTaskClientKey(input.clientKey);
     return this.db.transaction(async (tx) => {
+      // Явный навык (R-SD-3) обязан быть закреплён за агентом-исполнителем.
+      // Worker больше НЕ сверяет членство по своему снимку карточки (снимок
+      // отстаёт до 10 минут) и доверяет Core — значит, проверять обязан Core,
+      // и на ЛЮБОМ пути создания, а не только в runSkill/ensureAgentSchedule:
+      // иначе прямой POST /tasks с agentSkill исполнил бы навык, которого у
+      // агента нет в карточке.
+      if (input.agentSkill && input.ownerKind === "agent") {
+        const agentName = (input.ownerRef ?? "").trim();
+        const [card] = agentName
+          ? await tx.select().from(agent).where(eq(agent.name, agentName)).limit(1)
+          : [];
+        const carried = Array.isArray(card?.skills)
+          ? card.skills.filter((s): s is string => typeof s === "string")
+          : [];
+        if (!card || card.archivedAt !== null || !carried.includes(input.agentSkill)) {
+          throw new ConflictException(
+            `Навык "${input.agentSkill}" не закреплён за агентом "${agentName || "—"}"`,
+          );
+        }
+      }
       // Пустая строка от клиента (нет активного человека под рукой) не должна
       // осесть в базе как «занятая» задача — те же правила, что у PATCH
       // (setStatus/edit, см. ниже): "" нормализуется в null.
@@ -808,6 +890,8 @@ export class TasksService {
           createdBy: input.createdBy ?? actorRef,
           entityId: input.entityId ?? null,
           clientKey: input.clientKey ?? null,
+          agentSkill: input.agentSkill ?? null,
+          runOptions: input.runOptions ?? null,
         })
         .onConflictDoNothing({ target: task.clientKey })
         .returning();
@@ -1085,6 +1169,7 @@ export class TasksService {
           );
         }
       }
+      const runOptions = presentRunOptions(claimed);
       return {
         ...claimed,
         taskInputHash: durableTaskInputHash(claimed),
@@ -1095,6 +1180,10 @@ export class TasksService {
           title: claimed.title,
           ...(claimed.description ? { description: claimed.description } : {}),
           ...(claimed.domain ? { domain: claimed.domain } : {}),
+          // R-SD-3/4: worker берёт навык отсюда, а не угадывает по заголовку.
+          // Предикат тот же, что у хеша: пустые параметры — это их отсутствие.
+          ...(claimed.agentSkill ? { agentSkill: claimed.agentSkill } : {}),
+          ...(runOptions ? { runOptions } : {}),
         },
         agentExecution,
       };

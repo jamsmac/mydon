@@ -20,6 +20,7 @@ import {
   date,
   uniqueIndex,
   check,
+  primaryKey,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import type { CashCategorySummary, RecipeLine } from "@mydon/shared";
@@ -283,6 +284,10 @@ export const task = pgTable(
     agentExecutionBlockedReason: text("agent_execution_blocked_reason"),
     agentRunGeneration: integer("agent_run_generation").default(0).notNull(),
     agentRunClaimedAt: timestamp("agent_run_claimed_at", { withTimezone: true }),
+    /** Явный навык (R-SD-3): запуск из deck и по расписанию несут его; без него worker угадывает по тексту. */
+    agentSkill: text("agent_skill"),
+    /** Параметры запуска из deck (R-SD-4): `{ modelEffort?: string }`. Код-навыки игнорируют. */
+    runOptions: jsonb("run_options").$type<{ modelEffort?: string }>(),
     /** Срочность — чтобы список сортировался по важности, а не по алфавиту. */
     priority: taskPriorityEnum("priority").default("normal").notNull(),
     due: timestamp("due", { withTimezone: true }),
@@ -358,6 +363,19 @@ export const task = pgTable(
       .where(
         sql`${t.source} = 'agent-schedule' and ${t.status} <> 'done' and ${t.status} <> 'cancelled'`,
       ),
+    /**
+     * «Последний запуск навыка» в deck (R-SD-7): `distinct on (owner_ref,
+     * agent_skill) … order by … created_at desc` берёт первую строку каждой
+     * группы прямо из индекса, без сортировки всей таблицы задач.
+     *
+     * Частичный: `agent_skill` есть только у задач из deck и расписаний —
+     * остальные (их подавляющее большинство) в индексе не нужны. Объявлен
+     * ЗДЕСЬ, а не только в SQL миграции: иначе следующая генерация увидела бы
+     * дрейф и попыталась создать индекс заново.
+     */
+    index("task_agent_skill_idx")
+      .on(t.ownerRef, t.agentSkill, t.createdAt.desc())
+      .where(sql`${t.agentSkill} is not null`),
     check("task_agent_run_generation_nonnegative", sql`${t.agentRunGeneration} >= 0`),
   ],
 );
@@ -1644,6 +1662,34 @@ export const agent = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [index("agent_status_idx").on(t.status)],
+);
+
+/**
+ * Каталог навыков — ЗЕРКАЛО файлов `apps/agents/agents/<agent>/skills/*.md` (R-SD-1).
+ * Агенты переписывают его целиком при каждом успешном старте; панель читает
+ * только отсюда. Без FK на `agent`: паспорт может ещё не быть в базе.
+ */
+export const agentSkillCatalog = pgTable(
+  "agent_skill_catalog",
+  {
+    agentName: text("agent_name").notNull(),
+    skill: text("skill").notNull(),
+    description: text("description").default("").notNull(),
+    /** code | llm — кто исполняет (frontmatter `executor`). */
+    executor: text("executor").notNull(),
+    /** Минимальный тир (frontmatter `requires-approval`), NULL — не задан. */
+    tier: text("tier"),
+    triggers: jsonb("triggers").$type<string[]>().default([]).notNull(),
+    allowedTools: jsonb("allowed_tools").$type<string[]>().default([]).notNull(),
+    modelEffort: text("model_effort"),
+    maxTokens: integer("max_tokens"),
+    /** Есть код в SKILLS: при executor: llm исполнится код (двусмысленность видна в deck). */
+    hasCode: boolean("has_code").default(false).notNull(),
+    /** Замечания check-passports к frontmatter. */
+    problems: jsonb("problems").$type<string[]>().default([]).notNull(),
+    syncedAt: timestamp("synced_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.agentName, t.skill] })],
 );
 
 // ── system_config: глобальные тумблеры системы, редактируемые из панели ──────
@@ -3601,6 +3647,7 @@ export const schema = {
   note,
   auditLog,
   agent,
+  agentSkillCatalog,
   // Единый денежный журнал всех метрируемых LLM-вызовов.
   llmModelPrice,
   llmSpend,

@@ -20,11 +20,12 @@ import {
 } from "./polling";
 import { runOurvendAccounting } from "./ourvend-accounting";
 import { ourvendConfigFromEnv, runOurvendSync } from "./ourvend-sync";
-import { registerLlmSkills } from "./llm-skill";
+import { isLlmSkill, registerLlmSkills } from "./llm-skill";
 import { isKbPagePath, loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
-import { desiredJobs, jobKey, scheduledInvocationMode } from "./schedule";
+import { desiredJobs, jobKey, llmCronAdmitted, scheduledInvocationMode } from "./schedule";
 import { ScheduledOccurrenceRetryQueue } from "./scheduled-occurrence-queue";
+import { catalogFromMetas } from "./skill-catalog";
 import { loadSkillMeta, skillTierFloors } from "./skill-loader";
 import { hasCodeSkill } from "./skills";
 import { applySystemOverrides } from "./system-config";
@@ -212,6 +213,12 @@ async function main(): Promise<void> {
   // и перечитываем базу по расписанию.
   let agents = fromFiles;
   let fromCoreOk = false;
+  // Каталог навыков пишется ОДИН РАЗ за старт процесса. `skillMetas` читаются из
+  // файлов образа и после старта не меняются, а `loadFromCore` зовёт ещё и
+  // перечитка раз в 10 минут — без этого флага Core получал бы ~144 одинаковых
+  // перезаписи в сутки и столько же строк аудита ни о чём. Флаг ставим ТОЛЬКО
+  // после успешной записи: не записалось — попробуем на следующем круге.
+  let catalogPushed = false;
 
   async function loadFromCore(): Promise<AgentDefinition[] | null> {
     try {
@@ -220,6 +227,20 @@ async function main(): Promise<void> {
         console.log(
           `Паспорта перенесены в базу: заведено ${seed.seeded}, уже было ${seed.skipped}.`,
         );
+      }
+      // Каталог навыков — зеркало файлов образа (R-SD-1): панель `/skills`
+      // читает только Core и не знает про диск контейнера. Пишем ПОСЛЕ сида
+      // (агенты уже есть в базе) и best-effort: каталог — витрина, из-за неё
+      // агенты стартовать не перестают. Не записался — панель покажет пустое
+      // состояние, строка в логе скажет почему, а следующий круг попробует снова.
+      if (!catalogPushed) {
+        try {
+          const synced = await core.putSkillCatalog(catalogFromMetas(skillMetas, hasCodeSkill));
+          catalogPushed = true;
+          console.log(`Каталог навыков в Core: ${synced.count}.`);
+        } catch (err) {
+          console.warn("Каталог навыков не записан в Core:", err);
+        }
       }
       // Тумблеры системы накладываем вместе с настройками агентов: обе правки
       // владельца живут в базе и подхватываются одной перечиткой.
@@ -276,6 +297,11 @@ async function main(): Promise<void> {
   const tasksPaused = (): boolean => assignedAgentTasksPaused(process.env);
   let lastSchedulesPaused = schedulesPaused();
   let lastTasksPaused = tasksPaused();
+  // Допуск llm-навыков на cron зависит от LLM-маршрута (R-SD-5). Маршрут — живая
+  // настройка панели, она не меняет ни карточки агентов, ни флаг паузы, поэтому
+  // без этого триггера перечитка не перестраивала бы расписания: включённый
+  // маршрут не запускал бы llm-cron до рестарта, выключенный — не гасил бы его.
+  let lastLlmCronAdmitted = llmCronAdmitted(modelGatewayFromEnv());
   if (lastSchedulesPaused) {
     console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания на паузе. Слежу за снятием (панель/env).");
   }
@@ -307,10 +333,20 @@ async function main(): Promise<void> {
       return;
     }
 
-    // В расписание идут только навыки с кодом: llm-навык на cron заблокирован до
-    // допуска в DURABLE_SCHEDULED_SKILLS (R-LS-11) — иначе каждый тик падал бы
-    // на «metered scheduled skill … blocked» в лог.
-    const { jobs, notWired } = desiredJobs(agents, hasCodeSkill);
+    // В расписание идут навыки с любой реализацией — код ∨ llm (R-SD-5).
+    // llm-навык на cron идёт durable-задачей, а не in-process: деньги проходят
+    // через Core-ledger, а повтор тика — replay по clientKey. Раньше сюда
+    // передавался hasCodeSkill, и llm-навык в расписании молча не планировался.
+    //
+    // Но только при живом metered-маршруте: без него каждая созданная задача
+    // ушла бы в route_unavailable и повторялась бы Core каждые 60 секунд вечно.
+    // Маршрут проверяем на КАЖДОМ reconcile (раз в 10 минут) — включат ключ,
+    // и навык встанет в расписание сам, без перезапуска контейнера.
+    const { jobs, notWired } = desiredJobs(
+      agents,
+      (skill) =>
+        hasCodeSkill(skill) || (isLlmSkill(skill) && llmCronAdmitted(modelGatewayFromEnv())),
+    );
     const want = new Set(jobs.map(jobKey));
 
     // Гасим то, чего в желаемом наборе больше нет.
@@ -342,6 +378,7 @@ async function main(): Promise<void> {
               const mode = scheduledInvocationMode(
                 j.skill,
                 () => buildTaskLlmWorkflowPlan(j.skill).steps.length > 0,
+                isLlmSkill,
               );
               if (mode === "durable-task") {
                 pendingScheduledOccurrences.enqueue(j, occurrence);
@@ -378,7 +415,16 @@ async function main(): Promise<void> {
       }
     }
 
-    const nw = notWired.join(", ");
+    // llm-навык без маршрута отказан по ДРУГОЙ причине, чем навык без тела:
+    // первое чинится ключом в окружении, второе — файлом навыка. Одна строка
+    // лога на оба случая заставляла бы гадать, что именно чинить.
+    const nw = notWired
+      .map((ref) =>
+        isLlmSkill(ref.slice(ref.indexOf("/") + 1))
+          ? `${ref} (LLM-маршрут выключен/не metered)`
+          : ref,
+      )
+      .join(", ");
     if (nw !== lastNotWired) {
       lastNotWired = nw;
       if (nw.length > 0) console.log(`Навыки без реализации (не планируются): ${nw}.`);
@@ -532,7 +578,17 @@ async function main(): Promise<void> {
             : "Пауза назначенных задач снята — worker возьмёт их в ближайший poll.",
         );
       }
-      if (changed || schedulesPauseFlipped) reconcileSchedules();
+      const llmCronAdmittedNow = llmCronAdmitted(modelGatewayFromEnv());
+      const llmCronFlipped = llmCronAdmittedNow !== lastLlmCronAdmitted;
+      if (llmCronFlipped) {
+        lastLlmCronAdmitted = llmCronAdmittedNow;
+        console.log(
+          llmCronAdmittedNow
+            ? "LLM-маршрут metered — llm-навыки допущены на cron, перестраиваю расписания."
+            : "LLM-маршрут выключен или не metered — llm-навыки снимаю с cron.",
+        );
+      }
+      if (changed || schedulesPauseFlipped || llmCronFlipped) reconcileSchedules();
     })();
   }, 10 * 60_000).unref();
 

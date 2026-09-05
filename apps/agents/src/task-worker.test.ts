@@ -4,7 +4,7 @@ import type { AgentsCoreClient, AgentTaskInvocation } from "./core-client";
 import { clearLlmSkills, registerLlmSkills } from "./llm-skill";
 import type { AgentDefinition } from "./registry";
 import type { SkillMeta } from "./skill-loader";
-import { requiredChatStep, runAgentTasks } from "./task-worker";
+import { requiredChatStep, resolveTaskSkill, runAgentTasks } from "./task-worker";
 
 const agent: AgentDefinition = {
   name: "coach-agent",
@@ -71,5 +71,62 @@ describe("requiredChatStep — навыки, которым metered-маршру
     };
     registerLlmSkills([meta], { sharedDir: "/nope", agentsDir: "/nope" }, () => false);
     assert.equal(requiredChatStep("qualify-lead"), "llm-skill:qualify-lead");
+  });
+});
+
+describe("resolveTaskSkill — явный навык побеждает угадывание (R-SD-3)", () => {
+  const multi: AgentDefinition = {
+    ...agent,
+    skills: ["coach-review", "parts-audit", "not-implemented-yet"],
+  };
+  // «разбор недел…» — подсказка кодового coach-review; так видно, что явный
+  // навык действительно ПЕРЕБИЛ угадывание, а не совпал с ним.
+  const claim = (agentSkill?: string) => ({
+    taskInput: {
+      title: "Разбор недели по агентам",
+      description: "Посмотри, что получилось",
+      ...(agentSkill !== undefined ? { agentSkill } : {}),
+    },
+  });
+
+  it("без agentSkill — прежнее поведение: подбор по тексту задачи", () => {
+    assert.deepEqual(resolveTaskSkill(multi, claim()), { skill: "coach-review" });
+  });
+
+  it("agentSkill закреплён за агентом и реализован — берём его", () => {
+    assert.deepEqual(resolveTaskSkill(multi, claim("parts-audit")), { skill: "parts-audit" });
+  });
+
+  it("явный навык реализован, но карточка-снимок его ещё не знает — всё равно берём (F3)", () => {
+    // `agent.skills` перечитывается из Core раз в 10 минут: свежевписанный
+    // владельцем навык доедет до worker позже, чем задача по нему. Членство уже
+    // проверил Core при создании задачи — вторая проверка по устаревшему снимку
+    // отменяла бы явное указание владельца.
+    const stale: AgentDefinition = { ...agent, skills: ["coach-review"] };
+    assert.deepEqual(resolveTaskSkill(stale, claim("watch-receivables")), {
+      skill: "watch-receivables",
+    });
+  });
+
+  it("нереализованный явный навык → null с причиной, без подбора (Р-6)", () => {
+    const res = resolveTaskSkill(multi, claim("not-implemented-yet"));
+    assert.equal(res.skill, null, "подбор по тексту не должен подменять явный навык");
+    assert.match(res.reason ?? "", /Навык «not-implemented-yet» задан явно, но не реализован/);
+    assert.match(res.reason ?? "", /Реализованные навыки: coach-review, parts-audit\./);
+  });
+
+  it("у агента вообще нет реализованных навыков — причина говорит «нет»", () => {
+    const empty: AgentDefinition = { ...agent, skills: ["not-implemented-yet"] };
+    assert.match(
+      resolveTaskSkill(empty, claim("not-implemented-yet")).reason ?? "",
+      /Реализованные навыки: нет\./,
+    );
+  });
+
+  it("ни явного, ни подходящего навыка — null без причины (агент честно вернёт задачу)", () => {
+    const other: AgentDefinition = { ...agent, skills: ["parts-audit"] };
+    assert.deepEqual(resolveTaskSkill(other, { taskInput: { title: "Полей цветы" } }), {
+      skill: null,
+    });
   });
 });

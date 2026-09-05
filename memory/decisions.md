@@ -14,5 +14,6 @@
 | 2026-09-04 | MYDON строится по ARMS (Skills → Memory → Routines → Applications); память — роутер-файлы; факты — Core, знания — markdown | `docs/AGENTIC_OS_ARMS_PLAN.md` |
 | 2026-09-04 | Markdown-навык без кода исполняется общим `executor: llm` (один metered-вызов, строгий JSON → Proposal); агенты — только metered `openai-api`, не Agent SDK/подписка; первый паспорт `globerent-sales/qualify-lead`; ответ не по контракту блокирует задачу (`skill_failed`) до owner retry | `docs/superpowers/specs/2026-09-04-llm-skill-executor-design.md` |
 | 2026-09-04 | Данные, заполненные Claude (паспорта, KB, цели), — значения по умолчанию до ревизии владельца; ревизия идёт квизом по одной карточке, система их не ждёт | `docs/FIRST_LOGIN_CHECKLIST.md`, `docs/superpowers/specs/2026-09-04-owner-review-quiz-design.md` |
+| 2026-09-05 | Каталог навыков — зеркало файлов в `agent_skill_catalog` (агенты переписывают целиком на старте); запуск из deck — обычная задача агенту (`source=skills-deck`), пауза уважается сразу; per-run настраивается только усилие; llm-навык на cron — только durable-задачей; явный навык задачи побеждает подбор по заголовку | `docs/decisions/2026-09-05-skills-deck-cron-llm.md` |
 
 Новое решение: добавь строку сюда и файл в `docs/decisions/`. Не дублируй текст.

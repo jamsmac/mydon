@@ -9,7 +9,7 @@ import { embeddingGatewayFromEnv } from "./embedding";
 import { llmLedgerFromEnv } from "./llm-ledger";
 import type { AgentDefinition } from "./registry";
 import { assessIdeas, buildIdeasProposal, readIdeaChannels, type IdeasMemory } from "./ideas";
-import { modelGatewayFromEnv } from "./model-gateway";
+import { modelGatewayFromEnv, type ModelReasoningEffort } from "./model-gateway";
 import { partsAudit } from "./parts-audit";
 import { isLlmSkill, llmSkill } from "./llm-skill";
 import { findSolutions } from "./solution-search";
@@ -87,8 +87,19 @@ export interface SkillRunContext {
   traceKey?: string;
   /** Fail-closed CAS перед каждым provider dispatch durable task-run. */
   assertLease?: () => Promise<void>;
-  /** Atomic Core snapshot used by task-only skills; never use the stale list row. */
-  taskInput?: { title: string; description?: string; domain?: Domain };
+  /**
+   * Atomic Core snapshot used by task-only skills; never use the stale list row.
+   * `agentSkill` — явный навык задачи (R-SD-3), `runOptions.modelEffort` —
+   * усилие ЭТОГО прогона, перекрывающее усилие паспорта (R-SD-4). Оба поля
+   * есть только когда владелец их задал.
+   */
+  taskInput?: {
+    title: string;
+    description?: string;
+    domain?: Domain;
+    agentSkill?: string;
+    runOptions?: { modelEffort?: ModelReasoningEffort };
+  };
   /** Есть только у порученной Core task; включает checkpoint/resume. */
   task?: TaskSkillRunContext;
 }
