@@ -81,13 +81,34 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000;
  */
 export function parityRows(goods: GoodsStock, table: TableStockRow[], canon: (raw: string) => string): VendingParityRow[] {
   const byId = new Map(goods.rows.map((r) => [r.productId, r]));
-  const byNorm = new Map(goods.rows.map((r) => [normalizeProductName(r.productName), r]));
+  // Коллизия нормализованных имён двух позиций прайса — выигрывает ПЕРВАЯ, как
+  // у карточек в плане закупа (`rulesKeyByNorm`): молча переехать на вторую
+  // хуже, чем остаться на той, по которой уже считали.
+  const byNorm = new Map<string, GoodsStockRow>();
+  for (const r of goods.rows) {
+    const k = normalizeProductName(r.productName);
+    if (!byNorm.has(k)) byNorm.set(k, r);
+  }
+  // Строка таблицы занимает позицию в ДВА прохода: сначала те, что связаны с
+  // прайсом по `product_id`, потом остальные — по канону имени. Иначе строка,
+  // сопоставленная лишь по имени, могла бы занять позицию раньше строки с
+  // настоящей связью, и та ушла бы в сироты. Вторая строка на ту же позицию —
+  // сирота: видимая, а не потерянная.
   const tableByProduct = new Map<string, TableStockRow>();
   const orphans: TableStockRow[] = [];
+  const claim = (t: TableStockRow, p: GoodsStockRow | undefined): boolean => {
+    if (!p || tableByProduct.has(p.productId)) return false;
+    tableByProduct.set(p.productId, t);
+    return true;
+  };
+  const byName: TableStockRow[] = [];
   for (const t of table) {
-    const p = (t.productId && byId.get(t.productId)) || byNorm.get(normalizeProductName(canon(t.productName)));
-    if (p && !tableByProduct.has(p.productId)) tableByProduct.set(p.productId, t);
-    else orphans.push(t);
+    if (t.productId && byId.has(t.productId)) {
+      if (!claim(t, byId.get(t.productId))) orphans.push(t);
+    } else byName.push(t);
+  }
+  for (const t of byName) {
+    if (!claim(t, byNorm.get(normalizeProductName(canon(t.productName))))) orphans.push(t);
   }
   const out: VendingParityRow[] = [];
   for (const p of goods.rows) {
@@ -109,7 +130,10 @@ export function parityRows(goods: GoodsStock, table: TableStockRow[], canon: (ra
     out.push({ productName: p.productName, productId: p.productId, cardId: p.cardId, table: t?.quantity ?? null, ledger, diff, status, isMismatch });
   }
   for (const o of orphans) {
-    out.push({ productName: o.productName, productId: o.productId, cardId: null, table: o.quantity, ledger: null, diff: null, status: "no_card", isMismatch: false });
+    // `productId` сироты — либо висячий (позиции нет в прайсе), либо дубль на
+    // уже занятую позицию: в обоих случаях это НЕ позиция прайса, и счётчик
+    // `products` её не считает.
+    out.push({ productName: o.productName, productId: null, cardId: null, table: o.quantity, ledger: null, diff: null, status: "no_card", isMismatch: false });
   }
   return out.sort((a, b) => a.productName.localeCompare(b.productName, "ru"));
 }

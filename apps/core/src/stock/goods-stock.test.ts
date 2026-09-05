@@ -108,4 +108,39 @@ describe("Сверка по объединению прайса и таблиц�
     assert.equal(rows.find((r: VendingParityRow) => r.productId === "p-snickers")?.status, "no_warehouse");
     assert.equal(rows.some((r: VendingParityRow) => r.isMismatch), false);
   });
+  it("коллизия нормализованных имён двух позиций прайса — выигрывает ПЕРВАЯ, как везде в репо", () => {
+    const g = goods({
+      rows: [
+        { productName: "Red Bull", productId: "p-rb-1", cardId: "c-rb-1", quantity: 5, countedAt: null, isActive: true },
+        { productName: "Red  Bull", productId: "p-rb-2", cardId: "c-rb-2", quantity: 7, countedAt: null, isActive: true },
+      ],
+    });
+    const rows = parityRows(g, [{ productName: "red bull", productId: null, quantity: 5 }], canon);
+    assert.equal(rows.find((r) => r.productId === "p-rb-1")?.status, "ok", "строка по имени легла на первую позицию");
+    assert.equal(rows.find((r) => r.productId === "p-rb-2")?.status, "no_row");
+  });
+
+  it("совпадение по product_id главнее совпадения по имени: строка с id занимает позицию, строка по имени уходит в сироты", () => {
+    const rows = parityRows(
+      goods(),
+      [
+        { productName: "Snickers 50gr", productId: null, quantity: 1 }, // по имени — идёт первой в таблице
+        { productName: "старое имя", productId: "p-snickers", quantity: 40 }, // по id — должна выиграть
+      ],
+      canon,
+    );
+    const sn = rows.find((r) => r.productId === "p-snickers")!;
+    assert.equal(sn.table, 40, "занята строкой с product_id");
+    assert.equal(sn.status, "ok");
+    const orphan = rows.find((r) => r.productName === "Snickers 50gr" && r.status === "no_card");
+    assert.ok(orphan, "вторая строка на ту же позицию — сирота, а не молчаливая потеря");
+  });
+
+  it("сирота с висячим product_id (позиции нет в прайсе) — productId null и не считается позицией прайса", () => {
+    const rows = parityRows(goods(), [{ productName: "Удалённый товар", productId: "p-gone", quantity: 3 }], canon);
+    const o = rows.find((r) => r.productName === "Удалённый товар")!;
+    assert.equal(o.status, "no_card");
+    assert.equal(o.productId, null);
+    assert.equal(rows.filter((r) => r.productId !== null).length, 4, "products = только позиции прайса");
+  });
 });

@@ -1,7 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { auditLog, entity, stockMovement, vendingAlias, vendingProduct, vendingStock, vendingStockCount } from "@mydon/db";
 import { normalizeProductName, productIndex, resolveCatalogName } from "@mydon/shared";
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { settingValue } from "../system/settings";
 import { assembleGoodsStock, parityRows, type GoodsStock, type VendingParityRow } from "./goods-stock";
@@ -276,7 +276,12 @@ export interface VendingParityReport {
 export async function vendingParity(db: Writer): Promise<VendingParityReport> {
   const [goods, table, products, aliases] = await Promise.all([
     goodsStock(db, { includeInactive: true }),
-    db.select({ productName: vendingStock.productName, productId: vendingStock.productId, quantity: vendingStock.quantity }).from(vendingStock),
+    // Порядок строк таблицы фиксирован именем: без него две строки на одну
+    // позицию (легаси до бэкфилла П4) занимали бы её в случайном порядке.
+    db
+      .select({ productName: vendingStock.productName, productId: vendingStock.productId, quantity: vendingStock.quantity })
+      .from(vendingStock)
+      .orderBy(asc(vendingStock.productName)),
     db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct),
     db.select({ productId: vendingAlias.productId, alias: vendingAlias.alias }).from(vendingAlias),
   ]);

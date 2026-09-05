@@ -57,7 +57,7 @@ async function main() {
   const parity = await fetch(`${CORE}/stock/vending-parity`, { headers: { "x-service-token": TOKEN } });
   if (parity.ok) {
     const p = await parity.json();
-    console.log(`Сверка с леджером: расхождений ${p.mismatched}, без карточки ${p.unlinked} из ${p.rows.length}.`);
+    console.log(`Сверка с леджером: позиций прайса ${p.products ?? p.rows.length}, без строки в таблице ${p.missingRows ?? 0}, расхождений ${p.mismatched}, без карточки ${p.unlinked}.`);
     if (p.unlinked > 0) console.log("Заведи карточки: панель /stock/goods → «Карточки для товаров», затем повтори импорт.");
   }
 }
