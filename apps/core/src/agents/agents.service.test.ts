@@ -296,6 +296,11 @@ describe("Deck навыков — что видит панель", () => {
 
     assert.equal(deck.items[0]?.agentStatus, "deprecated");
     assert.equal(deck.items[0]?.enabled, false, "у убранного из работы агента запускать нечего");
+    assert.deepEqual(
+      deck.items[0]?.crons,
+      [],
+      "расписания архивного агента не показываем: они обещали бы запуск, которого не будет",
+    );
   });
 
   it("одноимённые навыки у разных агентов: duplicates и тир не ниже максимума", async () => {

@@ -162,7 +162,7 @@ function SkillCard({ item }: { item: SkillDeckItem }) {
           {AGENT_STATUS_LABEL[item.agentStatus]}
         </span>
       </div>
-      <h3 style={{ fontSize: 15, fontWeight: 700 }}>{item.skill}</h3>
+      <h3 className="h2">{item.skill}</h3>
       <p style={{ margin: "4px 0 8px", fontSize: 13, color: "var(--tx-2)" }}>{item.description}</p>
 
       <div className="tags">
@@ -281,7 +281,7 @@ function Av8({ name }: { name: string }) {
     }
   }
   return (
-    <span className="av8" aria-hidden="true" data-name={name}>
+    <span className="av8" aria-hidden="true">
       <svg viewBox="0 0 8 8" fill="currentColor">
         {cells.map((c) => (
           <rect key={`${c.x}-${c.y}`} x={c.x} y={c.y} width="1" height="1" />

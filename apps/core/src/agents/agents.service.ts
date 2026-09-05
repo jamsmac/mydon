@@ -454,10 +454,15 @@ export class AgentsService {
 
     const items: SkillDeckItem[] = rows.map((row) => {
       const tier = asTier(row.tier);
+      // Известное ограничение: archive() переименовывает строку агента в
+      // «<имя>#archived-<ts>», поэтому джойн deck по имени её не находит и такой
+      // навык показывается как draft («карточки нет»). Ветка ниже срабатывает
+      // только при мягкой архивации (archived_at проставлен без переименования) —
+      // это осознанно, а не баг.
       const archived = Boolean(row.agentArchivedAt);
       const status = archived ? "deprecated" : asAgentStatus(row.agentStatus);
       const skills = archived ? [] : stringList(row.agentSkills);
-      const crons = (Array.isArray(row.schedule) ? row.schedule : [])
+      const scheduled = (Array.isArray(row.schedule) ? row.schedule : [])
         .filter(
           (item): item is { cron: string; skill: string } =>
             item !== null &&
@@ -467,6 +472,9 @@ export class AgentsService {
             typeof (item as Record<string, unknown>).cron === "string",
         )
         .map((item) => item.cron);
+      // Убранный из работы агент по расписанию не ходит: строки могли остаться в
+      // карточке, но показать их значило бы пообещать запуск, которого не будет.
+      const crons = archived ? [] : scheduled;
       const duplicates = sameName.get(row.skill)!;
       return {
         agent: row.agentName,

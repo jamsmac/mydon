@@ -372,7 +372,7 @@ h1, h2, h3 { font-family: var(--fh); letter-spacing: -0.01em; margin: 0; }
 .av8 svg { display: block; width: 100%; height: 100%; }
 /* Нажатый чип-фильтр. Намеренно без оранжевого: на витрине навыков заливок
    акцента ноль, «выбрано» показывает граница контрола, а не цвет бренда. */
-.chips .chip[aria-pressed="true"] { color: var(--tx); border-color: var(--line-strong); background: var(--surf-2); }
+.chips .chip[aria-pressed="true"] { color: var(--tx); border-color: var(--line-strong); background: var(--surf); }
 
 .grid { display: grid; gap: 10px; }
 .g2 { grid-template-columns: repeat(2, 1fr); }
