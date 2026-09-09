@@ -1,12 +1,13 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CoffeeContainerConsumptionReport, CoffeeLocation } from "../../lib/core";
+import type { CoffeeBunkerIngredient, CoffeeContainerConsumptionReport, CoffeeLocation } from "../../lib/core";
 import { CoffeeClient } from "./coffee-client";
 
 const mocks = vi.hoisted(() => ({
   createCoffeeLocation: vi.fn(),
   updateCoffeeLocation: vi.fn(),
+  submitCoffeeRefill: vi.fn(),
 }));
 
 vi.mock("./actions", () => ({
@@ -25,7 +26,7 @@ vi.mock("./actions", () => ({
   setCoffeeTare: vi.fn(),
   setCoffeeTargetFillWeight: vi.fn(),
   setCoffeeWashSchedule: vi.fn(),
-  submitCoffeeRefill: vi.fn(),
+  submitCoffeeRefill: mocks.submitCoffeeRefill,
   unlinkCoffeeMachine: vi.fn(),
   updateCoffeeLocation: mocks.updateCoffeeLocation,
 }));
@@ -50,11 +51,23 @@ const consumption: CoffeeContainerConsumptionReport = {
   totalCost: null,
 };
 
-function renderCoffee(): void {
+/**
+ * Живая раскладка позиций: 3 держит ДВА ингредиента (лимонный чай и матча),
+ * 4 — один, 8 не используется. Не выдуманный пример: ровно так лежит
+ * COFFEE_BUNKER_INGREDIENTS в packages/db/src/seed-coffee.ts.
+ */
+const пусто = { purchasePrice: null, entityId: null, priceSource: null, targetFillWeight: null } as const;
+const bunkers: CoffeeBunkerIngredient[] = [
+  { position: 3, ingredientId: "ing-lemon", ingredientName: "Лимонный чай", ...пусто },
+  { position: 3, ingredientId: "ing-matcha", ingredientName: "Матча", ...пусто },
+  { position: 4, ingredientId: "ing-sugar", ingredientName: "Сахар", ...пусто },
+];
+
+function renderCoffee(bunkerConfig: CoffeeBunkerIngredient[] = []): void {
   render(
     <CoffeeClient
       locations={[location]}
-      bunkerConfig={[]}
+      bunkerConfig={bunkerConfig}
       tareGrid={[]}
       recentRefills={[]}
       summary={[]}
@@ -112,5 +125,53 @@ describe("формы настроек кофе", () => {
       name: "Olma склад",
     });
     expect(await screen.findByText("Имя занято")).toBeVisible();
+  });
+});
+
+describe("ввод заливки: выбор ингредиента", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("двусмысленную позицию расщепляет на два выбора, однозначную оставляет одним", () => {
+    renderCoffee(bunkers);
+
+    const select = screen.getByRole("combobox", { name: /Бункер/ });
+    const labels = [...select.querySelectorAll("option")].map((o) => o.textContent);
+    expect(labels).toContain("3 · Лимонный чай");
+    expect(labels).toContain("3 · Матча");
+    expect(labels).toContain("4 · Сахар");
+    // Позиция без ингредиентов названа прямо, а не пустым номером.
+    expect(labels).toContain("8 · пусто");
+  });
+
+  it("на двусмысленной позиции отправляет выбранный ингредиент", async () => {
+    mocks.submitCoffeeRefill.mockResolvedValue({ ok: true });
+    const user = userEvent.setup();
+    renderCoffee(bunkers);
+
+    await user.selectOptions(screen.getByRole("combobox", { name: /Адрес/ }), "location-1");
+    await user.selectOptions(screen.getByRole("combobox", { name: /Бункер/ }), "3:ing-matcha");
+    await user.type(screen.getByRole("spinbutton", { name: /Вес/ }), "1250");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    expect(mocks.submitCoffeeRefill).toHaveBeenCalledWith(
+      expect.objectContaining({ position: 3, ingredientId: "ing-matcha", filledWeight: 1250 }),
+    );
+  });
+
+  it("на однозначной позиции ингредиент не шлёт — его выводит ядро", async () => {
+    mocks.submitCoffeeRefill.mockResolvedValue({ ok: true });
+    const user = userEvent.setup();
+    renderCoffee(bunkers);
+
+    await user.selectOptions(screen.getByRole("combobox", { name: /Адрес/ }), "location-1");
+    await user.selectOptions(screen.getByRole("combobox", { name: /Бункер/ }), "4");
+    await user.type(screen.getByRole("spinbutton", { name: /Вес/ }), "900");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    const arg = mocks.submitCoffeeRefill.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(arg.position).toBe(4);
+    expect(arg).not.toHaveProperty("ingredientId");
   });
 });

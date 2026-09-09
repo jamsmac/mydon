@@ -159,10 +159,41 @@ function EntryTab({
   const [weight, setWeight] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
 
-  const ingredientsByPosition = useMemo(() => {
-    const m = new Map<number, string[]>();
-    for (const c of bunkerConfig) m.set(c.position, [...(m.get(c.position) ?? []), c.ingredientName]);
-    return m;
+  /**
+   * Варианты выбора бункера: позиция ЛИБО «позиция + ингредиент».
+   *
+   * ЗАЧЕМ. Ядро подставляет ингредиент само, но только когда у позиции он
+   * один — «у позиции с двумя ингредиентами угаданное списание хуже
+   * отсутствующего» (coffee.service.ts). Позиция 3 держит лимонный чай и
+   * матчу, поэтому заливка туда уходила БЕЗ ингредиента: на 10.09.2026 таких
+   * строк 17 из 25, и весь чай с матчей не попадал ни в расход, ни в сверку.
+   *
+   * Приём взят у бота, где он уже работает (`positionKeyboard` в
+   * apps/bot/src/coffee-refill.ts): двусмысленная позиция расщепляется на две
+   * строки выбора, однозначная остаётся одной. Лишнего движения у техника не
+   * появляется — он так же делает один выбор, только теперь однозначный.
+   */
+  const bunkerOptions = useMemo(() => {
+    const byPos = new Map<number, { id: string; name: string }[]>();
+    for (const c of bunkerConfig) {
+      byPos.set(c.position, [...(byPos.get(c.position) ?? []), { id: c.ingredientId, name: c.ingredientName }]);
+    }
+    const out: { value: string; label: string }[] = [];
+    for (const p of POSITIONS) {
+      const here = byPos.get(p) ?? [];
+      if (here.length === 0) {
+        // Позиция без единого ингредиента — бункера там нет. Запрещать не
+        // будем (бывает), но и молча принимать за рабочую тоже.
+        out.push({ value: String(p), label: `${p} · пусто` });
+        continue;
+      }
+      if (here.length === 1) {
+        out.push({ value: String(p), label: `${p} · ${here[0]!.name}` });
+        continue;
+      }
+      for (const it of here) out.push({ value: `${p}:${it.id}`, label: `${p} · ${it.name}` });
+    }
+    return out;
   }, [bunkerConfig]);
 
   function submit() {
@@ -171,6 +202,8 @@ function EntryTab({
     if (!locationId) return setMsg("Выберите адрес.");
     if (!position) return setMsg("Выберите бункер.");
     if (!Number.isFinite(w) || w <= 0) return setMsg("Вес должен быть положительным числом.");
+    // Значение выбора — «позиция» либо «позиция:ингредиент».
+    const [posRaw, ingredientId] = position.split(":");
     start(async () => {
       // Упаковки НЕ отправляем: их считает программа из веса и расфасовки.
       // Миграция 0050 сняла default 1 именно потому, что «не спрашивали» было
@@ -178,8 +211,9 @@ function EntryTab({
       // продолжала слать ту же фиктивную единицу при нетронутом поле.
       const res = await submitCoffeeRefill({
         locationId,
-        position: Number(position),
+        position: Number(posRaw),
         ...(container ? { containerNumber: Number(container) } : {}),
+        ...(ingredientId ? { ingredientId } : {}),
         filledWeight: w,
         enteredDate: date,
       });
@@ -214,10 +248,9 @@ function EntryTab({
         Бункер
         <select value={position} onChange={(e) => setPosition(e.target.value)}>
           <option value="">Выберите бункер</option>
-          {POSITIONS.map((p) => (
-            <option key={p} value={p}>
-              {p}
-              {ingredientsByPosition.get(p) ? ` · ${ingredientsByPosition.get(p)!.join("/")}` : ""}
+          {bunkerOptions.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
             </option>
           ))}
         </select>

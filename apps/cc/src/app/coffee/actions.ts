@@ -18,6 +18,8 @@ export async function submitCoffeeRefill(input: {
   locationId: string;
   position: number;
   containerNumber?: number;
+  /** Ингредиент, если позиция допускает несколько (см. core.submitCoffeeRefill). */
+  ingredientId?: string;
   filledWeight: number;
   packageCount?: number;
   enteredDate: string;
