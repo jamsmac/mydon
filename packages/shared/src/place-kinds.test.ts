@@ -7,7 +7,9 @@ import {
   PLACE_TYPE_LABELS,
   isPlaceType,
   placeSells,
+  placeStatusConflict,
   placeTypeLabel,
+  STATUS_FOR_PLACE_TYPE,
 } from "./place-kinds";
 
 describe("виды места", () => {
@@ -67,5 +69,56 @@ describe("ключи координат", () => {
     // а на карте не появляется.
     assert.equal(PLACE_ATTR.lat, "широта");
     assert.equal(PLACE_ATTR.lng, "долгота");
+  });
+});
+
+describe("состояние по виду места", () => {
+  it("у каждого вида есть подсказываемое состояние", () => {
+    assert.equal(STATUS_FOR_PLACE_TYPE.location, "in_service");
+    assert.equal(STATUS_FOR_PLACE_TYPE.warehouse, "warehouse");
+    assert.equal(STATUS_FOR_PLACE_TYPE.workshop, "repair");
+  });
+
+  it("подсказка есть для ВСЕХ видов — иначе форма молча оставит старое", () => {
+    for (const t of PLACE_TYPES) {
+      assert.ok(STATUS_FOR_PLACE_TYPE[t], `нет состояния для ${t}`);
+    }
+  });
+});
+
+describe("совместимость места и состояния", () => {
+  it("в эксплуатации — только точка продаж", () => {
+    assert.equal(placeStatusConflict("in_service", "location", "CardioLife"), null);
+    assert.match(
+      placeStatusConflict("in_service", "warehouse", "Основной склад") ?? "",
+      /точке продаж/,
+    );
+    assert.match(placeStatusConflict("in_service", "workshop", "Мастерская") ?? "", /точке продаж/);
+  });
+
+  it("на складе — только склад", () => {
+    assert.equal(placeStatusConflict("warehouse", "warehouse", "Основной склад"), null);
+    assert.match(
+      placeStatusConflict("warehouse", "location", "CardioLife") ?? "",
+      /требует склада/,
+    );
+  });
+
+  it("в ремонте — где угодно: чинят и на точке, и на складе, и в мастерской", () => {
+    // Слово владельца 07.08.2026: «места ремонта могут быть разные». Разбитый
+    // экран не переносит автомат в мастерскую сам по себе.
+    assert.equal(placeStatusConflict("repair", "location", "Parus F4"), null);
+    assert.equal(placeStatusConflict("repair", "warehouse", "Основной склад"), null);
+    assert.equal(placeStatusConflict("repair", "workshop", "Мастерская"), null);
+  });
+
+  it("в тексте отказа названо и место, и его вид — иначе непонятно, что не так", () => {
+    const текст = placeStatusConflict("in_service", "warehouse", "Основной склад") ?? "";
+    assert.match(текст, /Основной склад/);
+    assert.match(текст, /склад/);
+  });
+
+  it("состояния нет (карточка без machine_card) — противоречия нет", () => {
+    assert.equal(placeStatusConflict(null, "warehouse", "Основной склад"), null);
   });
 });

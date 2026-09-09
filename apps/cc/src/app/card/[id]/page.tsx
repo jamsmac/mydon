@@ -127,7 +127,8 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   // периодами, ведёт привязка в Кофе-бункерах). Дополнение — ошибка не роняет.
   let coffeePlacements: CoffeePlacementRow[] = [];
   // Места, куда автомат можно поставить: точки продаж, склады, мастерские.
-  // Нужны при смене состояния — «в ремонте» без адреса теряет автомат из виду.
+  // Нужны форме «Где стоит» на вкладке «Локация» — место и состояние там
+  // записываются вместе (решение 09.09.2026).
   let places: { id: string; name: string; type: string }[] = [];
   if (entity.type === "machine") {
     try {
@@ -959,7 +960,6 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                   statusNote={machineCard?.statusNote ?? null}
                   statusChangedAt={machineCard?.statusChangedAt ?? null}
                   updatedBy={machineCard?.updatedBy ?? null}
-                  places={places}
                 />
                 <MachinePartsPanel machineId={entity.id} parts={machineParts} storage={partsStorage} />
               </>
@@ -970,11 +970,15 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                   machineId={entity.id}
                   periods={coffeePlacements.map((p) => ({
                     id: p.id,
+                    locationId: p.locationId,
                     locationName: p.locationName,
                     startDate: p.startDate,
                     endDate: p.endDate,
                     note: p.note,
                   }))}
+                  places={places}
+                  status={machineCard?.status ?? null}
+                  statusNote={machineCard?.statusNote ?? null}
                   lat={lat}
                   lng={lng}
                   address={typeof a["адрес"] === "string" ? a["адрес"] : null}
