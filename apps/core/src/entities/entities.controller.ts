@@ -183,6 +183,21 @@ export class EntitiesController {
   // ── Карточка автомата: вид ────────────────────────────────────────────────
 
   /** Виды всех размеченных автоматов. Отсутствие строки = не размечен. */
+  /**
+   * Перенос координат с автоматов на их места (волна 2, М-4). GET — только
+   * план: его показывает экран «Места» при каждом открытии, и чтение не
+   * должно идти записывающей дверью. POST — применить план.
+   */
+  @Get("places/adopt-machine-coords")
+  adoptMachineCoordsPlan() {
+    return this.entities.adoptMachineCoords({ dryRun: true });
+  }
+
+  @Post("places/adopt-machine-coords")
+  adoptMachineCoords() {
+    return this.entities.adoptMachineCoords({ dryRun: false });
+  }
+
   @Get("machine-cards/all")
   machineCards() {
     return this.entities.machineCards();

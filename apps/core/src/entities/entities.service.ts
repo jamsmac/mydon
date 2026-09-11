@@ -24,6 +24,12 @@ import {
   cardPrice,
   coordFromAttrs,
   isPlaceType,
+  adoptedCoordsSource,
+  planCoordAdoption,
+  PLACE_ATTR,
+  PLACE_TYPES,
+  tashkentDay,
+  type AdoptionPlan,
   MACHINE_KINDS,
   placeStatusConflict,
   parseRecipe,
@@ -38,6 +44,7 @@ import { and, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import type { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
+import { requestActor } from "../common/request-actor";
 
 type MachineCardRow = typeof machineCard.$inferSelect;
 
@@ -191,7 +198,7 @@ export class EntitiesService {
    * владелец этого попросил: разбирать четырнадцать позиций по одному полю —
    * та же лишняя работа, от которой мы уходили.
    */
-  async approve(id: string, actorRef = "owner", withDrafts = true): Promise<EntityRow> {
+  async approve(id: string, actorRef = requestActor("owner"), withDrafts = true): Promise<EntityRow> {
     const [card] = await this.db.select().from(entity).where(eq(entity.id, id));
     if (!card) throw new NotFoundException("Карточки нет");
     return this.db.transaction(async (tx) => {
@@ -242,7 +249,7 @@ export class EntitiesService {
    */
   async approveMany(
     ids: string[],
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<{ approved: number; skipped: number }> {
     let approved = 0;
     let skipped = 0;
@@ -307,7 +314,7 @@ export class EntitiesService {
   }
 
   /** Утвердить одно предложенное значение. */
-  async approveField(entityId: string, field: string, actorRef = "owner"): Promise<EntityRow> {
+  async approveField(entityId: string, field: string, actorRef = requestActor("owner")): Promise<EntityRow> {
     const [draft] = await this.db
       .select()
       .from(entityDraft)
@@ -343,7 +350,7 @@ export class EntitiesService {
    * Уходит без следа в карточке: «отклонено» — это решение, а не запись данных.
    * След остаётся в журнале действий, где ему и место.
    */
-  async rejectField(entityId: string, field: string, actorRef = "owner"): Promise<{ ok: true }> {
+  async rejectField(entityId: string, field: string, actorRef = requestActor("owner")): Promise<{ ok: true }> {
     const [draft] = await this.db
       .select()
       .from(entityDraft)
@@ -426,7 +433,7 @@ export class EntitiesService {
   }
 
   /** Создание и запись в журнал — одной транзакцией (данные без следа недопустимы). */
-  async create(dto: CreateEntityDto, actorRef = "system"): Promise<EntityRow> {
+  async create(dto: CreateEntityDto, actorRef = requestActor("system")): Promise<EntityRow> {
     const orgId = await this.orgIdByDomain(dto.domain);
     // ИНН контрагента уникален (правило PROMACH): при дубле отвечаем адресом
     // существующей карточки — панель предложит «открыть существующего», а не
@@ -498,7 +505,7 @@ export class EntitiesService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "system",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "entity.create",
         target: created.id,
@@ -611,7 +618,7 @@ export class EntitiesService {
    * Запись стирается, но её содержимое остаётся в журнале (before):
    * «что это было и когда убрали» можно посмотреть всегда.
    */
-  async remove(id: string, actorRef = "owner"): Promise<void> {
+  async remove(id: string, actorRef = requestActor("owner")): Promise<void> {
     await this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(entity).where(eq(entity.id, id)).for("update");
       if (!before) throw new NotFoundException(`Сущность ${id} не найдена`);
@@ -640,7 +647,7 @@ export class EntitiesService {
    * оставалась только одна — вторая исчезала молча, а журнал приписывал
    * изменения не тому автору.
    */
-  async update(id: string, dto: UpdateEntityDto, actorRef = "system"): Promise<EntityRow> {
+  async update(id: string, dto: UpdateEntityDto, actorRef = requestActor("system")): Promise<EntityRow> {
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(entity).where(eq(entity.id, id)).for("update");
       if (!before) throw new NotFoundException(`Сущность ${id} не найдена`);
@@ -676,7 +683,7 @@ export class EntitiesService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "system",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "entity.update",
         target: id,
@@ -685,6 +692,84 @@ export class EntitiesService {
       });
       return updated;
     });
+  }
+
+  /**
+   * Разовый перенос координат с автоматов на их места (волна 2, М-4).
+   *
+   * План строит чистый `planCoordAdoption` (правила «не угадывать» — там).
+   * Применение идёт ТОЙ ЖЕ дверью, что правка из панели, — `update`: attrs
+   * места получают координаты и пометку источника, geo_point синхронизируется,
+   * в журнал ложится `entity.update` с автором запроса. Каждое место — своя
+   * транзакция: провал одного не откатывает остальные, а отчёт называет, что
+   * применилось.
+   */
+  async adoptMachineCoords(opts: { dryRun: boolean }): Promise<AdoptionPlan & { applied: string[] }> {
+    const rows = await this.db
+      .select({ id: entity.id, name: entity.name, type: entity.type, attrs: entity.attrs })
+      .from(entity)
+      .where(inArray(entity.type, [...PLACE_TYPES, "machine"]));
+    const geos = await this.geoFor(rows.map((r) => r.id));
+    // Когда координаты автомата записаны последний раз — правило «старше
+    // приезда» (planCoordAdoption) отсекает координаты прежней точки.
+    const machineIds = rows.filter((r) => r.type === "machine").map((r) => r.id);
+    const geoWritten = new Map(
+      (machineIds.length === 0
+        ? []
+        : await this.db
+            .select({ entityId: geoPoint.entityId, updatedAt: geoPoint.updatedAt })
+            .from(geoPoint)
+            .where(inArray(geoPoint.entityId, machineIds))
+      ).map((g) => [g.entityId, tashkentDay(g.updatedAt)]),
+    );
+    const open = await this.db
+      .select({ placeId: machinePlacement.locationId, machineId: machinePlacement.entityId, since: machinePlacement.startDate })
+      .from(machinePlacement)
+      .where(isNull(machinePlacement.endDate));
+
+    const plan = planCoordAdoption({
+      places: rows
+        .filter((r) => isPlaceType(r.type))
+        .map((r) => ({ id: r.id, name: r.name, type: r.type, attrs: r.attrs as Record<string, unknown>, hasGeo: geos.has(r.id) })),
+      machines: rows
+        .filter((r) => r.type === "machine")
+        .map((r) => {
+          const g = geos.get(r.id);
+          return {
+            id: r.id,
+            name: r.name,
+            attrs: r.attrs as Record<string, unknown>,
+            geo: g ? { lat: g.lat, lng: g.lng } : null,
+            coordsSetOn: geoWritten.get(r.id) ?? null,
+          };
+        }),
+      open,
+    });
+
+    const applied: string[] = [];
+    if (opts.dryRun) return { ...plan, applied };
+
+    const day = tashkentDay(new Date());
+    for (const a of plan.adopt) {
+      const [fresh] = await this.db.select().from(entity).where(eq(entity.id, a.placeId));
+      if (!fresh) continue;
+      // Между планом и записью месту могли поставить координаты руками — не затираем.
+      if (coordFromAttrs(fresh.attrs as Record<string, unknown>).coord !== null) continue;
+      const source = adoptedCoordsSource(a.fromMachineName, day);
+      const attrs: Record<string, unknown> = {
+        ...((fresh.attrs ?? {}) as Record<string, unknown>),
+        [PLACE_ATTR.lat]: a.lat,
+        [PLACE_ATTR.lng]: a.lng,
+        [PLACE_ATTR.coordsSource]: source,
+      };
+      if (a.address !== null) {
+        attrs[PLACE_ATTR.address] = a.address;
+        attrs[PLACE_ATTR.addressSource] = source;
+      }
+      await this.update(a.placeId, { attrs });
+      applied.push(a.placeId);
+    }
+    return { ...plan, applied };
   }
 
   /**
@@ -834,7 +919,7 @@ export class EntitiesService {
   async setMachineStatus(
     entityId: string,
     status: MachineStatus,
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
     note?: string,
     placeId?: string,
   ): Promise<MachineCardRow> {
@@ -996,7 +1081,7 @@ export class EntitiesService {
   async setMachineKind(
     entityId: string,
     kind: MachineKind,
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
     note?: string,
   ): Promise<MachineCardRow> {
     if (!(MACHINE_KINDS as readonly string[]).includes(kind)) {

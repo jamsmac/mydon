@@ -1,6 +1,5 @@
 "use client";
 
-import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition, type ReactNode } from "react";
@@ -17,14 +16,7 @@ import {
   isPlaceType,
   type MachineStatus,
 } from "@mydon/shared";
-import { saveLocation, setMachineStatus } from "../app/card/actions";
-import type { MapTiles } from "../lib/map-tiles";
-
-// Карта тянет leaflet — грузим только когда владелец её открыл.
-const MapPicker = dynamic(() => import("./map-picker").then((m) => m.MapPicker), {
-  ssr: false,
-  loading: () => <p className="hint">Карта загружается…</p>,
-});
+import { setMachineStatus } from "../app/card/actions";
 
 export interface LocationPeriod {
   id: string;
@@ -34,6 +26,18 @@ export interface LocationPeriod {
   startDate: string | null;
   endDate: string | null;
   note: string | null;
+}
+
+/**
+ * Координаты и адрес ТЕКУЩЕГО МЕСТА автомата (М-4). Координата принадлежит
+ * месту: автомат переезжает, место стоит на земле. Поэтому здесь они только
+ * показываются, а правятся в карточке места — один вход в одни данные.
+ */
+export interface CurrentPlaceGeo {
+  placeId: string;
+  lat: string | null;
+  lng: string | null;
+  address: string | null;
 }
 
 /** Место, куда автомат можно поставить: точка продаж, склад, мастерская. */
@@ -68,12 +72,9 @@ export function LocationPanel({
   places,
   status,
   statusNote,
-  lat,
-  lng,
-  address,
+  placeGeo,
   sourceStays,
   sourceMoves,
-  tiles,
 }: {
   machineId: string;
   periods: LocationPeriod[];
@@ -81,26 +82,22 @@ export function LocationPanel({
   places: PlaceOption[];
   status: string | null;
   statusNote: string | null;
-  lat: string | null;
-  lng: string | null;
-  address: string | null;
+  /** Координаты текущего места; `null` — автомат нигде не стоит. */
+  placeGeo: CurrentPlaceGeo | null;
   /** История стоянок, восстановленная из заказов источника (если она есть). */
   sourceStays?: ReactNode;
   sourceMoves?: number;
-  /** Подложка карты с сервера (MAP_TILES_URL); без пропа — бесключевой OSM. */
-  tiles?: MapTiles;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
-  const [edit, setEdit] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const [la, setLa] = useState(lat ?? "");
-  const [ln, setLn] = useState(lng ?? "");
-  const [addr, setAddr] = useState(address ?? "");
-
   const текущая = periods.find((p) => p.endDate === null) ?? null;
+  const lat = placeGeo?.lat ?? null;
+  const lng = placeGeo?.lng ?? null;
+  const address = placeGeo?.address ?? null;
   const естьТочка = lat !== null && lng !== null;
   const mapHref = естьТочка ? `https://maps.google.com/?q=${lat},${lng}` : null;
+  /** Координаты и адрес правятся в карточке места — туда и ведут плитки. */
+  const placeHref = placeGeo ? `/card/${placeGeo.placeId}#geo` : null;
 
   // ── Форма «Где стоит»: место + состояние + причина, одно сохранение ──
   const состояние = isMachineStatus(status) ? status : DEFAULT_MACHINE_STATUS;
@@ -166,28 +163,6 @@ export function LocationPanel({
       : machineIsOperational(st)
         ? "Автомат вернётся в строй: сроки нормативов пересчитаются от сегодня."
         : "Автомат уйдёт из эксплуатации: открытые задачи по обслуживанию отменятся, а долг по срокам останется виден в «Обслуживании».";
-
-  const save = () => {
-    setMsg(null);
-    start(async () => {
-      const res = await saveLocation(machineId, { lat: la, lng: ln, address: addr });
-      if (res.ok) {
-        setMsg({ ok: true, text: "Локация сохранена" });
-        setEdit(false);
-        router.refresh();
-      } else {
-        setMsg({ ok: false, text: res.error ?? "Не получилось" });
-      }
-    });
-  };
-
-  const отменить = () => {
-    setLa(lat ?? "");
-    setLn(lng ?? "");
-    setAddr(address ?? "");
-    setMsg(null);
-    setEdit(false);
-  };
 
   return (
     <>
@@ -287,98 +262,39 @@ export function LocationPanel({
           <h3 className="h2">Локация</h3>
           {периодовChip(periods.length)}
           <span className="sp" />
-          {!edit && (
-            <button type="button" className="btn ghost" onClick={() => setEdit(true)}>
-              ✎ Координаты и адрес
-            </button>
+          {placeHref && (
+            <Link href={placeHref} className="btn ghost">
+              ✎ Координаты места
+            </Link>
           )}
         </div>
 
-        {edit ? (
-          <div className="form loc-form">
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <label style={{ flex: "1 1 150px" }}>
-                <span>Широта</span>
-                <input
-                  value={la}
-                  onChange={(e) => setLa(e.target.value)}
-                  placeholder="41.311081"
-                  inputMode="decimal"
-                />
-              </label>
-              <label style={{ flex: "1 1 150px" }}>
-                <span>Долгота</span>
-                <input
-                  value={ln}
-                  onChange={(e) => setLn(e.target.value)}
-                  placeholder="69.240562"
-                  inputMode="decimal"
-                />
-              </label>
-            </div>
-            <label>
-              <span>Адрес</span>
-              <input
-                value={addr}
-                onChange={(e) => setAddr(e.target.value)}
-                placeholder="Ташкент, ул. Олмачи, 2 этаж"
-              />
-            </label>
-            <MapPicker lat={la} lng={ln} onChange={(a, b) => { setLa(a); setLn(b); }} {...(tiles ? { tiles } : {})} />
-            <div className="form-actions">
-              <button type="button" className="btn pri" onClick={save} disabled={pending}>
-                {pending ? "Сохраняю…" : "Сохранить"}
-              </button>
-              <button type="button" className="btn ghost" onClick={отменить} disabled={pending}>
-                Отмена
-              </button>
-              {msg && <span className={msg.ok ? "ok-text" : "err-text"}>{msg.text}</span>}
-            </div>
+        <div className="mc-tiles">
+          <div className={`mct mct-wide${текущая === null ? " mct-empty" : ""}`}>
+            <span className="lb">Стоит сейчас</span>
+            <b className="vl">
+              {текущая && placeGeo ? <Link href={`/card/${placeGeo.placeId}`}>{текущая.locationName}</Link> : "локация не записана"}
+            </b>
           </div>
-        ) : (
-          <>
-            <div className="mc-tiles">
-              <div className={`mct mct-wide${текущая === null ? " mct-empty" : ""}`}>
-                <span className="lb">Стоит сейчас</span>
-                <b className="vl">{текущая?.locationName ?? "локация не записана"}</b>
-              </div>
-              <div
-                className={`mct${address === null ? " mct-empty" : ""}`}
-                onClick={() => setEdit(true)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => e.key === "Enter" && setEdit(true)}
-              >
-                <span className="lb">Адрес</span>
-                <b className="vl">{address ?? "＋ указать"}</b>
-                <span className="act">✎</span>
-              </div>
-              <div
-                className={`mct${естьТочка ? "" : " mct-empty"}`}
-                onClick={() => setEdit(true)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => e.key === "Enter" && setEdit(true)}
-              >
-                <span className="lb">Координаты</span>
-                <b className="vl mono">{естьТочка ? `${lat}, ${lng}` : "＋ отметить"}</b>
-                <span className="act">✎</span>
-              </div>
-              {mapHref && (
-                <a className="mct mct-link" href={mapHref} target="_blank" rel="noreferrer">
-                  <span className="lb">На карте</span>
-                  <b className="vl">открыть</b>
-                  <span className="act">↗</span>
-                </a>
-              )}
-            </div>
-            {msg && (
-              <p className={msg.ok ? "ok-text" : "err-text"} style={{ marginTop: 8 }}>
-                {msg.text}
-              </p>
-            )}
-          </>
-        )}
+          <div className={`mct${address === null ? " mct-empty" : ""}`}>
+            <span className="lb">Адрес места</span>
+            <b className="vl">{address ?? (placeGeo ? "не указан — в карточке места" : "—")}</b>
+          </div>
+          <div className={`mct${естьТочка ? "" : " mct-empty"}`}>
+            <span className="lb">Координаты места</span>
+            <b className="vl mono">{естьТочка ? `${lat}, ${lng}` : placeGeo ? "не отмечены — в карточке места" : "—"}</b>
+          </div>
+          {mapHref && (
+            <a className="mct mct-link" href={mapHref} target="_blank" rel="noreferrer">
+              <span className="lb">На карте</span>
+              <b className="vl">открыть</b>
+              <span className="act">↗</span>
+            </a>
+          )}
+        </div>
+        <p className="hint" style={{ marginTop: 8 }}>
+          Координаты и адрес принадлежат месту, а не автомату: при переезде их не нужно вводить заново.
+        </p>
       </div>
 
       {/* История — свёрнута и БЕЗ нашего списка периодов: где стоит сейчас

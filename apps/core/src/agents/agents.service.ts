@@ -22,6 +22,7 @@ import {
   type ClaimedTaskLite,
   type LastRunLite,
 } from "./agent-state";
+import { requestActor } from "../common/request-actor";
 
 type AgentRow = typeof agent.$inferSelect;
 
@@ -291,7 +292,7 @@ export class AgentsService {
   }
 
   /** Заведение агента. Имя уникально: по нему агент связан с журналом. */
-  async create(input: UpsertAgentInput, actorRef = "owner"): Promise<AgentRow> {
+  async create(input: UpsertAgentInput, actorRef = requestActor("owner")): Promise<AgentRow> {
     const [existing] = await this.db
       .select({ id: agent.id })
       .from(agent)
@@ -335,7 +336,7 @@ export class AgentsService {
   }
 
   /** Изменение настроек. В журнал пишем «до» и «после» — видно, что менялось. */
-  async update(name: string, patch: Partial<UpsertAgentInput>, actorRef = "owner"): Promise<AgentRow> {
+  async update(name: string, patch: Partial<UpsertAgentInput>, actorRef = requestActor("owner")): Promise<AgentRow> {
     const before = await this.byName(name);
 
     const values: Record<string, unknown> = { updatedAt: new Date() };
@@ -381,7 +382,7 @@ export class AgentsService {
    * Освобождаем имя (переименовываем в name#archived-<время>), чтобы владелец
    * мог завести агента с тем же именем заново, не теряя старую историю.
    */
-  async archive(name: string, actorRef = "owner"): Promise<AgentRow> {
+  async archive(name: string, actorRef = requestActor("owner")): Promise<AgentRow> {
     const before = await this.byName(name);
     if (before.archivedAt !== null) return before; // уже в архиве — повтор безопасен
 
@@ -638,7 +639,7 @@ export class AgentsService {
    */
   async syncSkillCatalog(
     items: CatalogSkillInput[],
-    actorRef = "agents",
+    actorRef = requestActor("agents"),
   ): Promise<{ count: number; syncedAt: string }> {
     // Дубль пары (агент, навык) упёрся бы в первичный ключ и вернулся агентам
     // безымянной 400-кой из драйвера. Называем виновника сами: каталог собирают

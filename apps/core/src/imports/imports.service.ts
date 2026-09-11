@@ -28,6 +28,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
 import { FinanceService, type FinanceTx } from "../finance/finance.service";
+import { requestActor } from "../common/request-actor";
 
 type ImportRow = typeof grImportContract.$inferSelect;
 type UnitRow = typeof globerentUnit.$inferSelect;
@@ -145,7 +146,7 @@ export class ImportsService {
     };
   }
 
-  async create(input: CreateImportInput, actorRef = "owner"): Promise<ImportRow> {
+  async create(input: CreateImportInput, actorRef = requestActor("owner")): Promise<ImportRow> {
     if ((input.contractNo ?? "").trim() === "")
       throw new BadRequestException("Впиши номер контракта");
     if (!ISO_DAY.test(input.contractDate ?? "")) {
@@ -246,7 +247,7 @@ export class ImportsService {
    * (CONTRACT_SIGNED, VIN пуст). Идемпотентно: единицы уже есть — пропуск.
    * График оплат заводу становится planned money_flow со сроками.
    */
-  async sign(id: string, actorRef = "owner"): Promise<ImportDetail> {
+  async sign(id: string, actorRef = requestActor("owner")): Promise<ImportDetail> {
     const row = await this.db.transaction(async (tx) => {
       const [c] = await tx
         .select()
@@ -351,7 +352,7 @@ export class ImportsService {
   async markPaid(
     id: string,
     kind: "prepayment" | "balance",
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<ImportRow> {
     if (kind !== "prepayment" && kind !== "balance") {
       throw new BadRequestException("kind: prepayment | balance");
@@ -417,7 +418,7 @@ export class ImportsService {
     id: string,
     action: string,
     extra: { declarationNumber?: string; declarationDate?: string; transportCompany?: string } = {},
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<{ moved: number; skipped: number; lifecycle: string }> {
     if (!(BULK_ACTIONS as readonly string[]).includes(action)) {
       throw new BadRequestException(`Массовые действия: ${BULK_ACTIONS.join(", ")}`);
@@ -577,7 +578,7 @@ export class ImportsService {
   }
 
   /** Отмена: запрещена при активных единицах (донор: has_linked_entities). */
-  async cancel(id: string, actorRef = "owner"): Promise<ImportRow> {
+  async cancel(id: string, actorRef = requestActor("owner")): Promise<ImportRow> {
     return this.db.transaction(async (tx) => {
       const [c] = await tx
         .select()

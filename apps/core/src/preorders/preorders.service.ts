@@ -16,6 +16,7 @@ import {
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
+import { requestActor } from "../common/request-actor";
 
 type PreorderRow = typeof grPreorder.$inferSelect;
 
@@ -67,7 +68,7 @@ export class PreordersService {
     return rows.map((r) => ({ ...r.preorder, clientName: r.clientName }));
   }
 
-  async create(input: CreatePreorderInput, actorRef = "owner"): Promise<PreorderRow> {
+  async create(input: CreatePreorderInput, actorRef = requestActor("owner")): Promise<PreorderRow> {
     if ((input.name ?? "").trim().length < 2) {
       throw new BadRequestException("Впиши, что заказываем (модель)");
     }
@@ -119,7 +120,7 @@ export class PreordersService {
     id: string,
     action: string,
     extra: { contractRef?: string; factoryPriceUsd?: number; promisedDeliveryDate?: string } = {},
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<PreorderRow> {
     const t = PREORDER_ACTIONS[action];
     if (t === undefined) throw new BadRequestException(`Неизвестное действие «${action}»`);
@@ -179,7 +180,7 @@ export class PreordersService {
   }
 
   /** Отмена — из любого нетерминального, причина обязательна (правило донора). */
-  async cancel(id: string, reason: string, actorRef = "owner"): Promise<PreorderRow> {
+  async cancel(id: string, reason: string, actorRef = requestActor("owner")): Promise<PreorderRow> {
     if ((reason ?? "").trim() === "") {
       throw new BadRequestException("Причина отмены обязательна — иначе уроки не выучатся");
     }

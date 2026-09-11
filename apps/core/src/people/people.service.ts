@@ -4,6 +4,7 @@ import type { Domain } from "@mydon/shared";
 import { and, asc, eq, isNotNull, ne, or } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { actorKindOf } from "@mydon/shared";
+import { requestActor } from "../common/request-actor";
 
 type PersonRow = typeof person.$inferSelect;
 
@@ -71,7 +72,7 @@ export class PeopleService {
       .orderBy(asc(person.name));
   }
 
-  async create(input: UpsertPersonInput, actorRef = "owner"): Promise<PersonRow> {
+  async create(input: UpsertPersonInput, actorRef = requestActor("owner")): Promise<PersonRow> {
     const uname = normalizeUsername(input.tgUsername);
     return this.db.transaction(async (tx) => {
       const [created] = await tx
@@ -101,7 +102,7 @@ export class PeopleService {
   async update(
     id: string,
     patch: Partial<UpsertPersonInput>,
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<PersonRow> {
     const before = await this.byId(id);
     const values: Record<string, unknown> = {};

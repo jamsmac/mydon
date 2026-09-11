@@ -24,6 +24,7 @@ import {
   type BrvValue,
   type CashReconcileReport,
   type CoffeeBunkerIngredient,
+  type CoffeePlacementRow,
   type Entity,
   type ExpiryReport,
   type FinanceCounterparty,
@@ -61,8 +62,7 @@ import { GapsBook } from "../../../components/gaps-book";
 import { ListShell, type ListShellKpi } from "../../../components/list-shell";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { RegisterImport } from "../../../components/register-import";
-import { MapPanel } from "../../../components/map-panel";
-import { mapTilesFromEnv } from "../../../lib/map-tiles";
+import { ParkMapSection } from "../../../components/park-map-section";
 import { MiniBars } from "../../../components/mini-bars";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
@@ -354,10 +354,6 @@ export default async function DomainPage({
     const c = catOf(e);
     return c === undefined || c === null || c === "";
   }).length;
-  const noCoords = machines.filter((e) => {
-    const a = e.attrs ?? {};
-    return !a["широта"] || !a["долгота"];
-  });
   const snackMachines = machines.length - coffeeMachines - unknownMachines;
   const defaultOwner =
     ourPeople.find((p) => p.active === "yes" && p.tgChatId) ?? ourPeople[0] ?? null;
@@ -385,8 +381,12 @@ export default async function DomainPage({
   let cashEstimate: Awaited<ReturnType<typeof core.cashEstimate>> | null = null;
   let vendingDeficit: Awaited<ReturnType<typeof core.vendingDeficit>> | null = null;
   let machineCards: Awaited<ReturnType<typeof core.machineCards>> | null = null;
+  // Размещения — для карты парка: точка карты — место, автоматы на нём берутся
+  // из открытых периодов (М-4). Не пришли — карту не рисуем, а не рисуем все
+  // места пустыми: это была бы ложь, собранная из сбоя.
+  let placements: CoffeePlacementRow[] | null = null;
   if (domain === "vendhub" && isOverview) {
-    [salesSummary, supplySummary, salesDaily, cashEstimate, vendingDeficit, machineCards] =
+    [salesSummary, supplySummary, salesDaily, cashEstimate, vendingDeficit, machineCards, placements] =
       await Promise.all([
         core.salesSummary().catch(() => null),
         core.supplySummary().catch(() => null),
@@ -394,6 +394,7 @@ export default async function DomainPage({
         core.cashEstimate().catch(() => null),
         core.vendingDeficit().catch(() => null),
         core.machineCards().catch(() => null),
+        core.coffeePlacements().catch(() => null),
       ]);
   } else if (
     domain === "vendhub" &&
@@ -2090,7 +2091,7 @@ export default async function DomainPage({
           {domain === "vendhub" && machines.length > 0 && (
             <details className="sect loc-hist">
               <summary>
-                <span className="loc-hist-t">Автоматы на карте</span>
+                <span className="loc-hist-t">Парк на карте</span>
                 <span className="chip b">кофе ×{coffeeMachines}</span>
                 {snackMachines > 0 && <span className="chip g">снеки ×{snackMachines}</span>}
                 {unknownMachines > 0 && (
@@ -2098,29 +2099,7 @@ export default async function DomainPage({
                 )}
               </summary>
               <div className="loc-hist-body">
-                <MapPanel machines={machines} tiles={mapTilesFromEnv()} />
-                {(unknownMachines > 0 || noCoords.length > 0) && (
-                  <p className="hint" style={{ marginTop: 8 }}>
-                    Данные неполные:{" "}
-                    {unknownMachines > 0 && <>у {unknownMachines} автоматов не указан тип. </>}
-                    {noCoords.length > 0 && (
-                      <>
-                        без координат на карте нет:{" "}
-                        {noCoords.slice(0, 3).map((e, i) => (
-                          <span key={e.id}>
-                            {i > 0 && ", "}
-                            <Link href={`/card/${e.id}`} style={{ color: "var(--accent)" }}>
-                              {e.name}
-                            </Link>
-                          </span>
-                        ))}
-                        {noCoords.length > 3 && ` и ещё ${noCoords.length - 3}`}.{" "}
-                      </>
-                    )}
-                    Тип и точка подтягиваются из учёта склада сами; остальное можно дозаполнить в
-                    карточке.
-                  </p>
-                )}
+                <ParkMapSection entities={entities} placements={placements} />
               </div>
             </details>
           )}

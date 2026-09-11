@@ -132,6 +132,7 @@ export * from "./artifacts-contract";
 
 /** Вид места: точка продаж / склад / мастерская. */
 export * from "./place-kinds";
+export * from "./place-coords-adoption";
 export * from "./place-name";
 export * from "./entity-name";
 

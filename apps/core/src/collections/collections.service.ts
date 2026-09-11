@@ -3,6 +3,7 @@ import { auditLog, coffeeOrder, collection, entity, person, sale } from "@mydon/
 import { cashInMachines, orderIsCash, parseDenominations, type DenominationCounts, actorKindOf } from "@mydon/shared";
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { requestActor } from "../common/request-actor";
 
 type CollectionRow = typeof collection.$inferSelect;
 
@@ -126,7 +127,7 @@ export class CollectionsService {
   constructor(@Inject(DB) private readonly db: Db) {}
 
   /** Этап 1: оператор собрал деньги. Время фиксируется сейчас, если не передано. */
-  async create(input: CreateCollectionInput, actorRef = "bot"): Promise<CollectionRow> {
+  async create(input: CreateCollectionInput, actorRef = requestActor("bot")): Promise<CollectionRow> {
     return this.db.transaction(async (tx) => {
       const [machine] = await tx.select().from(entity).where(eq(entity.id, input.machineId)).limit(1);
       if (!machine) throw new NotFoundException(`Автомат ${input.machineId} не найден`);

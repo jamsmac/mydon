@@ -260,7 +260,7 @@ export class PartCountService {
   }
 
   /** Убрать строку черновика (ошибся). После применения строки неприкосновенны. */
-  async removeLine(lineId: string, actorRef = "owner"): Promise<void> {
+  async removeLine(lineId: string, actorRef = requestActor("owner")): Promise<void> {
     await this.db.transaction(async (tx) => {
       const [line] = await tx.select().from(partCountLine).where(eq(partCountLine.id, lineId)).limit(1);
       if (!line) throw new NotFoundException("Строки с таким id нет");
@@ -278,7 +278,7 @@ export class PartCountService {
     });
   }
 
-  async finish(sessionId: string, actorRef = "owner"): Promise<CountSummary> {
+  async finish(sessionId: string, actorRef = requestActor("owner")): Promise<CountSummary> {
     const session = await this.session(this.db, sessionId);
     if (!session.appliedAt && !session.finishedAt) {
       await this.db.update(partCountSession).set({ finishedAt: new Date() }).where(eq(partCountSession.id, sessionId));
@@ -550,7 +550,7 @@ export class PartCountService {
    * перемещённых — туда, где числились. Заведённые узлы остаются: они
    * существуют физически, карточка не вредит.
    */
-  async reverse(sessionId: string, actorRef = "owner"): Promise<{ session: SessionRow; restored: string[]; skipped: string[] }> {
+  async reverse(sessionId: string, actorRef = requestActor("owner")): Promise<{ session: SessionRow; restored: string[]; skipped: string[] }> {
     const today = todayInTz();
     return this.db.transaction(async (tx) => {
       const original = await this.session(tx, sessionId);
