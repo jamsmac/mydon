@@ -38,6 +38,7 @@ import { DB, type Db } from "../db/db.module";
 import { excludePersonal } from "../common/owner-enforcement";
 import { OwnerActionGuard } from "../common/owner-action.guard";
 import { MODEL_EFFORTS, TasksService, type ModelEffort } from "./tasks.service";
+import { requestActor } from "../common/request-actor";
 
 const STATUSES = ["todo", "in_progress", "done", "cancelled"] as const;
 type Status = (typeof STATUSES)[number];
@@ -649,21 +650,21 @@ export class TasksController {
 
   @Post(":id/comments")
   addComment(@Param("id", ParseUUIDPipe) id: string, @Body() dto: AddCommentDto) {
-    return this.tasks.addComment(id, dto.author ?? "owner", dto.body);
+    return this.tasks.addComment(id, dto.author ?? requestActor("owner"), dto.body);
   }
 
   /** Отметка «напомнили» — чтобы одно и то же не слалось дважды. */
   /** Оценка сделанной задачи. «Переделать» возвращает её в работу. */
   @Post(":id/quality")
   rate(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetQualityDto) {
-    return this.tasks.rate(id, dto.quality, dto.actor ?? "owner");
+    return this.tasks.rate(id, dto.quality, dto.actor ?? requestActor("owner"));
   }
 
   /** Приёмка работы менеджером. */
   @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
   @Post(":id/confirm")
   confirm(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ConfirmTaskDto) {
-    return this.tasks.confirm(id, dto.actor ?? "owner");
+    return this.tasks.confirm(id, dto.actor ?? requestActor("owner"));
   }
 
   @Post(":id/redo-notified")
@@ -794,7 +795,7 @@ export class TasksController {
     return this.tasks.setStatus(
       id,
       dto.status,
-      dto.actor ?? "owner",
+      dto.actor ?? requestActor("owner"),
       dto.resultNote,
       dto.agentRunId,
     );
@@ -819,7 +820,7 @@ export class TasksController {
           ? { entityId: dto.entityId === "" ? null : dto.entityId }
           : {}),
       },
-      dto.actor ?? "owner",
+      dto.actor ?? requestActor("owner"),
     );
   }
 }

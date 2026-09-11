@@ -4,6 +4,7 @@ import type { Domain } from "@mydon/shared";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { StorageService } from "./storage.service";
+import { requestActor } from "../common/request-actor";
 
 type AttachmentRow = typeof attachment.$inferSelect;
 
@@ -158,7 +159,7 @@ export class AttachmentsService {
         storageKey: key,
         mime: file.mimetype,
         bytes: file.size,
-        createdBy: input.createdBy ?? "owner",
+        createdBy: input.createdBy ?? requestActor("owner"),
         stage: input.stage ?? null,
         title: input.title ?? null,
         domain: input.domain ?? null,

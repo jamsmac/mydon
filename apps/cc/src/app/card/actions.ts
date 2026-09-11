@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { isPlaceType, isUnit, parseMenu, PLACE_ATTR, type RecipeLine } from "@mydon/shared";
 import { core, CoreUnavailable } from "../../lib/core";
@@ -476,7 +477,7 @@ export async function runStocktake(warehouseId: string, rawLines: unknown): Prom
         ingredientId: l.ingredientId,
         actual: l.actual,
         ...(l.unit ? { unit: l.unit } : {}),
-        countedBy: "owner",
+        countedBy: await resolveActor(),
         note: "пересчёт склада",
       });
       if (res.changed) changed += 1;
@@ -828,7 +829,7 @@ export async function installPart(
   },
 ): Promise<ActionResult> {
   try {
-    await core.installPart({ machineId, ...input, createdBy: "owner" });
+    await core.installPart({ machineId, ...input, createdBy: await resolveActor() });
   } catch (err) {
     return fail(err);
   }
@@ -848,7 +849,7 @@ export async function removePart(
   },
 ): Promise<ActionResult> {
   try {
-    await core.removePart({ machineId, ...input, createdBy: "owner" });
+    await core.removePart({ machineId, ...input, createdBy: await resolveActor() });
   } catch (err) {
     return fail(err);
   }
@@ -870,7 +871,7 @@ export async function swapPart(
   },
 ): Promise<ActionResult> {
   try {
-    await core.swapPart({ machineId, ...input, createdBy: "owner" });
+    await core.swapPart({ machineId, ...input, createdBy: await resolveActor() });
   } catch (err) {
     return fail(err);
   }

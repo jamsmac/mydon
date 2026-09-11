@@ -14,6 +14,7 @@ import {
   TZ,
   type ContractItem,
   type Domain,
+  actorKindOf,
 } from "@mydon/shared";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -320,7 +321,7 @@ export class ContractsService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "contract.create",
         target: row.id,
@@ -444,7 +445,7 @@ export class ContractsService {
         .where(eq(grContract.id, id))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "contract.status_change",
         target: id,
@@ -567,7 +568,7 @@ export class ContractsService {
       .set({ status: "cancelled", paidAt: new Date() })
       .where(inArray(moneyFlow.id, settled));
     await tx.insert(auditLog).values({
-      actorKind: "human",
+      actorKind: actorKindOf(actorRef),
       actorRef,
       action: "contract.schedule_settled",
       target: contractId,
@@ -672,7 +673,7 @@ export class ContractsService {
         })
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "contract.act_add",
         target: id,

@@ -41,8 +41,10 @@ import {
   placeStatusConflict,
   machineIsOperational,
   placeNameKeys,
+  actorKindOf,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
+import { requestActor } from "../common/request-actor";
 
 /**
  * Место в запросе — та же таблица `entity`, что и автомат.
@@ -665,12 +667,12 @@ export class CoffeeService {
         type: "location",
         name: clean,
         approvedAt: new Date(),
-        approvedBy: "owner",
+        approvedBy: requestActor("owner"),
       })
       .returning({ id: entity.id });
     await this.db.insert(auditLog).values({
-      actorKind: "human",
-      actorRef: "panel",
+      actorKind: actorKindOf(requestActor("panel")),
+      actorRef: requestActor("panel"),
       action: "coffee.location.create",
       target: row.id,
       after: { name: clean },
@@ -699,8 +701,8 @@ export class CoffeeService {
     if (Object.keys(set).length === 0) return { ok: true };
     await this.db.update(entity).set(set).where(eq(entity.id, id));
     await this.db.insert(auditLog).values({
-      actorKind: "human",
-      actorRef: "panel",
+      actorKind: actorKindOf(requestActor("panel")),
+      actorRef: requestActor("panel"),
       action: "coffee.location.update",
       target: id,
       before: { name: loc.name, attrs: loc.attrs },
@@ -723,8 +725,8 @@ export class CoffeeService {
     }
     await this.db.delete(coffeeRefill).where(eq(coffeeRefill.id, id));
     await this.db.insert(auditLog).values({
-      actorKind: "human",
-      actorRef: opts.actor ?? "panel",
+      actorKind: actorKindOf(opts.actor ?? requestActor("panel")),
+      actorRef: opts.actor ?? requestActor("panel"),
       action: "coffee.refill.delete",
       target: id,
       before: row,
@@ -740,8 +742,8 @@ export class CoffeeService {
     }
     await this.db.delete(coffeeContainerReturn).where(eq(coffeeContainerReturn.id, id));
     await this.db.insert(auditLog).values({
-      actorKind: "human",
-      actorRef: opts.actor ?? "panel",
+      actorKind: actorKindOf(opts.actor ?? requestActor("panel")),
+      actorRef: opts.actor ?? requestActor("panel"),
       action: "coffee.return.delete",
       target: id,
       before: row,
@@ -758,8 +760,8 @@ export class CoffeeService {
     }
     await this.db.delete(coffeeConsumable).where(eq(coffeeConsumable.id, id));
     await this.db.insert(auditLog).values({
-      actorKind: "human",
-      actorRef: opts.actor ?? "panel",
+      actorKind: actorKindOf(opts.actor ?? requestActor("panel")),
+      actorRef: opts.actor ?? requestActor("panel"),
       action: "coffee.consumable.delete",
       target: id,
       before: row,

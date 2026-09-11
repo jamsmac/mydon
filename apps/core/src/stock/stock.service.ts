@@ -41,6 +41,7 @@ import { Cron } from "croner";
 import { and, desc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { ensureProductCards, vendingParity } from "./vending-ledger";
+import { requestActor } from "../common/request-actor";
 
 function isExpiryFlag(v: string): v is ExpiryFlag {
   return v === "expired" || v === "expiring" || v === "ok" || v === "none";
@@ -382,7 +383,7 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
         source: "owner",
         note: input.note ?? null,
         clientKey: input.clientKey ?? null,
-        createdBy: input.createdBy ?? "owner",
+        createdBy: input.createdBy ?? requestActor("owner"),
       })
       .onConflictDoNothing({ target: stockMovement.clientKey })
       .returning();
@@ -477,7 +478,7 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
           source: "coffee-return",
           note: input.note ?? null,
           clientKey: input.clientKey,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .onConflictDoNothing({ target: stockMovement.clientKey })
         .returning();
@@ -779,7 +780,7 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
         source: "stocktake",
         note: input.note ?? null,
         clientKey: input.clientKey ?? null,
-        createdBy: input.countedBy ?? "owner",
+        createdBy: input.countedBy ?? requestActor("owner"),
       })
       .onConflictDoNothing({ target: stockMovement.clientKey })
       .returning();
@@ -1437,7 +1438,7 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
           source: "owner",
           note: input.note ?? null,
           clientKey: input.clientKey ?? null,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .onConflictDoNothing({ target: stockMovement.clientKey })
         .returning();

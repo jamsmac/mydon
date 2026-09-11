@@ -11,6 +11,7 @@ import { DB, type Db } from "../db/db.module";
 import { excludePersonal } from "../common/owner-enforcement";
 import { EntitiesService } from "./entities.service";
 import { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
+import { requestActor } from "../common/request-actor";
 
 /** Предложение значения поля карточки — не запись, а заявка на неё. */
 export class ProposeFieldDto {
@@ -189,11 +190,11 @@ export class EntitiesController {
 
   @Patch(":id/machine-status")
   setMachineStatus(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetMachineStatusDto) {
-    return this.entities.setMachineStatus(id, dto.status, dto.actor ?? "owner", dto.note, dto.placeId);
+    return this.entities.setMachineStatus(id, dto.status, dto.actor ?? requestActor("owner"), dto.note, dto.placeId);
   }
 
   @Patch(":id/machine-kind")
   setMachineKind(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetMachineKindDto) {
-    return this.entities.setMachineKind(id, dto.kind, dto.actor ?? "owner", dto.note);
+    return this.entities.setMachineKind(id, dto.kind, dto.actor ?? requestActor("owner"), dto.note);
   }
 }

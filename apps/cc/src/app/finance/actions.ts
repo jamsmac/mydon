@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
 
@@ -65,7 +66,7 @@ export async function createFinanceFlow(
       purpose: str("purpose"),
       dueDate: str("dueDate"),
       unitId: str("unitId"),
-      actorRef: "owner",
+      actorRef: await resolveActor(),
     });
     revalidatePath(`/domain/${domain}`);
     return { ok: true };

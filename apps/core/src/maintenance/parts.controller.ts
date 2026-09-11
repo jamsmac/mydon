@@ -16,6 +16,7 @@ import {
 } from "class-validator";
 import { PART_KINDS, PART_LOCATIONS, type PartKind } from "@mydon/shared";
 import { PartsService } from "./parts.service";
+import { requestActor } from "../common/request-actor";
 
 const OFF_LOCATIONS = ["warehouse", "washing", "drying", "repair", "unknown"] as const;
 
@@ -275,7 +276,7 @@ export class PartsController {
   @Patch(":id")
   update(@Param("id", ParseUUIDPipe) id: string, @Body() dto: UpdatePartUnitDto) {
     const { actorRef, ...patch } = dto;
-    return this.parts.update(id, patch, actorRef ?? "owner");
+    return this.parts.update(id, patch, actorRef ?? requestActor("owner"));
   }
 
   @Post(":id/number")
@@ -285,6 +286,6 @@ export class PartsController {
 
   @Post(":id/retire")
   retire(@Param("id", ParseUUIDPipe) id: string, @Body() dto: RetirePartUnitDto) {
-    return this.parts.retire(id, dto.reason, dto.actorRef ?? "owner");
+    return this.parts.retire(id, dto.reason, dto.actorRef ?? requestActor("owner"));
   }
 }

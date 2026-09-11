@@ -30,6 +30,7 @@ import { and, asc, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm"
 import { DB, type Db } from "../db/db.module";
 import { settingValue } from "../system/settings";
 import { todayInTz } from "./maintenance.service";
+import { requestActor } from "../common/request-actor";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export type PartUnitRow = typeof partUnit.$inferSelect;
@@ -368,7 +369,7 @@ export class PartsService {
           warrantyUntil: input.warrantyUntil ?? null,
           origin: input.origin ?? "manual",
           note: input.note ?? null,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .returning();
 
@@ -384,13 +385,13 @@ export class PartsService {
           installedOn: todayInTz(),
           warrantyUntil: created.warrantyUntil,
           note: "период открыт при заведении карточки",
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         });
       }
 
       await tx.insert(auditLog).values({
-        actorKind: actorKindOf(input.createdBy ?? "owner"),
-        actorRef: input.createdBy ?? "owner",
+        actorKind: actorKindOf(input.createdBy ?? requestActor("owner")),
+        actorRef: input.createdBy ?? requestActor("owner"),
         action: "parts.unit_created",
         target: created.id,
         after: created,
@@ -461,7 +462,7 @@ export class PartsService {
    * видел деталь. Занятый номер — конфликт с именем узла, который его держит.
    */
   async assignNumber(id: string, input: AssignNumberInput): Promise<PartUnitView> {
-    const actorRef = input.actorRef ?? "owner";
+    const actorRef = input.actorRef ?? requestActor("owner");
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(partUnit).where(eq(partUnit.id, id)).limit(1);
       if (!before) throw new NotFoundException("Узла с таким id нет");
@@ -604,7 +605,7 @@ export class PartsService {
    */
   async provision(input: ProvisionInput = {}): Promise<ProvisionReport> {
     const template = await this.coffeeTemplate();
-    const actorRef = input.actorRef ?? "owner";
+    const actorRef = input.actorRef ?? requestActor("owner");
     const machines = await this.db
       .select({ id: entity.id, name: entity.name })
       .from(machineCard)
@@ -902,7 +903,7 @@ export class PartsService {
       actorRef?: string;
     },
   ): Promise<{ unit: PartUnitView; from: PeriodRow["location"] | null; logId: string | null }> {
-    const actorRef = input.actorRef ?? "owner";
+    const actorRef = input.actorRef ?? requestActor("owner");
     const today = todayInTz();
     return this.db.transaction(async (tx) => {
       const [unit] = await tx.select().from(partUnit).where(eq(partUnit.id, id)).limit(1);

@@ -7,7 +7,7 @@ import {
 } from "@nestjs/common";
 import { cbu } from "@mydon/connectors";
 import { auditLog, collection, entity, fxRate, moneyFlow, org } from "@mydon/db";
-import { MONEY_CATEGORIES, TZ, tashkentDayStartOf, type Domain } from "@mydon/shared";
+import { MONEY_CATEGORIES, TZ, tashkentDayStartOf, type Domain, actorKindOf } from "@mydon/shared";
 import { and, desc, eq, gte, inArray, lte, ne, or } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import {
@@ -234,7 +234,7 @@ export class FinanceService {
         })
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "finance.fx_set",
         target: currency,
@@ -418,7 +418,7 @@ export class FinanceService {
         })
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "finance.flow_created",
         target: created.id,
@@ -659,7 +659,7 @@ export class FinanceService {
       .where(eq(moneyFlow.id, id))
       .returning();
     await tx.insert(auditLog).values({
-      actorKind: "human",
+      actorKind: actorKindOf(actorRef),
       actorRef,
       action: "finance.flow_paid",
       target: id,
@@ -689,7 +689,7 @@ export class FinanceService {
         .where(eq(moneyFlow.id, id))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "finance.flow_cancelled",
         target: id,

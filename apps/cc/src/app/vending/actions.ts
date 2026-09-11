@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { validateFiscalPatch } from "@mydon/shared";
 import { core, CoreUnavailable } from "../../lib/core";
@@ -21,7 +22,7 @@ function failure(err: unknown): ActionResult {
  */
 export async function submitVendingPurchase(domain: string): Promise<ActionResult> {
   try {
-    const res = await core.submitVendingPurchase("panel");
+    const res = await core.submitVendingPurchase(await resolveActor());
     if (!res.submitted) return { ok: false, message: res.reason ?? "Закупать нечего" };
     revalidatePath(`/domain/${domain}`);
     return { ok: true, message: `Заявка отправлена: ${res.positions} поз. — реши в «Согласованиях».` };
@@ -57,7 +58,7 @@ export async function saveVendingProductRules(domain: string, form: FormData): P
       ...(packSize !== undefined ? { packSize } : {}),
       excludedFromPurchase: excluded,
       fixedPurchaseQty,
-      actor: "panel",
+      actor: await resolveActor(),
     });
     if (!res.ok) return { ok: false, message: `Товар «${product}» не найден` };
     revalidatePath(`/domain/${domain}`);
@@ -103,7 +104,7 @@ export async function saveVendingProductFiscal(domain: string, form: FormData): 
   if (errors.length > 0) return { ok: false, message: errors[0] };
 
   try {
-    const res = await core.setVendingProductFiscal({ productId, ...patch, actor: "panel" });
+    const res = await core.setVendingProductFiscal({ productId, ...patch, actor: await resolveActor() });
     if (!res.ok) {
       return {
         ok: false,

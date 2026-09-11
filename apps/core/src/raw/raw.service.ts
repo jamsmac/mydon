@@ -39,6 +39,7 @@ import {
 import { and, asc, eq, gte, isNotNull, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
+import { requestActor } from "../common/request-actor";
 
 /** Сколько строк максимум отдаём за один запрос: страница, а не вся выгрузка. */
 const MAX_PAGE = 1000;
@@ -2722,7 +2723,7 @@ export class RawService {
       externalKey: key,
       externalLabel: input.label,
       entityId: input.entityId,
-      decidedBy: input.decidedBy ?? "owner",
+      decidedBy: input.decidedBy ?? requestActor("owner"),
       note: input.note ?? null,
       updatedAt: new Date(),
     };
@@ -2773,7 +2774,7 @@ export class RawService {
       rowsTotal: input.rowsTotal ?? null,
       columns: input.columns ?? [],
       note: input.note ?? null,
-      importedBy: input.importedBy ?? "owner",
+      importedBy: input.importedBy ?? requestActor("owner"),
     };
 
     const result = await this.db.transaction(async (tx) => {

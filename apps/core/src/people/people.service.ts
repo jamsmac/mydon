@@ -3,6 +3,7 @@ import { auditLog, person } from "@mydon/db";
 import type { Domain } from "@mydon/shared";
 import { and, asc, eq, isNotNull, ne, or } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { actorKindOf } from "@mydon/shared";
 
 type PersonRow = typeof person.$inferSelect;
 
@@ -87,7 +88,7 @@ export class PeopleService {
         .returning();
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "person.create",
         target: created.id,
@@ -115,7 +116,7 @@ export class PeopleService {
     return this.db.transaction(async (tx) => {
       const [updated] = await tx.update(person).set(values).where(eq(person.id, id)).returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "person.update",
         target: id,

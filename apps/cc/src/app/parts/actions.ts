@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
 
@@ -26,7 +27,7 @@ export async function setPartNumber(id: string, inventoryNo: string, confirmLabe
     await core.partSetNumber(id, {
       ...(inventoryNo.trim() ? { inventoryNo: inventoryNo.trim() } : {}),
       confirmLabel,
-      actorRef: "owner",
+      actorRef: await resolveActor(),
     });
   } catch (err) {
     return fail(err);
@@ -61,7 +62,7 @@ export async function savePartUnit(id: string, form: FormData): Promise<ActionRe
       hopperPosition,
       tareWeight,
       note: text("note"),
-      actorRef: "owner",
+      actorRef: await resolveActor(),
     });
   } catch (err) {
     return fail(err);
@@ -73,8 +74,8 @@ export async function savePartUnit(id: string, form: FormData): Promise<ActionRe
 /** Перемещение узла вне автомата: сушка, склад, ремонт; «помыт» — по настройке сушки. */
 export async function movePartUnit(id: string, to: "washed" | "warehouse" | "drying" | "repair" | "washing"): Promise<ActionResult> {
   try {
-    if (to === "washed") await core.partWashed(id, "owner");
-    else await core.partMove(id, { to, actorRef: "owner" });
+    if (to === "washed") await core.partWashed(id);
+    else await core.partMove(id, { to, actorRef: await resolveActor() });
   } catch (err) {
     return fail(err);
   }
@@ -84,7 +85,7 @@ export async function movePartUnit(id: string, to: "washed" | "warehouse" | "dry
 
 export async function retirePartUnit(id: string, reason: string): Promise<ActionResult> {
   try {
-    await core.partRetire(id, reason.trim() || "списан владельцем", "owner");
+    await core.partRetire(id, reason.trim() || "списан владельцем");
   } catch (err) {
     return fail(err);
   }
@@ -95,7 +96,7 @@ export async function retirePartUnit(id: string, reason: string): Promise<Action
 /** Автозаведение по составу — с панели, с предпросмотром. */
 export async function provisionParts(dryRun: boolean): Promise<ActionResult & { report?: unknown }> {
   try {
-    const report = await core.partsProvision({ dryRun, actorRef: "owner" });
+    const report = await core.partsProvision({ dryRun, actorRef: await resolveActor() });
     if (!dryRun) refresh();
     return { ok: true, report };
   } catch (err) {
@@ -114,7 +115,7 @@ function refreshCount(id?: string): void {
 /** Применить сессию: найденные подтверждены, новые заведены, не найденные → «неизвестно где». */
 export async function applyPartCount(id: string): Promise<ActionResult & { report?: { found: number; created: string[]; moved: string[]; missing: string[] } }> {
   try {
-    const report = await core.partCountApply(id, "owner");
+    const report = await core.partCountApply(id);
     refreshCount(id);
     return { ok: true, report };
   } catch (err) {
@@ -125,7 +126,7 @@ export async function applyPartCount(id: string): Promise<ActionResult & { repor
 /** Откат применённой сессии обратной сессией. */
 export async function reversePartCount(id: string): Promise<ActionResult & { restored?: string[]; skipped?: string[] }> {
   try {
-    const res = await core.partCountReverse(id, "owner");
+    const res = await core.partCountReverse(id);
     refreshCount(id);
     return { ok: true, restored: res.restored, skipped: res.skipped };
   } catch (err) {
@@ -136,7 +137,7 @@ export async function reversePartCount(id: string): Promise<ActionResult & { res
 /** Открыть сессию с панели (владелец считает сам, без бота). */
 export async function startPartCount(location: string): Promise<ActionResult & { id?: string; resumed?: boolean }> {
   try {
-    const res = await core.partCountStart({ location, actorRef: "owner" });
+    const res = await core.partCountStart({ location, actorRef: await resolveActor() });
     refreshCount(res.session.id);
     return { ok: true, id: res.session.id, resumed: res.resumed };
   } catch (err) {
@@ -146,7 +147,7 @@ export async function startPartCount(location: string): Promise<ActionResult & {
 
 export async function removePartCountLine(sessionId: string, lineId: string): Promise<ActionResult> {
   try {
-    await core.partCountRemoveLine(lineId, "owner");
+    await core.partCountRemoveLine(lineId);
     refreshCount(sessionId);
     return { ok: true };
   } catch (err) {

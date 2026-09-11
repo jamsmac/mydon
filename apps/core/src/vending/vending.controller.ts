@@ -39,6 +39,7 @@ import { RefillService } from "./refill.service";
 import { ShrinkageService } from "./shrinkage.service";
 import { STOCK_COUNTS_DAYS_DEFAULT, VendingService } from "./vending.service";
 import { WeeklyDigestService } from "./weekly-digest.service";
+import { requestActor } from "../common/request-actor";
 
 export class IngestSlotDto {
   @IsString() @IsNotEmpty() @MaxLength(16)
@@ -631,7 +632,7 @@ export class VendingController {
   @Post("product-fiscal")
   setProductFiscal(@Body() dto: SetProductFiscalDto) {
     const { productId, actor, ...patch } = dto;
-    return this.productFiscal.update(productId, patch, actor ?? "panel", new Date());
+    return this.productFiscal.update(productId, patch, actor ?? requestActor("panel"), new Date());
   }
 
   /**

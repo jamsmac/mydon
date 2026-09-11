@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
 
@@ -31,7 +32,7 @@ export async function createUnit(form: FormData): Promise<ActionResult> {
       vin: String(form.get("vin") ?? "").trim() || undefined,
       inStock: form.get("inStock") !== null,
       salesPrice: priceRaw !== "" && Number.isFinite(Number(priceRaw)) ? Number(priceRaw) : undefined,
-      actorRef: "owner",
+      actorRef: await resolveActor(),
     });
     return done();
   } catch (err) {
@@ -46,7 +47,7 @@ export async function unitAction(
   extra: Record<string, string> = {},
 ): Promise<ActionResult> {
   try {
-    await core.unitAction(id, action, { ...extra, actorRef: "owner" });
+    await core.unitAction(id, action, { ...extra, actorRef: await resolveActor() });
     return done();
   } catch (err) {
     return done(err);
@@ -68,7 +69,7 @@ export async function reserveUnit(id: string, form: FormData): Promise<ActionRes
       endDate: String(form.get("endDate") ?? "").trim(),
       clientId: String(form.get("clientId") ?? "").trim() || undefined,
       note: String(form.get("note") ?? "").trim() || undefined,
-      actorRef: "owner",
+      actorRef: await resolveActor(),
     });
     return done();
   } catch (err) {
@@ -91,7 +92,7 @@ export async function setUnitSalesStage(
   extra: { lostReason?: string; salesPrice?: number; clientId?: string } = {},
 ): Promise<ActionResult> {
   try {
-    await core.setUnitSalesStage(id, { stage, ...extra, actorRef: "owner" });
+    await core.setUnitSalesStage(id, { stage, ...extra, actorRef: await resolveActor() });
     return done();
   } catch (err) {
     return done(err);

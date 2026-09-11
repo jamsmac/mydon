@@ -10,6 +10,7 @@ import {
 } from "@mydon/db";
 import { MONEY_CATEGORIES,
   entityNameProblem,
+  actorKindOf,
 } from "@mydon/shared";
 import { and, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
@@ -539,7 +540,7 @@ export class RegistryImportService {
 
       if (created > 0 || updated > 0 || deleted > 0 || flowsLinked > 0) {
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actorRef),
           actorRef,
           action: "registry_import.contracts",
           target: source,
@@ -663,7 +664,7 @@ export class RegistryImportService {
         .returning({ id: moneyFlow.id, docNo: moneyFlow.docNo });
       if (rows.length > 0) {
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actorRef),
           actorRef,
           action: "registry_import.unlink_foreign",
           target: "globerent",
@@ -765,7 +766,7 @@ export class RegistryImportService {
       }
       if (created > 0) {
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actorRef),
           actorRef,
           action: "registry_import.flows",
           target: source,
@@ -803,7 +804,7 @@ export class RegistryImportService {
         ...this.approvedRow(source, actorRef),
       });
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "registry_import.own_company",
         target: source,
@@ -866,7 +867,7 @@ export class RegistryImportService {
           })),
         );
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actorRef),
           actorRef,
           action: "registry_import.contractors",
           target: source,
@@ -919,7 +920,7 @@ export class RegistryImportService {
           })),
         );
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actorRef),
           actorRef,
           action: "registry_import.invoices",
           target: source,
@@ -960,7 +961,7 @@ export class RegistryImportService {
           })),
         );
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actorRef),
           actorRef,
           action: "registry_import.models",
           target: source,
@@ -1050,7 +1051,7 @@ export class RegistryImportService {
       }
       if (created > 0) {
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actorRef),
           actorRef,
           action: "registry_import.units",
           target: source,

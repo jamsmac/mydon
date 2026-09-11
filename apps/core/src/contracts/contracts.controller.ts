@@ -14,6 +14,7 @@ import {
 import type { Response } from "express";
 import { DOMAINS, type ContractItem, type Domain } from "@mydon/shared";
 import { ContractsService, type BuyerSnapshot } from "./contracts.service";
+import { requestActor } from "../common/request-actor";
 
 function asDomain(value: string): Domain {
   if (!(DOMAINS as readonly string[]).includes(value)) {
@@ -89,14 +90,14 @@ export class ContractsController {
         agentCommissionAmount: body.agentCommissionAmount,
         agentCommissionCurrency: body.agentCommissionCurrency,
       },
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 
   @Patch(":id/status")
   setStatus(@Param("id") id: string, @Body() body: { status?: string; actorRef?: string }) {
     if (typeof body.status !== "string") throw new BadRequestException("Нет статуса");
-    return this.contracts.setStatus(id, body.status, body.actorRef ?? "owner");
+    return this.contracts.setStatus(id, body.status, body.actorRef ?? requestActor("owner"));
   }
 
   @Post(":id/payments")
@@ -109,7 +110,7 @@ export class ContractsController {
     return this.contracts.addPayment(
       id,
       { amount: body.amount, currency: body.currency, docNo: body.docNo, date: body.date, rate: body.rate },
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 
@@ -137,7 +138,7 @@ export class ContractsController {
         signedByBuyer: body.signedByBuyer,
         notes: body.notes,
       },
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 }

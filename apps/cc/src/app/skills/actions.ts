@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
 import type { ActionResult } from "../agents/actions";
@@ -31,7 +32,7 @@ export async function runSkill(
     const res = await core.runSkill(agent, skill, {
       ...(input ? { input } : {}),
       ...(effort ? { modelEffort: effort } : {}),
-      actor: "owner",
+      actor: await resolveActor(),
     });
     taskId = res.taskId;
   } catch (err) {

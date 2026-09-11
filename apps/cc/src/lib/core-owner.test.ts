@@ -55,12 +55,14 @@ describe("core.ts — owner-токен только для owner-действи�
     expect(cap.headers[0]["x-owner-action-token"]).toBeUndefined();
   });
 
-  it("обычная (не-owner) мутация → owner-токена нет даже у владельца, резолвер не зовётся", async () => {
+  it("обычная (не-owner) мутация → owner-токена нет даже у владельца, но автор записи есть", async () => {
     mocks.resolveOwner.mockResolvedValue({ isOwner: true, login: "owner@x.com" });
     const cap = stubFetch();
     await core.updatePerson("p1", { name: "Пётр" });
     expect(cap.headers[0]["x-owner-action-token"]).toBeUndefined();
-    expect(mocks.resolveOwner).not.toHaveBeenCalled();
+    // Личность теперь читается на КАЖДОЙ записи — ради авторства (R-H-9), а не
+    // права: owner-токен по-прежнему решает только `opts.owner`.
+    expect(cap.headers[0]["x-mydon-actor"]).toBe("owner");
   });
 
   it("invite/revoke/agents-autonomy — тоже owner-only", async () => {

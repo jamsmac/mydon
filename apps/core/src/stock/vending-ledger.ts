@@ -1,10 +1,11 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { auditLog, entity, stockMovement, vendingAlias, vendingProduct, vendingStock, vendingStockCount } from "@mydon/db";
-import { normalizeProductName, productIndex, resolveCatalogName } from "@mydon/shared";
+import { actorKindOf, normalizeProductName, productIndex, resolveCatalogName } from "@mydon/shared";
 import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { settingValue } from "../system/settings";
 import { assembleGoodsStock, parityRows, type GoodsStock, type VendingParityRow } from "./goods-stock";
+import { requestActor } from "../common/request-actor";
 export type { GoodsStock, GoodsStockRow, VendingParityRow, VendingParityStatus } from "./goods-stock";
 
 /**
@@ -320,7 +321,7 @@ export interface EnsureCardsReport {
  * не выбираем, называем. Идемпотентно: повторный прогон ничего не плодит.
  */
 export async function ensureProductCards(db: Writer, opts: { dryRun?: boolean; actorRef?: string } = {}): Promise<EnsureCardsReport> {
-  const actorRef = opts.actorRef ?? "owner";
+  const actorRef = opts.actorRef ?? requestActor("owner");
   const products = await db.select().from(vendingProduct).where(eq(vendingProduct.isActive, true));
   const cards = await db.select({ id: entity.id, name: entity.name, attrs: entity.attrs }).from(entity).where(eq(entity.type, "product"));
   const byName = new Map<string, string[]>();
@@ -369,7 +370,7 @@ export async function ensureProductCards(db: Writer, opts: { dryRun?: boolean; a
   }
   if (!opts.dryRun && (report.linked.length > 0 || report.created.length > 0)) {
     await db.insert(auditLog).values({
-      actorKind: actorRef === "owner" ? "human" : "system",
+      actorKind: actorKindOf(actorRef),
       actorRef,
       action: "stock.vending_cards_ensured",
       target: "vending_product",

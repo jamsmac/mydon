@@ -22,6 +22,7 @@ import {
   type PartOffLocation,
   type PartSwapReason,
 } from "./maintenance.service";
+import { requestActor } from "../common/request-actor";
 
 const KINDS = [
   "cleaning",
@@ -373,7 +374,7 @@ export class MaintenanceController {
         ...(dto.note !== undefined ? { note: dto.note } : {}),
         ...(dto.counterValue !== undefined ? { counterValue: dto.counterValue } : {}),
       },
-      dto.actor ?? "owner",
+      dto.actor ?? requestActor("owner"),
     );
   }
 
@@ -403,7 +404,7 @@ export class MaintenanceController {
 
   @Post("plans")
   upsertPlan(@Body() dto: UpsertPlanDto) {
-    return this.maintenance.upsertPlan(dto, dto.actor ?? "owner");
+    return this.maintenance.upsertPlan(dto, dto.actor ?? requestActor("owner"));
   }
 
   /** Стандартные нормативы (10 / 45 / 90) на список объектов. Идемпотентно. */
@@ -411,7 +412,7 @@ export class MaintenanceController {
   async applyStandardNorms(@Body() dto: ApplyStandardNormsDto) {
     const { created, skipped } = await this.maintenance.applyStandardNorms(
       dto.entityIds,
-      dto.actor ?? "owner",
+      dto.actor ?? requestActor("owner"),
     );
     // Наружу отдаём счётчики и заведённое, а не полный список из полутора
     // сотен строк: вызывающему нужно «что изменилось», остальное — GET /plans.
@@ -420,7 +421,7 @@ export class MaintenanceController {
 
   @Delete("plans/:id")
   deactivatePlan(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string) {
-    return this.maintenance.deactivatePlan(id, actor ?? "owner");
+    return this.maintenance.deactivatePlan(id, actor ?? requestActor("owner"));
   }
 
   @Post("part-swap")

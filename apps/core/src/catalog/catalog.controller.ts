@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, Patch, Post, Put, Query } from "@nestjs/common";
 import { CatalogService, type SaveTnvedInput } from "./catalog.service";
+import { requestActor } from "../common/request-actor";
 
 /**
  * Расчётные справочники GLOBERENT (перенос tnved_codes/brv_values PROMACH).
@@ -18,13 +19,13 @@ export class CatalogController {
   /** Создать или обновить ставку (с id — обновление). */
   @Post("tnved")
   saveTnved(@Body() body: SaveTnvedInput & { actorRef?: string }) {
-    return this.catalog.saveTnved(body, body.actorRef ?? "owner");
+    return this.catalog.saveTnved(body, body.actorRef ?? requestActor("owner"));
   }
 
   /** Убрать ставку из работы (строка остаётся). */
   @Patch("tnved/:id/deactivate")
   deactivate(@Param("id") id: string, @Body() body: { actorRef?: string }) {
-    return this.catalog.deactivateTnved(id, body.actorRef ?? "owner");
+    return this.catalog.deactivateTnved(id, body.actorRef ?? requestActor("owner"));
   }
 
   /** История БРВ. */
@@ -38,7 +39,7 @@ export class CatalogController {
   setBrv(@Body() body: { valueUzs?: number; validFrom?: string; note?: string; actorRef?: string }) {
     return this.catalog.setBrv(
       { valueUzs: body.valueUzs ?? Number.NaN, validFrom: body.validFrom ?? "", note: body.note },
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 }

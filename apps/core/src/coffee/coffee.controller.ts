@@ -21,6 +21,7 @@ import { UNITS, type Unit } from "@mydon/shared";
 import { CoffeeService } from "./coffee.service";
 import { CoffeeLedgerService } from "./coffee-ledger.service";
 import { CoffeeOrdersService } from "./coffee-orders.service";
+import { requestActor } from "../common/request-actor";
 
 /** Одна проданная чашка из выгрузки панели производителя. */
 export class CoffeeOrderRowDto {
@@ -417,7 +418,7 @@ export class CoffeeController {
     // не должен терять факт заливки. Результат идёт в ответ, а не в лог.
     let stock: Awaited<ReturnType<CoffeeLedgerService["consumeRefill"]>> | { error: string };
     try {
-      stock = await this.ledger.consumeRefill(saved.id, dto.createdBy ?? "owner");
+      stock = await this.ledger.consumeRefill(saved.id, dto.createdBy ?? requestActor("owner"));
     } catch (e) {
       stock = { error: e instanceof Error ? e.message : String(e) };
     }
@@ -434,7 +435,7 @@ export class CoffeeController {
   /** Досписать одну заливку (после правки данных или включения тумблера). */
   @Post("refill/:id/consume")
   consumeRefill(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string) {
-    return this.ledger.consumeRefill(id, actor ?? "owner");
+    return this.ledger.consumeRefill(id, actor ?? requestActor("owner"));
   }
 
   @Get("refill/recent")

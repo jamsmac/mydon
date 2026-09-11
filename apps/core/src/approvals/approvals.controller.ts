@@ -3,6 +3,7 @@ import { IsIn, IsNotEmpty, IsObject, IsOptional, IsString, MaxLength } from "cla
 import { AUTONOMY_TIERS, type AutonomyTier } from "@mydon/shared";
 import { OwnerMutationGuard } from "../common/owner-mutation.guard";
 import { ApprovalsService } from "./approvals.service";
+import { requestActor } from "../common/request-actor";
 
 export class RequestApprovalDto {
   @IsString()
@@ -77,6 +78,6 @@ export class ApprovalsController {
   @Post(":id/decide")
   @UseGuards(OwnerMutationGuard)
   decide(@Param("id", ParseUUIDPipe) id: string, @Body() dto: DecideDto) {
-    return this.approvals.decide(id, dto.decision, dto.actor ?? "owner");
+    return this.approvals.decide(id, dto.decision, dto.actor ?? requestActor("owner"));
   }
 }

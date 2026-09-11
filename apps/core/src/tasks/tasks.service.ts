@@ -34,6 +34,7 @@ import {
   tashkentDayStartOf,
   type Domain,
   type Permission,
+  actorKindOf,
 } from "@mydon/shared";
 import {
   and,
@@ -64,6 +65,7 @@ import {
   parseStoredTaskLlmExecutionPlan,
   type TaskLlmExecutionPlan,
 } from "./task-llm-contract";
+import { requestActor } from "../common/request-actor";
 
 /** Транзакция Drizzle — та же, что даёт `db.transaction(async (tx) => …)`. */
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -832,6 +834,15 @@ export class TasksService {
    */
   private async assertCan(actorRef: string, perm: Permission): Promise<void> {
     if (actorRef === "owner") return;
+    // Агент, объявивший себя в панели (R-H-9), действует ЗА владельца, но
+    // назначение, приёмка и оценка работы — суждение человека (R-H-14:
+    // одобряет только владелец). Отказ честный, а не «попроси проставить
+    // роль»: роль агенту не проставить, решение за владельцем.
+    if (actorKindOf(actorRef) === "agent") {
+      throw new ForbiddenException(
+        "Назначать, принимать и оценивать задачи может только человек — это решение владельца, не агента.",
+      );
+    }
     const denial = "Это может менеджер. Попроси владельца проставить роль.";
     const match = TasksService.ACTOR_PERSON.exec(actorRef);
     if (!match) throw new ForbiddenException(denial);
@@ -2347,8 +2358,8 @@ export class TasksService {
               .returning();
             if (!resumable) throw new ConflictException("Blocked execution changed during resume");
             await tx.insert(auditLog).values({
-              actorKind: "human",
-              actorRef: "owner",
+              actorKind: actorKindOf(requestActor("owner")),
+              actorRef: requestActor("owner"),
               action: "task.agent_execution.resume",
               target: id,
               before,
@@ -2435,8 +2446,8 @@ export class TasksService {
         throw new ConflictException("Заблокированная попытка изменилась во время retry");
       }
       await tx.insert(auditLog).values({
-        actorKind: "human",
-        actorRef: "owner",
+        actorKind: actorKindOf(requestActor("owner")),
+        actorRef: requestActor("owner"),
         action: "task.agent_execution.retry",
         target: id,
         before,
@@ -2548,7 +2559,7 @@ export class TasksService {
       if (!updated) throw new ConflictException("Задача изменилась во время смены статуса");
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: `task.${status}`,
         target: id,
@@ -2764,7 +2775,7 @@ export class TasksService {
       const [updated] = await tx.update(task).set(set).where(eq(task.id, id)).returning();
       if (!updated) throw new NotFoundException(`Задача ${id} не найдена`);
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "task.edit",
         target: id,
@@ -2925,7 +2936,7 @@ export class TasksService {
       if (!claimed) return null;
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(`person:${personId}`),
         actorRef: `person:${personId}`,
         action: "task.claimed",
         target: claimed.id,
@@ -2960,7 +2971,7 @@ export class TasksService {
         .returning();
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(`person:${personId}`),
         actorRef: `person:${personId}`,
         action: "task.released",
         target: id,
@@ -3001,7 +3012,7 @@ export class TasksService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "task.confirmed",
         target: id,
@@ -3122,7 +3133,7 @@ export class TasksService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: quality === "redo" ? "task.redo" : "task.rated",
         target: id,

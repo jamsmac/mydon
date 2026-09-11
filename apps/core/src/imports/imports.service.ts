@@ -22,6 +22,7 @@ import {
   UNIT_TRANSITIONS,
   type Domain,
   type ImportLifecycle,
+  actorKindOf,
 } from "@mydon/shared";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -229,7 +230,7 @@ export class ImportsService {
         })
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "import.create",
         target: created.id,
@@ -299,7 +300,7 @@ export class ImportsService {
       await this.createPaymentPlan(updated, actorRef, tx);
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "import.signed",
         target: id,
@@ -397,7 +398,7 @@ export class ImportsService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: `import.${kind}_paid`,
         target: id,
@@ -480,7 +481,7 @@ export class ImportsService {
           );
       }
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: `import.bulk_${action}`,
         target: id,
@@ -605,7 +606,7 @@ export class ImportsService {
         .where(eq(grImportContract.id, id))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "import.cancelled",
         target: id,

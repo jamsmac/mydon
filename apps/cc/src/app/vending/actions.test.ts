@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
+// Автор записи — из резолвера (R-H-9); агент здесь, чтобы было видно: он
+// доезжает до Core, а не подменяется литералом.
+vi.mock("../../lib/actor", () => ({ resolveActor: async () => "agent:claude-code" }));
 vi.mock("../../lib/core", () => ({
   core: { setVendingProductFiscal: mocks.setVendingProductFiscal },
   CoreUnavailable: class CoreUnavailable extends Error {
@@ -48,7 +51,7 @@ describe("saveVendingProductFiscal", () => {
       vatPct: 12,
       packageCode: "796",
       marked: false,
-      actor: "panel",
+      actor: "agent:claude-code",
     });
     expect(mocks.revalidatePath).toHaveBeenCalledWith("/domain/vendhub");
   });

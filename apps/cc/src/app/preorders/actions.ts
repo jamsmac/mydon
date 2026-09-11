@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
 
@@ -29,7 +30,7 @@ export async function createPreorder(form: FormData): Promise<ActionResult> {
       clientId: String(form.get("clientId") ?? "").trim() || undefined,
       supplierId: String(form.get("supplierId") ?? "").trim() || undefined,
       submitImmediately: form.get("submitImmediately") !== null,
-      actorRef: "owner",
+      actorRef: await resolveActor(),
     });
     return done();
   } catch (err) {
@@ -43,7 +44,7 @@ export async function preorderAction(
   extra: Record<string, string> = {},
 ): Promise<ActionResult> {
   try {
-    await core.preorderAction(id, action, { ...extra, actorRef: "owner" });
+    await core.preorderAction(id, action, { ...extra, actorRef: await resolveActor() });
     return done();
   } catch (err) {
     return done(err);

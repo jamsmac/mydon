@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
 import { IsIn, IsISO8601, IsNumber, IsObject, IsOptional, IsString, IsUUID, MaxLength, Min } from "class-validator";
 import { CollectionsService } from "./collections.service";
+import { requestActor } from "../common/request-actor";
 
 export class CreateCollectionDto {
   @IsUUID()
@@ -101,11 +102,11 @@ export class CollectionsController {
 
   @Post(":id/receive")
   receive(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ReceiveCollectionDto) {
-    return this.collections.receive(id, dto.amount, dto.manager ?? "owner", dto.denominations);
+    return this.collections.receive(id, dto.amount, dto.manager ?? requestActor("owner"), dto.denominations);
   }
 
   @Post(":id/cancel")
   cancel(@Param("id", ParseUUIDPipe) id: string, @Body() dto: { manager?: string }) {
-    return this.collections.cancel(id, dto?.manager ?? "owner");
+    return this.collections.cancel(id, dto?.manager ?? requestActor("owner"));
   }
 }

@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
 import { DOMAINS, parseDue } from "@mydon/shared";
@@ -40,7 +41,7 @@ export async function quickAddTask(form: FormData): Promise<ActionResult> {
       ownerKind: kind,
       ownerRef,
       priority: String(form.get("priority") ?? "normal"),
-      createdBy: "owner",
+      createdBy: await resolveActor(),
       ...(due ? { due: due.toISOString() } : {}),
     });
   } catch (err) {
@@ -70,7 +71,7 @@ export async function quickDomainTask(
       ownerKind: "human",
       ownerRef: ownerRef ?? "",
       priority: "high",
-      createdBy: "owner",
+      createdBy: await resolveActor(),
       due: new Date(Date.now() + 24 * 3600_000).toISOString(),
     });
   } catch (err) {
@@ -88,7 +89,7 @@ export async function completeTask(id: string, resultNote: string): Promise<Acti
     return { ok: false, error: "Напиши коротко, что сделано — это и есть отчёт" };
   }
   try {
-    await core.setTaskStatus(id, { status: "done", actor: "owner", resultNote: note });
+    await core.setTaskStatus(id, { status: "done", actor: await resolveActor(), resultNote: note });
   } catch (err) {
     return fail(err);
   }
@@ -137,7 +138,7 @@ export async function changeStatus(
   status: "todo" | "in_progress" | "cancelled",
 ): Promise<ActionResult> {
   try {
-    await core.setTaskStatus(id, { status, actor: "owner" });
+    await core.setTaskStatus(id, { status, actor: await resolveActor() });
   } catch (err) {
     return fail(err);
   }
@@ -163,7 +164,7 @@ export async function editTask(
     due?: string;
   },
 ): Promise<ActionResult> {
-  const body: Record<string, unknown> = { actor: "owner" };
+  const body: Record<string, unknown> = { actor: await resolveActor() };
 
   if (patch.title !== undefined) {
     const t = patch.title.trim();
@@ -216,7 +217,7 @@ export async function addComment(id: string, body: string): Promise<ActionResult
   const text = body.trim();
   if (text.length === 0) return { ok: false, error: "Пустой комментарий" };
   try {
-    await core.addTaskComment(id, { body: text, author: "owner" });
+    await core.addTaskComment(id, { body: text, author: await resolveActor() });
   } catch (err) {
     return fail(err);
   }

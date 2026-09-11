@@ -13,6 +13,7 @@ import {
   isInviteExpired,
   normalizeRoles,
   type StaffRole,
+  actorKindOf,
 } from "@mydon/shared";
 import { and, eq, isNull } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -102,7 +103,7 @@ export class InvitesService {
         .returning();
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "person.invite_issued",
         target: personId,
@@ -188,7 +189,7 @@ export class InvitesService {
       if (!used) throw new BadRequestException("Приглашение не найдено или уже использовано");
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(`person:${target.id}`),
         actorRef: `person:${target.id}`,
         action: "person.invite_redeemed",
         target: target.id,
@@ -226,7 +227,7 @@ export class InvitesService {
         .returning();
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "person.access_revoked",
         target: personId,
@@ -249,7 +250,7 @@ export class InvitesService {
         .where(eq(person.id, personId))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "person.roles_changed",
         target: personId,
