@@ -173,6 +173,10 @@ export interface MachineCard {
   note: string | null;
   createdBy: string | null;
   updatedBy: string | null;
+  /** Инвентарный номер (K-014); null — ещё не присвоен (волна 3, М-6…М-8). */
+  inventoryNo: string | null;
+  /** Номер присвоен, но наклейка на автомате не подтверждена. */
+  labelPending: boolean;
 }
 
 export interface VendingMachine {
@@ -3298,6 +3302,11 @@ export const core = {
     ),
   /** Виды и состояния всего парка одним запросом — для списка автоматов. */
   machineCards: () => get<MachineCard[]>("/entities/machine-cards/all"),
+  /** Номер автомата (волна 3): план — чтением, присвоение — записью. */
+  machineNumberPlan: () => get<{ id: string; name: string; kind: string; inventoryNo: string }[]>("/entities/machine-numbers/plan"),
+  applyMachineNumberPlan: () => send<{ assigned: { id: string; inventoryNo: string }[] }>("/entities/machine-numbers/plan", "POST"),
+  setMachineNumber: (entityId: string, input: { inventoryNo?: string | null; confirmLabel?: boolean }) =>
+    send<MachineCard>(`/entities/${entityId}/machine-number`, "PUT", input),
   /** Перенос координат с автоматов на места (М-4): план — чтением, применение — записью. */
   coordAdoptionPlan: () => get<AdoptionPlan & { applied: string[] }>("/entities/places/adopt-machine-coords"),
   applyCoordAdoption: () => send<AdoptionPlan & { applied: string[] }>("/entities/places/adopt-machine-coords", "POST"),

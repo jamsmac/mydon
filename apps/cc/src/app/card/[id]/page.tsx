@@ -22,6 +22,7 @@ import { MachineCard360 } from "../../../components/machine-card-360";
 import { ProductCard360 } from "../../../components/product-card-360";
 import { LocationPanel } from "../../../components/location-panel";
 import { PlaceCoords } from "../../../components/place-coords";
+import { MachineNumber } from "../../../components/machine-number";
 import { PlaceOwnership, type OwnerOption } from "../../../components/place-ownership";
 import { PlaceMerge } from "../../../components/place-merge";
 import { mapTilesFromEnv } from "../../../lib/map-tiles";
@@ -952,6 +953,8 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           status={machineCard?.status ?? null}
           statusNote={machineCard?.statusNote ?? null}
           updatedBy={machineCard?.updatedBy ?? null}
+          inventoryNo={machineCard?.inventoryNo ?? null}
+          labelPending={machineCard?.labelPending ?? false}
           placements={coffeePlacements}
           live={liveVending}
           coffee={
@@ -1029,6 +1032,17 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                   statusChangedAt={machineCard?.statusChangedAt ?? null}
                   updatedBy={machineCard?.updatedBy ?? null}
                 />
+                <section className="sect" id="number">
+                  <div className="sect-h">
+                    <h3 className="h2">Инвентарный номер</h3>
+                  </div>
+                  <MachineNumber
+                    machineId={entity.id}
+                    kind={machineCard?.kind ?? null}
+                    inventoryNo={machineCard?.inventoryNo ?? null}
+                    labelPending={machineCard?.labelPending ?? false}
+                  />
+                </section>
                 <MachinePartsPanel machineId={entity.id} parts={machineParts} storage={partsStorage} />
               </>
             ),

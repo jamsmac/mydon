@@ -4,6 +4,7 @@ import {
   MACHINE_KIND_LABELS,
   machineStatusLabel,
   type MachineKind,
+  machineDisplayName,
 } from "@mydon/shared";
 import type { CoffeePlacementRow, Entity, VendingMachine } from "../lib/core";
 import { CardTabs } from "./card-tabs";
@@ -88,6 +89,8 @@ export function MachineCard360({
   status,
   statusNote,
   updatedBy,
+  inventoryNo,
+  labelPending,
   placements,
   live,
   coffee,
@@ -105,6 +108,9 @@ export function MachineCard360({
   status: string | null;
   statusNote: string | null;
   updatedBy: string | null;
+  /** Инвентарный номер (волна 3); имя на показ — «K-014 · место» (М-12). */
+  inventoryNo: string | null;
+  labelPending: boolean;
   placements: CoffeePlacementRow[];
   /** Живой срез Ourvend по этому серийнику — если сбор его приносил. */
   live: VendingMachine | null;
@@ -166,8 +172,13 @@ export function MachineCard360({
           {KIND_EMOJI[kind ?? "other"] ?? "❔"}
         </div>
         <div className="mc-id">
-          <h1>{entity.name}</h1>
+          <h1>{machineDisplayName({ name: entity.name, inventoryNo }, текущая?.locationName ?? null)}</h1>
           <p className="mc-sub">
+            {inventoryNo ? (
+              <>
+                карточка «{entity.name}»{labelPending ? <> · <span className="chip h">номер не наклеен</span></> : null} ·{" "}
+              </>
+            ) : null}
             {entity.externalRef ? (
               <span className="mono">S/N {entity.externalRef}</span>
             ) : (
