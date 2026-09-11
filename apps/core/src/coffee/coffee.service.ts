@@ -38,6 +38,7 @@ import {
   type ReconcileResult,
   type RecipeLine,
   isPlaceType,
+  placeStatusConflict,
   machineIsOperational,
   placeNameKeys,
 } from "@mydon/shared";
@@ -479,7 +480,7 @@ export class CoffeeService {
       );
     }
     const [loc] = await this.db
-      .select({ id: entity.id, type: entity.type })
+      .select({ id: entity.id, type: entity.type, name: entity.name })
       .from(entity)
       .where(eq(entity.id, locationId));
     if (!loc) throw new NotFoundException(`Место ${locationId} не найдено`);
@@ -488,13 +489,21 @@ export class CoffeeService {
     }
 
     const [card] = await this.db
-      .select({ id: entity.id, type: entity.type })
+      .select({ id: entity.id, type: entity.type, status: machineCard.status })
       .from(entity)
+      .leftJoin(machineCard, eq(machineCard.entityId, entity.id))
       .where(eq(entity.id, entityId));
     if (!card) throw new NotFoundException(`Карточка ${entityId} не найдена`);
     if (card.type !== "machine") {
       throw new BadRequestException("Привязать можно только карточку автомата (type=machine)");
     }
+    // Состояние и место сверяются ТЕМ ЖЕ правилом, что в `setMachineStatus`
+    // (`placeStatusConflict`). Без этой строки экран привязки был вторым, более
+    // слабым входом в те же данные: им можно было поставить автомат «на складе»
+    // на точку продаж, и парк показывал бы его торгующим. Один вход — одно
+    // правило; кто из двух экранов записал размещение, значения иметь не должно.
+    const конфликт = placeStatusConflict(card.status, loc.type, loc.name);
+    if (конфликт) throw new BadRequestException(конфликт);
 
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
     await this.db.transaction(async (tx) => {

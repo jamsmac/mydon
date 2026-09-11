@@ -917,6 +917,32 @@ describe("CoffeeService: привязка точек к автоматам ре�
     assert.equal((размещения[0]!.values as Record<string, unknown>).entityId, "ent-1");
   });
 
+  it("linkLocation не ставит автомат «на складе» на точку продаж", async () => {
+    // Второй вход в те же данные обязан знать то же правило, что и смена
+    // состояния: иначе этим экраном автомат со склада «выходил» торговать, и
+    // парк показывал бы выручку у аппарата, которого на точке нет.
+    const { db, inserts } = coffeeDb({
+      locations: [loc()],
+      registry: [{ id: "ent-1", type: "machine", name: "Кофемашина AH", status: "warehouse" }],
+    });
+    const svc = new CoffeeService(db);
+    await assert.rejects(svc.linkLocation("loc-1", "ent-1"), /требует склада/);
+    assert.equal(inserts.filter((i) => i.table === "machine_placement").length, 0);
+  });
+
+  it("linkLocation ставит автомат «в ремонте» на точку — чинят и на месте", async () => {
+    // Слово владельца 07.08.2026: «места ремонта могут быть разные». Сломанный
+    // автомат, который ещё стоит на точке, — обычное дело, и запретить это
+    // значило бы заставить врать о его местоположении.
+    const { db, inserts } = coffeeDb({
+      locations: [loc()],
+      registry: [{ id: "ent-1", type: "machine", name: "Кофемашина AH", status: "repair" }],
+    });
+    const svc = new CoffeeService(db);
+    await svc.linkLocation("loc-1", "ent-1");
+    assert.equal(inserts.filter((i) => i.table === "machine_placement").length, 1);
+  });
+
   it("linkLocation с null отвергается — непонятно, какой аппарат снимать", async () => {
     // Пока место держало один аппарат, null означал «отвязать». С несколькими
     // аппаратами вопрос «какой снять» остаётся без ответа, и молча снять

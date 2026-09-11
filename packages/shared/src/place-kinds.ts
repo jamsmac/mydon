@@ -21,6 +21,8 @@
  *   · поиск, вложения, задачи по объекту — всё это про `entity`.
  */
 
+import type { MachineStatus } from "./machine-status";
+
 export const PLACE_TYPES = ["location", "warehouse", "workshop"] as const;
 export type PlaceType = (typeof PLACE_TYPES)[number];
 
@@ -66,3 +68,51 @@ export const PLACE_ATTR = {
   lng: "долгота",
   address: "адрес",
 } as const;
+
+/**
+ * Состояние, которое ПОДРАЗУМЕВАЕТ вид места.
+ *
+ * Владельцу не нужно называть одно и то же дважды: поставил автомат на точку
+ * продаж — он в эксплуатации, увёз на склад — он на складе, в мастерскую —
+ * в ремонте. Панель подставляет это состояние при выборе места, а владелец
+ * может его переопределить: «в ремонте» бывает где угодно, включая точку
+ * продаж (сломанный автомат, который ещё не увезли).
+ *
+ * Не «вычисляем состояние из места» — это ровно та ошибка косвенного
+ * признака, от которой предостерегает `machine-status.ts`. Это подсказка
+ * формы, а истина остаётся явной.
+ */
+export const STATUS_FOR_PLACE_TYPE: Record<PlaceType, MachineStatus> = {
+  location: "in_service",
+  warehouse: "warehouse",
+  workshop: "repair",
+};
+
+/**
+ * Противоречит ли место состоянию — ОДНО правило на все пути записи.
+ *
+ * До этой функции правило жило только внутри `setMachineStatus` в Core, и
+ * второй путь (привязка места на экране «Кофе → Настройки») его не знал: тем
+ * же движением можно было поставить автомат «в ремонте» на точку продаж, и
+ * система показывала бы его торгующим. Правило, у которого два владельца, —
+ * это два разных правила.
+ *
+ * Сверяем только там, где состояние ПРЯМО называет вид места. Для ремонта не
+ * сверяем ничего: чинят и в мастерской, и на складе, и прямо на точке.
+ *
+ * @returns текст ошибки для человека или `null`, если противоречия нет.
+ */
+export function placeStatusConflict(
+  status: string | null | undefined,
+  placeType: string | null | undefined,
+  placeName: string,
+): string | null {
+  const вид = placeTypeLabel(placeType).toLowerCase();
+  if (status === "in_service" && placeType !== "location") {
+    return `В эксплуатации автомат стоит на точке продаж, а «${placeName}» — это ${вид}`;
+  }
+  if (status === "warehouse" && placeType !== "warehouse") {
+    return `Состояние «на складе» требует склада, а «${placeName}» — это ${вид}`;
+  }
+  return null;
+}

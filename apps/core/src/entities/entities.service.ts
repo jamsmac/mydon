@@ -25,7 +25,7 @@ import {
   coordFromAttrs,
   isPlaceType,
   MACHINE_KINDS,
-  placeTypeLabel,
+  placeStatusConflict,
   parseRecipe,
   recipeCost,
   type Domain,
@@ -950,20 +950,12 @@ export class EntitiesService {
         if (!isPlaceType(place.type)) {
           throw new BadRequestException(`Поставить автомат можно только на место, а это «${place.type}»`);
         }
-        // Сверяем состояние с видом места только там, где состояние ПРЯМО
-        // называет вид: «в эксплуатации» — это точка продаж, «на складе» —
-        // склад. Для ремонта не сверяем ничего: чинят и в мастерской, и на
-        // складе, и прямо на точке.
-        if (status === "in_service" && place.type !== "location") {
-          throw new BadRequestException(
-            `В эксплуатации автомат стоит на точке продаж, а «${place.name}» — это ${placeTypeLabel(place.type).toLowerCase()}`,
-          );
-        }
-        if (status === "warehouse" && place.type !== "warehouse") {
-          throw new BadRequestException(
-            `Состояние «на складе» требует склада, а «${place.name}» — это ${placeTypeLabel(place.type).toLowerCase()}`,
-          );
-        }
+        // Сверяем состояние с видом места ОДНИМ правилом на все пути записи
+        // (`placeStatusConflict` в @mydon/shared): тот же экран привязки в
+        // «Кофе → Настройки» пишет размещение мимо этой транзакции, и правило,
+        // размноженное по коду, там просто не сработало бы.
+        const конфликт = placeStatusConflict(status, place.type, place.name);
+        if (конфликт) throw new BadRequestException(конфликт);
         await tx
           .update(machinePlacement)
           .set({ endDate: todayTashkent() })

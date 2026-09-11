@@ -127,7 +127,8 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   // периодами, ведёт привязка в Кофе-бункерах). Дополнение — ошибка не роняет.
   let coffeePlacements: CoffeePlacementRow[] = [];
   // Места, куда автомат можно поставить: точки продаж, склады, мастерские.
-  // Нужны при смене состояния — «в ремонте» без адреса теряет автомат из виду.
+  // Нужны форме «Где стоит» на вкладке «Локация» — место и состояние там
+  // записываются вместе (решение 09.09.2026).
   let places: { id: string; name: string; type: string }[] = [];
   if (entity.type === "machine") {
     try {
@@ -889,7 +890,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           coffee={
             machineCard?.kind === "coffee"
               ? {
-                  linked: coffeeBunkers.length > 0,
+                  hasFills: coffeeBunkers.length > 0,
                   filled: coffeeBunkers.filter((r) => r.netFillWeight !== null).length,
                 }
               : null
@@ -915,10 +916,10 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                 </div>
                 {coffeeBunkers.length === 0 ? (
                   <div className="empty">
-                    <b>Бункеры не привязаны</b>
-                    Ингредиенты кофейного живут в восьми бункерах локации. Уровни появятся,
-                    когда аппарат будет стоять на кофе-локации с заливками — журнал заливок
-                    во вкладке «Кофе-бункеры» рабочего места VendHub.
+                    <b>Заливок по этой точке нет</b>
+                    Ингредиенты кофейного живут в восьми бункерах локации. Привязка к кофе-локации
+                    может быть, а заливок ещё не быть — тогда здесь пусто. Уровни появятся
+                    после первой заливки: вкладка «Кофе-бункеры» рабочего места VendHub.
                   </div>
                 ) : (
                   <>
@@ -959,7 +960,6 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                   statusNote={machineCard?.statusNote ?? null}
                   statusChangedAt={machineCard?.statusChangedAt ?? null}
                   updatedBy={machineCard?.updatedBy ?? null}
-                  places={places}
                 />
                 <MachinePartsPanel machineId={entity.id} parts={machineParts} storage={partsStorage} />
               </>
@@ -970,11 +970,15 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                   machineId={entity.id}
                   periods={coffeePlacements.map((p) => ({
                     id: p.id,
+                    locationId: p.locationId,
                     locationName: p.locationName,
                     startDate: p.startDate,
                     endDate: p.endDate,
                     note: p.note,
                   }))}
+                  places={places}
+                  status={machineCard?.status ?? null}
+                  statusNote={machineCard?.statusNote ?? null}
                   lat={lat}
                   lng={lng}
                   address={typeof a["адрес"] === "string" ? a["адрес"] : null}

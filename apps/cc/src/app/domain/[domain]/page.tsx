@@ -46,6 +46,11 @@ import { ownerEnforcementEnabled, personalGateBlocks, resolveOwner } from "../..
 import { groupsFor, isTableBackedLeaf } from "../../../lib/domain-nav";
 import { NewEntityForm } from "../../../components/entity-new";
 import { CollectionsView } from "../../../components/collections-view";
+// Группа «Парк»: те же экраны, что по адресам /places, /parts, /maintenance —
+// общий компонент, два входа (решение владельца 09.09.2026).
+import { PlacesView } from "../../../components/places-view";
+import { PartsView } from "../../../components/parts-view";
+import { MaintenanceView } from "../../../components/maintenance-view";
 import { SalesView } from "../../../components/sales-view";
 import { ConsumptionView } from "../../../components/consumption-view";
 import { ProductsBook, isIncomplete } from "../../../components/products-book";
@@ -585,6 +590,10 @@ export default async function DomainPage({
         [
           { key: "overview", label: "Сегодня" },
           { key: "service", label: "Полевая работа" },
+          // «Парк» — физический мир направления (места, узлы, обслуживание).
+          // Стоит сразу за полевой работой: техник и владелец ходят туда из
+          // того же вопроса «что с автоматом», а не из настроек системы.
+          { key: "park", label: groups.find((g) => g.key === "park")?.label ?? "Парк" },
           { key: "smm", label: "Продвижение" },
           { key: "crm", label: "Клиенты" },
           { key: "hr", label: `Люди${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
@@ -2172,6 +2181,13 @@ export default async function DomainPage({
       )}
       {group && leaf?.type === "machine_stock" && <MachineStockView />}
 
+      {/* ── Парк: места, узлы, обслуживание. Те же экраны, что по адресам
+          /places, /parts, /maintenance — общий компонент, два входа. Слово
+          владельца 09.09.2026: это операционка VendHub, а не общая система. ── */}
+      {group && leaf?.type === "places" && <PlacesView />}
+      {group && leaf?.type === "parts" && <PartsView sp={sp} base={`/domain/${domain}`} />}
+      {group && leaf?.type === "maintenance" && <MaintenanceView />}
+
       {/* ── План закупа (срез П5a): что купить, куда везти и как разложить
           по слотам. Считает ядро (/vending/plan) — панель только показывает,
           чтобы её числа не разъехались с ботом. ── */}
@@ -2727,6 +2743,9 @@ export default async function DomainPage({
           "gaps",
           "buy_plan",
           "purchase_rules",
+          "places",
+          "parts",
+          "maintenance",
           "shrinkage",
           "refill_events",
           "stock_history",

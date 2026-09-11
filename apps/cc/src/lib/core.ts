@@ -3385,6 +3385,13 @@ export const core = {
     locationId: string;
     position: number;
     containerNumber?: number;
+    /**
+     * Что именно залили. Ядро выводит ингредиент само, но ТОЛЬКО когда у
+     * позиции он один; у двусмысленной (3 — лимонный чай или матча) выбор
+     * обязан прийти от человека, иначе строка навсегда остаётся без
+     * ингредиента и выпадает из расхода и сверки.
+     */
+    ingredientId?: string;
     filledWeight: number;
     packageCount?: number;
     enteredDate: string;
