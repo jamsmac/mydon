@@ -15,6 +15,7 @@ import { MONEY_CATEGORIES,
 import { and, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { DB, type Db } from "../db/db.module";
+import { requestActor } from "../common/request-actor";
 
 /**
  * Импорт реестра GLOBERENT из рабочей книги владельца (xlsx «2020–2025»).
@@ -265,7 +266,7 @@ export class RegistryImportService {
     return row.id;
   }
 
-  async importGloberent(payload: ImportPayload, actorRef = "owner"): Promise<ImportSummary> {
+  async importGloberent(payload: ImportPayload, actorRef = requestActor("owner")): Promise<ImportSummary> {
     const source = (payload.source ?? "").trim() || "импорт книги владельца";
     const orgId = await this.orgId();
     const summary: ImportSummary = {
@@ -631,7 +632,7 @@ export class RegistryImportService {
    */
   async unlinkForeignContractLinks(
     flowIds: string[],
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<UnlinkForeignResult> {
     const ids = [...new Set(flowIds.map((s) => String(s).trim()))].filter((s) => s.length > 0);
     const bad = ids.filter((s) => !UUID_RE.test(s));

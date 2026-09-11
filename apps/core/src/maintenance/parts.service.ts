@@ -402,7 +402,7 @@ export class PartsService {
     return outerTx ? run(outerTx) : this.db.transaction(run);
   }
 
-  async update(id: string, patch: UpdatePartUnitInput, actorRef = "owner"): Promise<PartUnitView> {
+  async update(id: string, patch: UpdatePartUnitInput, actorRef = requestActor("owner")): Promise<PartUnitView> {
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(partUnit).where(eq(partUnit.id, id)).limit(1);
       if (!before) throw new NotFoundException("Узла с таким id нет");
@@ -503,7 +503,7 @@ export class PartsService {
   }
 
   /** Списать узел: открытый период закрывается, карточка остаётся (R-PU-11). */
-  async retire(id: string, reason: string, actorRef = "owner"): Promise<PartUnitView> {
+  async retire(id: string, reason: string, actorRef = requestActor("owner")): Promise<PartUnitView> {
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(partUnit).where(eq(partUnit.id, id)).limit(1);
       if (!before) throw new NotFoundException("Узла с таким id нет");

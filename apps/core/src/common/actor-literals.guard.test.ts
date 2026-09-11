@@ -68,4 +68,31 @@ describe("сторож авторства: актор — факт, а не ли
   it("нет зашитой ссылки `actorRef: \"owner\"` / `\"panel\"`", () => {
     assert.deepEqual(нарушения(/\b(actorRef|approvedBy):\s*"(owner|panel)"/), []);
   });
+
+  /*
+   * Третья форма той же лжи, пропущенная волной 1 (найдена 11.09.2026):
+   * умолчание автора в СИГНАТУРЕ сервиса. `update(id, dto, actorRef = "system")`
+   * звали из `PATCH /entities/:id` без автора — самая частая правка панели
+   * ложилась в журнал «системой». Умолчание — выражение, вычисляется при
+   * вызове: `actorRef = requestActor("system")` честен и в запросе, и в кроне.
+   */
+  it('нет умолчаний автора литералом в сигнатуре — `actorRef = requestActor("…")`', () => {
+    assert.deepEqual(
+      нарушения(/\b(actorRef|actor|createdBy|decidedBy|importedBy|author|manager)\s*(:\s*string)?\s*=\s*"[a-z:_-]+"/),
+      [],
+    );
+  });
+
+  it('нет вида `"system"` при переменной ссылке `actorRef,` — вид выводится из ссылки', () => {
+    const out: string[] = [];
+    for (const file of исходники(SRC)) {
+      const lines = readFileSync(file, "utf8").split("\n");
+      lines.forEach((line, i) => {
+        if (!/actorKind:\s*"system",\s*$/.test(line)) return;
+        const around = [lines[i - 1] ?? "", lines[i + 1] ?? ""];
+        if (around.some((l) => /^\s*actorRef,\s*$/.test(l))) out.push(`${path.relative(SRC, file)}:${i + 1}`);
+      });
+    }
+    assert.deepEqual(out, []);
+  });
 });

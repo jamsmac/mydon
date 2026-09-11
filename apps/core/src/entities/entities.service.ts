@@ -38,6 +38,7 @@ import { and, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import type { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
+import { requestActor } from "../common/request-actor";
 
 type MachineCardRow = typeof machineCard.$inferSelect;
 
@@ -191,7 +192,7 @@ export class EntitiesService {
    * владелец этого попросил: разбирать четырнадцать позиций по одному полю —
    * та же лишняя работа, от которой мы уходили.
    */
-  async approve(id: string, actorRef = "owner", withDrafts = true): Promise<EntityRow> {
+  async approve(id: string, actorRef = requestActor("owner"), withDrafts = true): Promise<EntityRow> {
     const [card] = await this.db.select().from(entity).where(eq(entity.id, id));
     if (!card) throw new NotFoundException("Карточки нет");
     return this.db.transaction(async (tx) => {
@@ -242,7 +243,7 @@ export class EntitiesService {
    */
   async approveMany(
     ids: string[],
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<{ approved: number; skipped: number }> {
     let approved = 0;
     let skipped = 0;
@@ -307,7 +308,7 @@ export class EntitiesService {
   }
 
   /** Утвердить одно предложенное значение. */
-  async approveField(entityId: string, field: string, actorRef = "owner"): Promise<EntityRow> {
+  async approveField(entityId: string, field: string, actorRef = requestActor("owner")): Promise<EntityRow> {
     const [draft] = await this.db
       .select()
       .from(entityDraft)
@@ -343,7 +344,7 @@ export class EntitiesService {
    * Уходит без следа в карточке: «отклонено» — это решение, а не запись данных.
    * След остаётся в журнале действий, где ему и место.
    */
-  async rejectField(entityId: string, field: string, actorRef = "owner"): Promise<{ ok: true }> {
+  async rejectField(entityId: string, field: string, actorRef = requestActor("owner")): Promise<{ ok: true }> {
     const [draft] = await this.db
       .select()
       .from(entityDraft)
@@ -426,7 +427,7 @@ export class EntitiesService {
   }
 
   /** Создание и запись в журнал — одной транзакцией (данные без следа недопустимы). */
-  async create(dto: CreateEntityDto, actorRef = "system"): Promise<EntityRow> {
+  async create(dto: CreateEntityDto, actorRef = requestActor("system")): Promise<EntityRow> {
     const orgId = await this.orgIdByDomain(dto.domain);
     // ИНН контрагента уникален (правило PROMACH): при дубле отвечаем адресом
     // существующей карточки — панель предложит «открыть существующего», а не
@@ -498,7 +499,7 @@ export class EntitiesService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "system",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "entity.create",
         target: created.id,
@@ -611,7 +612,7 @@ export class EntitiesService {
    * Запись стирается, но её содержимое остаётся в журнале (before):
    * «что это было и когда убрали» можно посмотреть всегда.
    */
-  async remove(id: string, actorRef = "owner"): Promise<void> {
+  async remove(id: string, actorRef = requestActor("owner")): Promise<void> {
     await this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(entity).where(eq(entity.id, id)).for("update");
       if (!before) throw new NotFoundException(`Сущность ${id} не найдена`);
@@ -640,7 +641,7 @@ export class EntitiesService {
    * оставалась только одна — вторая исчезала молча, а журнал приписывал
    * изменения не тому автору.
    */
-  async update(id: string, dto: UpdateEntityDto, actorRef = "system"): Promise<EntityRow> {
+  async update(id: string, dto: UpdateEntityDto, actorRef = requestActor("system")): Promise<EntityRow> {
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(entity).where(eq(entity.id, id)).for("update");
       if (!before) throw new NotFoundException(`Сущность ${id} не найдена`);
@@ -676,7 +677,7 @@ export class EntitiesService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "system",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "entity.update",
         target: id,
@@ -834,7 +835,7 @@ export class EntitiesService {
   async setMachineStatus(
     entityId: string,
     status: MachineStatus,
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
     note?: string,
     placeId?: string,
   ): Promise<MachineCardRow> {
@@ -996,7 +997,7 @@ export class EntitiesService {
   async setMachineKind(
     entityId: string,
     kind: MachineKind,
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
     note?: string,
   ): Promise<MachineCardRow> {
     if (!(MACHINE_KINDS as readonly string[]).includes(kind)) {

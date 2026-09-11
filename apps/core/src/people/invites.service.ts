@@ -17,6 +17,7 @@ import {
 } from "@mydon/shared";
 import { and, eq, isNull } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { requestActor } from "../common/request-actor";
 
 type PersonRow = typeof person.$inferSelect;
 
@@ -68,7 +69,7 @@ export class InvitesService {
   async issue(
     personId: string,
     roles: string[],
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<{ code: string; expiresAt: Date; person: PersonRow }> {
     this.assertPepperConfigured();
     const clean = normalizeRoles(roles);
@@ -202,7 +203,7 @@ export class InvitesService {
   }
 
   /** Отозвать доступ: снять привязку и погасить живые приглашения. */
-  async revoke(personId: string, actorRef = "owner"): Promise<PersonRow> {
+  async revoke(personId: string, actorRef = requestActor("owner")): Promise<PersonRow> {
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(person).where(eq(person.id, personId)).limit(1);
       if (!before) throw new NotFoundException("Сотрудника нет");
@@ -239,7 +240,7 @@ export class InvitesService {
   }
 
   /** Проставить роли без выпуска приглашения — правка уже подключённого. */
-  async setRoles(personId: string, roles: string[], actorRef = "owner"): Promise<PersonRow> {
+  async setRoles(personId: string, roles: string[], actorRef = requestActor("owner")): Promise<PersonRow> {
     const clean: StaffRole[] = normalizeRoles(roles);
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(person).where(eq(person.id, personId)).limit(1);

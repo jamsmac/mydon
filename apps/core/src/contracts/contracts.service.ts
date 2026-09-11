@@ -26,6 +26,7 @@ import {
   type ContractParty,
   type PayType,
 } from "./contract-docx";
+import { requestActor } from "../common/request-actor";
 
 type ContractRow = typeof grContract.$inferSelect;
 type ActRow = typeof contractAct.$inferSelect;
@@ -189,7 +190,7 @@ export class ContractsService {
    * с фронта); номер — max+1 в транзакции (у донора считал фронт — гонка);
    * график оплат сразу порождает planned-записи money_flow со сроками.
    */
-  async create(input: CreateContractInput, actorRef = "owner"): Promise<ContractRow> {
+  async create(input: CreateContractInput, actorRef = requestActor("owner")): Promise<ContractRow> {
     if (!ISO_DAY.test(input.contractDate ?? "")) {
       throw new BadRequestException("Дата договора — в формате ГГГГ-ММ-ДД");
     }
@@ -426,7 +427,7 @@ export class ContractsService {
   }
 
   /** Смена статуса с guard'ами (ужесточение против донора — у него guard'ов не было). */
-  async setStatus(id: string, to: string, actorRef = "owner"): Promise<ContractRow> {
+  async setStatus(id: string, to: string, actorRef = requestActor("owner")): Promise<ContractRow> {
     if (!["active", "closed", "cancelled"].includes(to)) {
       throw new BadRequestException("Статус: active | closed | cancelled");
     }
@@ -464,7 +465,7 @@ export class ContractsService {
   async addPayment(
     id: string,
     input: { amount: number; currency?: string; docNo?: string; date?: string; rate?: number },
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<FlowRow> {
     const payment = await this.db.transaction(async (tx) => {
       const [row] = await tx.select().from(grContract).where(eq(grContract.id, id)).for("update");
@@ -647,7 +648,7 @@ export class ContractsService {
       signedByBuyer?: string;
       notes?: string;
     },
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<ActRow> {
     if ((input.actNo ?? "").trim() === "") throw new BadRequestException("Впиши номер акта");
     if (!ISO_DAY.test(input.actDate ?? "")) {

@@ -26,6 +26,7 @@ import {
   type FxRefreshSkip,
   type MonthCash,
 } from "./finance.math";
+import { requestActor } from "../common/request-actor";
 
 type FlowRow = typeof moneyFlow.$inferSelect;
 type FxRow = typeof fxRate.$inferSelect;
@@ -210,7 +211,7 @@ export class FinanceService {
    */
   async setFx(
     input: { currency: string; rate: number; note?: string },
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<FxCurrent[]> {
     const currency = (input.currency ?? "").toUpperCase().trim();
     if (!CURRENCY_RE.test(currency)) {
@@ -249,7 +250,7 @@ export class FinanceService {
    * Правила решает чистый план fxRefreshPlan: ручной курс за сегодня главнее,
    * неизменившийся курс не плодит строк. История дополняется, не переписывается.
    */
-  async refreshFxFromCbu(actorRef = "owner"): Promise<{
+  async refreshFxFromCbu(actorRef = requestActor("owner")): Promise<{
     updated: string[];
     skipped: FxRefreshSkip[];
     fx: FxCurrent[];
@@ -436,7 +437,7 @@ export class FinanceService {
    * факт 4 плана среза К); для вызовов без `extId` (весь остальной код
    * сегодня) поведение не меняется ни на шаг.
    */
-  async createFlow(input: CreateFlowInput, actorRef = "owner"): Promise<FlowRow> {
+  async createFlow(input: CreateFlowInput, actorRef = requestActor("owner")): Promise<FlowRow> {
     const prep = await this.prepareFlow(input);
     if (prep.kind === "existing") return prep.row;
     return this.writeFlow(input, prep, actorRef);
@@ -450,7 +451,7 @@ export class FinanceService {
   async createFlowInTransaction(
     tx: FinanceTx,
     input: CreateFlowInput,
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<FlowRow> {
     const prep = await this.prepareFlow(input, tx);
     if (prep.kind === "existing") return prep.row;
@@ -476,7 +477,7 @@ export class FinanceService {
    */
   async importBankStatement(
     input: { dryRun?: boolean; items: ImportBankStatementItem[] },
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<ImportBankStatementReport> {
     if (input.items.length > 3000) {
       // Называем фактическое число строк — тот самый «человеческий язык»
@@ -621,7 +622,7 @@ export class FinanceService {
   }
 
   /** Отметить обязательство оплаченным: план становится фактом, след — в журнале. */
-  async markPaid(id: string, opts: { rate?: number } = {}, actorRef = "owner"): Promise<FlowRow> {
+  async markPaid(id: string, opts: { rate?: number } = {}, actorRef = requestActor("owner")): Promise<FlowRow> {
     this.validatePaidOptions(opts);
     return this.db.transaction((tx) => this.markPaidInTransaction(tx, id, opts, actorRef));
   }
@@ -631,7 +632,7 @@ export class FinanceService {
     tx: FinanceTx,
     id: string,
     opts: { rate?: number } = {},
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<FlowRow> {
     this.validatePaidOptions(opts);
     const [row] = await tx.select().from(moneyFlow).where(eq(moneyFlow.id, id)).for("update");
@@ -676,7 +677,7 @@ export class FinanceService {
   }
 
   /** Отмена ошибочной записи. Строка остаётся — из сводов уходит. */
-  async cancelFlow(id: string, actorRef = "owner"): Promise<FlowRow> {
+  async cancelFlow(id: string, actorRef = requestActor("owner")): Promise<FlowRow> {
     return this.db.transaction(async (tx) => {
       const [row] = await tx.select().from(moneyFlow).where(eq(moneyFlow.id, id)).for("update");
       if (!row) throw new NotFoundException("Запись не найдена");

@@ -80,6 +80,7 @@ import { settingValue } from "../system/settings";
 import { VendingLedgerService } from "../stock/vending-ledger";
 import { failedStreak, FAILED_STREAK_ALERT, STREAK_SCAN_LIMIT } from "./sync-streak";
 import type { CancelKind } from "./record-cancel.service";
+import { requestActor } from "../common/request-actor";
 
 /**
  * Вендинг: приём собранных данных и расчёт дефицита (ТЗ Фаза 1).
@@ -1568,7 +1569,7 @@ export class VendingService {
    * дельты от одного и того же снимка «до», хотя реально сменилось только
    * конечное значение. Найдено адверсариал-ревью до релиза.
    */
-  async ingestStock(payload: IngestStockPayload, actor = "owner"): Promise<IngestStockResult> {
+  async ingestStock(payload: IngestStockPayload, actor = requestActor("owner")): Promise<IngestStockResult> {
     const countedAt = payload.countedAt ? new Date(payload.countedAt) : new Date();
     const [{ catalog, priceByName }, personId] = await Promise.all([
       this.loadProductIndex(),
@@ -2390,7 +2391,7 @@ export class VendingService {
    * Пустой patch — ошибка, а не молчаливое «ок»: это почти наверняка
    * потерянное поле в форме, а не намерение ничего не менять.
    */
-  async setProductRules(rawProduct: string, patch: ProductRulesPatch, actor = "owner"): Promise<SetRulesResult> {
+  async setProductRules(rawProduct: string, patch: ProductRulesPatch, actor = requestActor("owner")): Promise<SetRulesResult> {
     const touched =
       patch.packSize !== undefined || patch.excludedFromPurchase !== undefined || patch.fixedPurchaseQty !== undefined;
     if (!touched) throw new BadRequestException("нечего менять: укажи packSize, excludedFromPurchase или fixedPurchaseQty");
@@ -2469,7 +2470,7 @@ export class VendingService {
    * Нечего заказывать (нет позиций с ценой и продажами) — заявку не создаём:
    * пустое согласование только зашумляет очередь.
    */
-  async submitPurchase(createdBy = "system"): Promise<SubmitPurchaseResult> {
+  async submitPurchase(createdBy = requestActor("system")): Promise<SubmitPurchaseResult> {
     if (!this.approvals) throw new Error("ApprovalsService не подключён — отправка закупа недоступна");
 
     // Вторая заявка поверх нерешённой — почти всегда двойное нажатие (кнопка в
@@ -2895,7 +2896,7 @@ export class VendingService {
    * → отказ reason='spike', владелец повторяет команду со словом «точно»
    * (confirmed=true). Первая цена (текущей нет) проходит без гейта.
    */
-  async setProductPrice(rawProduct: string, price: number, actor = "owner", confirmed = false): Promise<SetPriceResult> {
+  async setProductPrice(rawProduct: string, price: number, actor = requestActor("owner"), confirmed = false): Promise<SetPriceResult> {
     const name = rawProduct.trim();
     if (!name || !Number.isFinite(price) || price <= 0) return { ok: false, reason: "not_found" };
 
@@ -3030,7 +3031,7 @@ export class VendingService {
    * первый эталон нового товара сравнивать не с чем, и требовать
    * подтверждение там значит просить подтвердить пустоту.
    */
-  async setSalePrice(rawProduct: string, price: number, actor = "owner", confirmed = false): Promise<SetSalePriceResult> {
+  async setSalePrice(rawProduct: string, price: number, actor = requestActor("owner"), confirmed = false): Promise<SetSalePriceResult> {
     const name = rawProduct.trim();
     // Причина отказа называется своим именем. «Товар не найден» на цену «0»
     // отправляло бы владельца искать несуществующую проблему в прайсе — при
@@ -3125,7 +3126,7 @@ export class VendingService {
    * `qty > 0`) без проверки уронила бы транзакцию целиком — вместе с полусотней
    * законных эталонов. Такой товар уходит в `skipped` причиной `no_fact`.
    */
-  async bootstrapSalePrice(days = SALE_PRICE_FACT_DAYS, actor = "owner"): Promise<BootstrapSalePriceResult> {
+  async bootstrapSalePrice(days = SALE_PRICE_FACT_DAYS, actor = requestActor("owner")): Promise<BootstrapSalePriceResult> {
     const окно = Math.max(1, Math.trunc(Number.isFinite(days) ? days : SALE_PRICE_FACT_DAYS));
     const { catalog, productRows } = await this.loadProductIndex();
     const facts = await this.retailFacts(окно, catalog);
@@ -3211,7 +3212,7 @@ export class VendingService {
   async recordCashSession(
     receivedAmount: number,
     categories: CashCategoryInput[],
-    createdBy = "owner",
+    createdBy = requestActor("owner"),
   ): Promise<CashSessionRow> {
     const session = computePurchaseCash(receivedAmount, categories);
     const [row] = await this.db

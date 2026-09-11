@@ -3,6 +3,7 @@ import { auditLog, brvValue, tnvedRate } from "@mydon/db";
 import { desc, eq } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { actorKindOf } from "@mydon/shared";
+import { requestActor } from "../common/request-actor";
 
 type TnvedRow = typeof tnvedRate.$inferSelect;
 type BrvRow = typeof brvValue.$inferSelect;
@@ -61,7 +62,7 @@ export class CatalogService {
     return q.where(eq(tnvedRate.isActive, true));
   }
 
-  async saveTnved(input: SaveTnvedInput, actorRef = "owner"): Promise<TnvedRow> {
+  async saveTnved(input: SaveTnvedInput, actorRef = requestActor("owner")): Promise<TnvedRow> {
     const code = (input.code ?? "").trim();
     if (!/^\d{4,10}$/.test(code)) {
       throw new BadRequestException("Код ТН ВЭД — от 4 до 10 цифр, например 8429519900");
@@ -150,7 +151,7 @@ export class CatalogService {
   }
 
   /** Убрать ставку из работы. Строка остаётся — расчёты на неё уже ссылались. */
-  async deactivateTnved(id: string, actorRef = "owner"): Promise<TnvedRow> {
+  async deactivateTnved(id: string, actorRef = requestActor("owner")): Promise<TnvedRow> {
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(tnvedRate).where(eq(tnvedRate.id, id)).for("update");
       if (!before) throw new NotFoundException("Ставка не найдена");
@@ -177,7 +178,7 @@ export class CatalogService {
   }
 
   /** Задать БРВ с даты. История не переписывается — каждая установка новой строкой. */
-  async setBrv(input: { valueUzs: number; validFrom: string; note?: string }, actorRef = "owner"): Promise<BrvRow[]> {
+  async setBrv(input: { valueUzs: number; validFrom: string; note?: string }, actorRef = requestActor("owner")): Promise<BrvRow[]> {
     if (!Number.isFinite(input.valueUzs) || input.valueUzs <= 0) {
       throw new BadRequestException("БРВ — положительное число сумов");
     }

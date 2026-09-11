@@ -31,6 +31,7 @@ import {
 import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
+import { requestActor } from "../common/request-actor";
 
 type UnitRow = typeof globerentUnit.$inferSelect;
 type ReserveRow = typeof unitReserve.$inferSelect;
@@ -187,7 +188,7 @@ export class UnitsService {
   }
 
   /** Заявка или своя техника на склад. Складской номер WH-#### — в транзакции. */
-  async create(input: CreateUnitInput, actorRef = "owner"): Promise<UnitRow> {
+  async create(input: CreateUnitInput, actorRef = requestActor("owner")): Promise<UnitRow> {
     if ((input.name ?? "").trim().length < 2) {
       throw new BadRequestException("Впиши название единицы (модель, год)");
     }
@@ -244,7 +245,7 @@ export class UnitsService {
       declarationDate?: string;
       arrivalDate?: string;
     } = {},
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<UnitRow> {
     const t = UNIT_TRANSITIONS[action];
     if (t === undefined) throw new BadRequestException(`Неизвестное действие «${action}»`);
@@ -314,7 +315,7 @@ export class UnitsService {
   }
 
   /** Привязать VIN (уникален среди заполненных — индекс не даст дубля). */
-  async setVin(id: string, vin: string, actorRef = "owner"): Promise<UnitRow> {
+  async setVin(id: string, vin: string, actorRef = requestActor("owner")): Promise<UnitRow> {
     if ((vin ?? "").trim().length < 5) throw new BadRequestException("VIN слишком короткий");
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(globerentUnit).where(eq(globerentUnit.id, id)).for("update");
@@ -337,7 +338,7 @@ export class UnitsService {
   }
 
   /** Откат VIN — только из разрешённых статусов (правило skipped_advanced донора). */
-  async unbindVin(id: string, actorRef = "owner"): Promise<UnitRow> {
+  async unbindVin(id: string, actorRef = requestActor("owner")): Promise<UnitRow> {
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(globerentUnit).where(eq(globerentUnit.id, id)).for("update");
       if (!before) throw new NotFoundException("Единица не найдена");
@@ -367,7 +368,7 @@ export class UnitsService {
   async reserve(
     id: string,
     input: { endDate: string; clientId?: string; note?: string },
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<ReserveRow> {
     if (!ISO_DAY.test(input.endDate ?? "")) {
       throw new BadRequestException("«Держим до» — дата в формате ГГГГ-ММ-ДД");
@@ -413,7 +414,7 @@ export class UnitsService {
   }
 
   /** Снять резерв: единица возвращается на склад, строка остаётся историей. */
-  async cancelReserve(id: string, actorRef = "owner"): Promise<UnitRow> {
+  async cancelReserve(id: string, actorRef = requestActor("owner")): Promise<UnitRow> {
     return this.db.transaction(async (tx) => {
       const [unit] = await tx.select().from(globerentUnit).where(eq(globerentUnit.id, id)).for("update");
       if (!unit) throw new NotFoundException("Единица не найдена");
@@ -444,7 +445,7 @@ export class UnitsService {
     id: string,
     stage: string,
     extra: { lostReason?: string; salesPrice?: number; clientId?: string } = {},
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<UnitRow> {
     if (!(SALES_STAGES as readonly string[]).includes(stage)) {
       throw new BadRequestException(`Неизвестная стадия «${stage}»`);
@@ -595,7 +596,7 @@ export class UnitsService {
         accrued = true;
         accruedFlowId = created[0]?.id ?? null;
         await this.db.insert(auditLog).values({
-          actorKind: "system",
+          actorKind: actorKindOf(actorRef),
           actorRef,
           action: "unit.commission_accrued",
           target: unit.id,

@@ -268,7 +268,7 @@ export class CoffeeLedgerService {
    * Ни того ни другого — помечаем, не списываем: примерный расход хуже
    * отсутствующего, он выглядит как факт.
    */
-  async consumeRefill(refillId: string, actorRef = "owner"): Promise<RefillConsumptionResult> {
+  async consumeRefill(refillId: string, actorRef = requestActor("owner")): Promise<RefillConsumptionResult> {
     const off = (await settingValue(this.db, "COFFEE_REFILL_CONSUMES")).trim() === "0";
     const [refill] = await this.db.select().from(coffeeRefill).where(eq(coffeeRefill.id, refillId)).limit(1);
     if (!refill) throw new NotFoundException(`Заливка ${refillId} не найдена`);

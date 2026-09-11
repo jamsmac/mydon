@@ -857,7 +857,7 @@ export class TasksService {
   }
 
   /** Создание вместе с записью в журнал — одной транзакцией. */
-  async create(input: CreateTaskInput, actorRef = "system"): Promise<TaskRow> {
+  async create(input: CreateTaskInput, actorRef = requestActor("system")): Promise<TaskRow> {
     assertPublicTaskSource(input.source);
     assertPublicTaskClientKey(input.clientKey);
     return this.db.transaction(async (tx) => {
@@ -924,7 +924,7 @@ export class TasksService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "system",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "task.create",
         target: created.id,
@@ -2489,7 +2489,7 @@ export class TasksService {
   async setStatus(
     id: string,
     status: Status,
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
     resultNote?: string,
     expectedAgentRunId?: string,
   ): Promise<TaskRow> {
@@ -2716,7 +2716,7 @@ export class TasksService {
       due?: Date | null;
       entityId?: string | null;
     },
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<TaskRow> {
     const set: Record<string, unknown> = {};
     if (patch.title !== undefined) {
@@ -3086,7 +3086,7 @@ export class TasksService {
   async rate(
     id: string,
     quality: "excellent" | "accepted" | "redo",
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<TaskRow> {
     await this.assertCan(actorRef, "tasks.confirm");
     return this.db.transaction(async (tx) => {

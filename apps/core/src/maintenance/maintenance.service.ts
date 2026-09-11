@@ -359,7 +359,7 @@ export class MaintenanceService {
   async closeLog(
     id: string,
     patch: { outcome: MaintenanceOutcome; note?: string; counterValue?: number },
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<LogRow> {
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(maintenanceLog).where(eq(maintenanceLog.id, id)).limit(1);
@@ -443,7 +443,7 @@ export class MaintenanceService {
        */
       isActive?: boolean;
     },
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<PlanRow> {
     const period = {
       everyDays: input.everyDays ?? null,
@@ -556,7 +556,7 @@ export class MaintenanceService {
    */
   async applyStandardNorms(
     entityIds: string[],
-    actorRef = "owner",
+    actorRef = requestActor("owner"),
   ): Promise<{ created: PlanRow[]; skipped: number; coffee: number; other: number }> {
     if (entityIds.length === 0) return { created: [], skipped: 0, coffee: 0, other: 0 };
     const today = todayInTz();
@@ -637,7 +637,7 @@ export class MaintenanceService {
    * выключением: удалённый норматив унёс бы с собой историю, по которой видно,
    * что раньше следили.
    */
-  async deactivatePlan(id: string, actorRef = "owner"): Promise<PlanRow> {
+  async deactivatePlan(id: string, actorRef = requestActor("owner")): Promise<PlanRow> {
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(maintenancePlan).where(eq(maintenancePlan.id, id)).limit(1);
       if (!before) throw new NotFoundException("Норматива нет");

@@ -23,6 +23,7 @@ import { DB, type Db } from "../db/db.module";
 import { lastSnapshotAt, snapshotIsStale, snapshotStaleThreshold } from "../ourvend/sync-runs";
 import { openStockDb } from "../supply/stock-db";
 import { accountingSource, type AccountingSource } from "./accounting-source";
+import { requestActor } from "../common/request-actor";
 
 type SaleRow = typeof sale.$inferSelect;
 
@@ -699,7 +700,7 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
   async addAlias(
     name: string,
     entityId: string,
-    actor = "owner",
+    actor = requestActor("owner"),
   ): Promise<{ id: string; name: string; entityId: string }> {
     const clean = name.trim();
     if (clean.length === 0) throw new BadRequestException("Пустое имя не привязывается");
@@ -760,7 +761,7 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
   }
 
   /** Отвязать имя. Продажи по нему снова попадут в «несвязанные». */
-  async removeAlias(id: string, actor = "owner"): Promise<void> {
+  async removeAlias(id: string, actor = requestActor("owner")): Promise<void> {
     await this.db.transaction(async (tx) => {
       const [row] = await tx
         .select()
