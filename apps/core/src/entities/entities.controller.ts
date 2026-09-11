@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Inject, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req } from "@nestjs/common";
-import { ArrayMaxSize, IsArray, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, MinLength, ValidateIf } from "class-validator";
+import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, MinLength, ValidateIf } from "class-validator";
 import type { Request } from "express";
 import {
   MACHINE_KINDS,
@@ -84,6 +84,19 @@ export class ApproveBatchDto {
   @ArrayMaxSize(500)
   @IsUUID("all", { each: true })
   ids!: string[];
+}
+
+/** Номер автомата: вписать/исправить (`null` — снять) или подтвердить наклейку. */
+export class SetMachineNumberDto {
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsString()
+  @MaxLength(32)
+  inventoryNo?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  confirmLabel?: boolean;
 }
 
 /** Владелец места; `null` — снять («не знаем, чьё помещение»). */
@@ -255,6 +268,28 @@ export class EntitiesController {
     @Body() dto: MergePlacesDto,
   ) {
     return this.placeMerge.merge(id, targetId, { basis: dto.basis, reason: dto.reason });
+  }
+
+  // ── Номер автомата (волна 3, М-6…М-8, М-12) ───────────────────────────────
+
+  /** План присвоения номеров всем без номера — чтение. */
+  @Get("machine-numbers/plan")
+  machineNumberPlan() {
+    return this.entities.machineNumberPlan();
+  }
+
+  /** Присвоить по плану: номер сразу, наклейка догоняет (label_pending). */
+  @Post("machine-numbers/plan")
+  applyMachineNumberPlan() {
+    return this.entities.applyMachineNumberPlan();
+  }
+
+  @Put(":id/machine-number")
+  setMachineNumber(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetMachineNumberDto) {
+    return this.entities.setMachineNumber(id, {
+      ...(dto.inventoryNo !== undefined ? { inventoryNo: dto.inventoryNo } : {}),
+      ...(dto.confirmLabel !== undefined ? { confirmLabel: dto.confirmLabel } : {}),
+    });
   }
 
   @Get("machine-cards/all")

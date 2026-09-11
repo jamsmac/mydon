@@ -24,11 +24,14 @@ export const INVENTORY_SERIES: Record<PartKind, string> = {
   cooling_unit: "CU",
   compressor: "CP",
   payment_terminal: "PT",
-  display: "D",
+  // `DP`, а не `D`: одиночные K/S/D/C — серии АВТОМАТОВ (М-8, machine-number.ts).
+  // Датчик `S-001` и снековый автомат `S-001` — две наклейки с одним текстом.
+  // Переименовано 11.09.2026, пока ни одного узла этих серий не пронумеровано.
+  display: "DP",
   mainboard: "MB",
   motor: "MT",
   valve: "V",
-  sensor: "S",
+  sensor: "SR",
   lock: "L",
   spiral: "SP",
   elevator: "E",

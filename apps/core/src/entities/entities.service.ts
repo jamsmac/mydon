@@ -24,6 +24,9 @@ import {
   cardPrice,
   coordFromAttrs,
   isPlaceType,
+  machineNoProblem,
+  canonicalMachineNo,
+  planMachineNumbers,
   adoptedCoordsSource,
   planCoordAdoption,
   PLACE_ATTR,
@@ -40,7 +43,7 @@ import {
   DEFAULT_FIND_LIMIT,
   MAX_FIND_LIMIT,
 } from "@mydon/shared";
-import { and, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import type { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
@@ -1127,6 +1130,130 @@ export class EntitiesService {
         after,
       });
       return after;
+    });
+  }
+
+  // ── Карточка автомата: инвентарный номер (волна 3, М-6…М-8, М-12) ───────────
+
+  /**
+   * Задать или подтвердить номер. `inventoryNo` — человек вписал номер, что уже
+   * на автомате (или исправил присвоенный): наклейка есть, `label_pending`
+   * снимается. `confirmLabel` — наклеил присвоенный системой. `null` — снять
+   * номер (ошибочно присвоен). Серия проверяется по виду: «S-003» у кофейного —
+   * отказ, а не другой номер.
+   */
+  async setMachineNumber(
+    entityId: string,
+    input: { inventoryNo?: string | null; confirmLabel?: boolean },
+    actorRef = requestActor("owner"),
+  ): Promise<MachineCardRow> {
+    return this.db.transaction(async (tx) => {
+      const [before] = await tx.select().from(machineCard).where(eq(machineCard.entityId, entityId)).for("update");
+      if (!before) throw new NotFoundException("У автомата нет карточки вида — сначала назовите вид");
+      const set: { inventoryNo?: string | null; labelPending?: boolean } = {};
+      if (input.inventoryNo !== undefined) {
+        if (input.inventoryNo === null) {
+          set.inventoryNo = null;
+          set.labelPending = false;
+        } else {
+          const problem = machineNoProblem(before.kind, input.inventoryNo);
+          if (problem) throw new BadRequestException(problem);
+          const norm = canonicalMachineNo(before.kind, input.inventoryNo)!;
+          const [clash] = await tx
+            .select({ id: entity.id, name: entity.name })
+            .from(machineCard)
+            .innerJoin(entity, eq(entity.id, machineCard.entityId))
+            .where(
+              and(
+                sql`upper(regexp_replace(${machineCard.inventoryNo}, '\\s', '', 'g')) = ${norm}`,
+                ne(machineCard.entityId, entityId),
+              ),
+            )
+            .limit(1);
+          if (clash) throw new ConflictException(`Номер ${norm} уже у автомата «${clash.name}»`);
+          set.inventoryNo = norm;
+          set.labelPending = false;
+        }
+      }
+      if (input.confirmLabel === true) {
+        if ((set.inventoryNo ?? before.inventoryNo) === null) throw new BadRequestException("Подтверждать нечего: номера нет");
+        set.labelPending = false;
+      }
+      if (Object.keys(set).length === 0) return before;
+      const [after] = await tx
+        .update(machineCard)
+        .set({ ...set, updatedBy: actorRef, updatedAt: new Date() })
+        .where(eq(machineCard.entityId, entityId))
+        .returning();
+      await tx.insert(auditLog).values({
+        actorKind: actorKindOf(actorRef),
+        actorRef,
+        action: "machine.number_set",
+        target: entityId,
+        before: { inventoryNo: before.inventoryNo, labelPending: before.labelPending },
+        after: { inventoryNo: after!.inventoryNo, labelPending: after!.labelPending },
+      });
+      return after!;
+    });
+  }
+
+  /**
+   * План первоначального присвоения (М-12): всем автоматам с видом и без номера;
+   * по дате заведения карточки, при совпадении — по серийнику. Чтение.
+   */
+  async machineNumberPlan(): Promise<{ id: string; name: string; kind: string; inventoryNo: string }[]> {
+    const rows = await this.db
+      .select({
+        id: entity.id,
+        name: entity.name,
+        createdAt: entity.createdAt,
+        serial: entity.externalRef,
+        kind: machineCard.kind,
+        inventoryNo: machineCard.inventoryNo,
+      })
+      .from(machineCard)
+      .innerJoin(entity, eq(entity.id, machineCard.entityId))
+      .where(eq(entity.type, "machine"));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    return planMachineNumbers(
+      rows.map((r) => ({
+        id: r.id,
+        kind: r.kind,
+        createdAt: r.createdAt.toISOString(),
+        serial: r.serial,
+        inventoryNo: r.inventoryNo,
+      })),
+    ).map((p) => ({ ...p, name: byId.get(p.id)!.name, kind: byId.get(p.id)!.kind }));
+  }
+
+  /**
+   * Присвоить номера по плану — одной транзакцией, у каждого `label_pending`:
+   * номер в системе стоит сразу, наклейка догоняет (М-12, как у узлов). В
+   * журнал — запись на каждый автомат: номер станет личностью автомата, и
+   * «кто его дал» должно читаться с карточки, а не из сводки.
+   */
+  async applyMachineNumberPlan(actorRef = requestActor("owner")): Promise<{ assigned: { id: string; inventoryNo: string }[] }> {
+    const plan = await this.machineNumberPlan();
+    return this.db.transaction(async (tx) => {
+      const assigned: { id: string; inventoryNo: string }[] = [];
+      for (const p of plan) {
+        const [after] = await tx
+          .update(machineCard)
+          .set({ inventoryNo: p.inventoryNo, labelPending: true, updatedBy: actorRef, updatedAt: new Date() })
+          .where(and(eq(machineCard.entityId, p.id), isNull(machineCard.inventoryNo)))
+          .returning();
+        if (!after) continue;
+        await tx.insert(auditLog).values({
+          actorKind: actorKindOf(actorRef),
+          actorRef,
+          action: "machine.number_assigned",
+          target: p.id,
+          before: { inventoryNo: null },
+          after: { inventoryNo: p.inventoryNo, labelPending: true },
+        });
+        assigned.push({ id: p.id, inventoryNo: p.inventoryNo });
+      }
+      return { assigned };
     });
   }
 }
