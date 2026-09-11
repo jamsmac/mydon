@@ -890,7 +890,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           coffee={
             machineCard?.kind === "coffee"
               ? {
-                  linked: coffeeBunkers.length > 0,
+                  hasFills: coffeeBunkers.length > 0,
                   filled: coffeeBunkers.filter((r) => r.netFillWeight !== null).length,
                 }
               : null
@@ -916,10 +916,10 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                 </div>
                 {coffeeBunkers.length === 0 ? (
                   <div className="empty">
-                    <b>Бункеры не привязаны</b>
-                    Ингредиенты кофейного живут в восьми бункерах локации. Уровни появятся,
-                    когда аппарат будет стоять на кофе-локации с заливками — журнал заливок
-                    во вкладке «Кофе-бункеры» рабочего места VendHub.
+                    <b>Заливок по этой точке нет</b>
+                    Ингредиенты кофейного живут в восьми бункерах локации. Привязка к кофе-локации
+                    может быть, а заливок ещё не быть — тогда здесь пусто. Уровни появятся
+                    после первой заливки: вкладка «Кофе-бункеры» рабочего места VendHub.
                   </div>
                 ) : (
                   <>

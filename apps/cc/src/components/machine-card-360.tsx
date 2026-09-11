@@ -109,7 +109,7 @@ export function MachineCard360({
   /** Живой срез Ourvend по этому серийнику — если сбор его приносил. */
   live: VendingMachine | null;
   /** Кофейный: привязка к кофе-точке и сколько бункеров с заливкой. Не кофе — null. */
-  coffee: { linked: boolean; filled: number } | null;
+  coffee: { hasFills: boolean; filled: number } | null;
   planogramCount: number;
   partsCount: number;
   pricesCount: number;
@@ -145,7 +145,7 @@ export function MachineCard360({
     [hasGeo, "Координат нет — не видно на карте", "place"],
     // Содержимое зависит от вида: у кофейного — бункеры точки, у остальных — меню.
     coffee !== null
-      ? [coffee.linked, "Бункеры не привязаны к кофе-локации", "ingredients"]
+      ? [coffee.hasFills, "По этой точке нет ни одной заливки", "ingredients"]
       : [menuCount > 0, "Меню пусто", "menu"],
     [photosCount > 0, "Нет ни одного фото", "passport"],
     [status !== null, "Состояние не проставлено", "place"],
@@ -252,7 +252,7 @@ export function MachineCard360({
                       </div>
                       <div className="foot">
                         <span className="mk" />
-                        {coffee.linked ? "бункеров с заливкой" : "локация не привязана"}
+                        {coffee.hasFills ? "бункеров с заливкой" : "заливок ещё не было"}
                         <span className="go">→</span>
                       </div>
                     </div>
