@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { saveEntity, saveLocation } from "./actions";
+import { mergePlaces, saveEntity, saveLocation } from "./actions";
 
 const mocks = vi.hoisted(() => ({
   entity: vi.fn(),
   updateEntity: vi.fn(),
+  mergePlaces: vi.fn(),
   revalidatePath: vi.fn(),
 }));
 
@@ -12,6 +13,7 @@ vi.mock("../../lib/core", () => ({
   core: {
     entity: mocks.entity,
     updateEntity: mocks.updateEntity,
+    mergePlaces: mocks.mergePlaces,
   },
   CoreUnavailable: class CoreUnavailable extends Error {
     constructor(readonly detail: string) {
@@ -153,5 +155,23 @@ describe("saveLocation: пометки источника у координат 
     mocks.entity.mockResolvedValue(место(перенесено));
     await saveLocation("loc-1", { lat: "41.34", lng: "69.33", address: "Руставели 156" });
     expect(записано()["источник координат"]).toBe("перенесено с автомата KIUT 1");
+  });
+});
+
+describe("mergePlaces: основание проверяется до Core (М-9, М-10)", () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it("«по адресу» — не основание: отказ словами, в Core не ходим", async () => {
+    const res = await mergePlaces("a", "b", "address", "у обоих один адрес, значит одно место");
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/адреса основанием не является/);
+    expect(mocks.mergePlaces).not.toHaveBeenCalled();
+  });
+
+  it("годное основание и причина — уходят в Core как есть", async () => {
+    mocks.mergePlaces.mockResolvedValue({});
+    const res = await mergePlaces("a", "b", "owner_word", "  одно место, слово владельца 10.09  ");
+    expect(res.ok).toBe(true);
+    expect(mocks.mergePlaces).toHaveBeenCalledWith("a", "b", { basis: "owner_word", reason: "одно место, слово владельца 10.09" });
   });
 });

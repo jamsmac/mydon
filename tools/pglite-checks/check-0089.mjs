@@ -9,7 +9,12 @@
 // заменяется pglite: именно он поймал сравнение сырого Result драйвера с []
 // (см. README, «сырую выдачу драйвера нельзя отдавать в deepEqual»).
 import assert from "node:assert/strict";
-import { migratedDb, ENGINE } from "./run-migrations.mjs";
+import { migratedDb, migrationsUpto, ENGINE } from "./run-migrations.mjs";
+
+// Докат — ровно до 0089: сценарий проверяет её рецепт отката («удалить последнюю
+// запись журнала»), а он верен, только пока 0089 последняя. С появлением 0090
+// (волна 2б) докат «до конца» делал последней чужую запись, и откат снимал 0090.
+const ДО_0089 = migrationsUpto(89);
 
 const OWNER = "00000000-0000-0000-0000-00000000a301";
 const ФОТО = "00000000-0000-0000-0000-00000000a389";
@@ -37,7 +42,7 @@ await run(
 // выдачу drizzle-СЕРВИСА, то есть обычный массив.
 assert.deepEqual([...(await колонки())], [], "на 0088 новых колонок ещё нет");
 
-await applyMigrations();
+await applyMigrations(ДО_0089);
 
 let cols = await колонки();
 assert.deepEqual(
@@ -119,7 +124,7 @@ const [n] = await run(`select count(*)::int as n from attachment`);
 assert.equal(n.n, 2, "откат не удаляет строк — файлы остаются");
 
 // Повторный прогон: IF NOT EXISTS + журнал мигратора без 0089 → применяется заново без ошибок.
-await applyMigrations();
+await applyMigrations(ДО_0089);
 cols = await колонки();
 assert.equal(cols.length, 3, "после повторного прогона колонки снова на месте");
 const [idx2] = await run(

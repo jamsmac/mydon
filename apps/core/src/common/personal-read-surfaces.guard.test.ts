@@ -53,6 +53,14 @@ const REGISTRY: Record<string, { category: Category; reason: string }> = {
     category: "OWNER_TOKEN_GATE",
     reason: "domain-less find/byId/pending гейтятся excludePersonal → notPersonalOrg",
   },
+  "entities/place-card.service.ts": {
+    category: "NON_PERSONAL_TABLES",
+    reason: "только place_card и карточки мест/их владельцев по id — места бывают лишь у vendhub, у личного контура мест нет",
+  },
+  "entities/place-merge.service.ts": {
+    category: "WRITE_OR_DEDUP",
+    reason: "читает entity/task ради слияния двух карточек мест (проверки и перенос ссылок), выдачи личных заголовков нет",
+  },
   "tasks/tasks.service.ts": {
     category: "OWNER_TOKEN_GATE",
     reason: "list/byId/overdue/… гейтятся excludePersonal → domain is distinct from 'personal'",

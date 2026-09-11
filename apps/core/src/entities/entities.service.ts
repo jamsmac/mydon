@@ -442,7 +442,12 @@ export class EntitiesService {
     // Слово владельца — единственное, что делает запись реестра фактом. Всё,
     // что завёл не он (выгрузка источника, код, агент), ждёт утверждения:
     // карточка видна, но фактом не считается и помечена отдельно.
-    const fromSource = (dto.createdFrom ?? "").trim();
+    // Агент, объявивший себя в панели (R-H-9), — тоже «не он»: без этой строки
+    // карточка, заведённая агентом, ложилась бы фактом с approvedBy
+    // agent:…, хотя фактом запись делает только слово владельца. `system` и
+    // `tool:` не трогаем: у них свои вызывающие, и они передают createdFrom.
+    const byAgent = actorKindOf(actorRef) === "agent";
+    const fromSource = (dto.createdFrom ?? "").trim() || (byAgent ? actorRef : "");
     const byOwner = fromSource.length === 0;
     return this.db.transaction(async (tx) => {
       const [created] = await tx

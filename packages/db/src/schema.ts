@@ -2473,6 +2473,32 @@ export const machineCard = pgTable("machine_card", {
 });
 
 /**
+ * Карточка места — то, что относится ТОЛЬКО к местам (волна 2б, М-1…М-3, М-11).
+ *
+ * Тем же приёмом, что `machine_card`: отдельная тонкая таблица, а не ключ в
+ * `attrs` — ссылку на контрагента надо соединять запросом («все места KIUT»),
+ * а строка в jsonb без внешнего ключа молча пережила бы удаление контрагента.
+ * Вид места остаётся `entity.type` (причина — `place-kinds.ts`).
+ *
+ * `contractor_id` необязателен ПО СХЕМЕ, но смысл пустоты один: «не знаем, чьё
+ * помещение». Для наших складов и мастерских ставится карточка собственной
+ * компании (`own_company`, М-11) — «наше» это ответ, а не пустота.
+ */
+export const placeCard = pgTable(
+  "place_card",
+  {
+    entityId: uuid("entity_id")
+      .primaryKey()
+      .references(() => entity.id, { onDelete: "cascade" }),
+    contractorId: uuid("contractor_id").references(() => entity.id),
+    updatedBy: text("updated_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("place_card_contractor_idx").on(t.contractorId)],
+);
+
+/**
  * `vending_refill` — ФАКТ заливки автомата сотрудником (WAREHOUSE_SPEC §4.1).
  *
  * Своя таблица, а не апдейт `machine_slot`, по одной причине: зеркало Ourvend
@@ -3809,6 +3835,7 @@ export const schema = {
   vendingAlias,
   machineSlot,
   machineCard,
+  placeCard,
   slotSnapshot,
   productSale,
   machineSale,

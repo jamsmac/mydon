@@ -1,15 +1,20 @@
-import { Body, Controller, Delete, Get, Inject, Param, ParseUUIDPipe, Patch, Post, Query, Req } from "@nestjs/common";
-import { ArrayMaxSize, IsArray, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from "class-validator";
+import { Body, Controller, Delete, Get, Inject, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req } from "@nestjs/common";
+import { ArrayMaxSize, IsArray, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, MinLength, ValidateIf } from "class-validator";
 import type { Request } from "express";
 import {
   MACHINE_KINDS,
   MACHINE_STATUSES,
+  MERGE_BASES,
+  MERGE_REASON_MIN,
   type MachineKind,
   type MachineStatus,
+  type MergeBasis,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { excludePersonal } from "../common/owner-enforcement";
 import { EntitiesService } from "./entities.service";
+import { PlaceCardService } from "./place-card.service";
+import { PlaceMergeService } from "./place-merge.service";
 import { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
 import { requestActor } from "../common/request-actor";
 
@@ -81,11 +86,30 @@ export class ApproveBatchDto {
   ids!: string[];
 }
 
+/** Владелец места; `null` — снять («не знаем, чьё помещение»). */
+export class SetPlaceContractorDto {
+  @ValidateIf((_, v) => v !== null)
+  @IsUUID()
+  contractorId!: string | null;
+}
+
+export class MergePlacesDto {
+  @IsIn([...MERGE_BASES])
+  basis!: MergeBasis;
+
+  @IsString()
+  @MinLength(MERGE_REASON_MIN)
+  @MaxLength(500)
+  reason!: string;
+}
+
 @Controller("entities")
 export class EntitiesController {
   constructor(
     private readonly entities: EntitiesService,
     @Inject(DB) private readonly db: Db,
+    private readonly placeCards: PlaceCardService,
+    private readonly placeMerge: PlaceMergeService,
   ) {}
 
   /**
@@ -196,6 +220,41 @@ export class EntitiesController {
   @Post("places/adopt-machine-coords")
   adoptMachineCoords() {
     return this.entities.adoptMachineCoords({ dryRun: false });
+  }
+
+  // ── Место и его контрагент (волна 2б, М-1, М-2, М-11) ──────────────────────
+
+  /** Владельцы всех мест одним запросом. */
+  @Get("place-cards/owners")
+  placeOwners() {
+    return this.placeCards.owners();
+  }
+
+  @Get(":id/places-owned")
+  placesOwned(@Param("id", ParseUUIDPipe) id: string) {
+    return this.placeCards.placesOf(id);
+  }
+
+  @Put(":id/place-card")
+  setPlaceContractor(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetPlaceContractorDto) {
+    return this.placeCards.setContractor(id, dto.contractorId ?? null);
+  }
+
+  // ── Слияние карточек одного места (М-9, М-10) ─────────────────────────────
+
+  /** Предпросмотр: что переедет и что мешает. Чтение — ничего не пишет. */
+  @Get(":id/merge-into/:targetId")
+  mergePreview(@Param("id", ParseUUIDPipe) id: string, @Param("targetId", ParseUUIDPipe) targetId: string) {
+    return this.placeMerge.preview(id, targetId);
+  }
+
+  @Post(":id/merge-into/:targetId")
+  merge(
+    @Param("id", ParseUUIDPipe) id: string,
+    @Param("targetId", ParseUUIDPipe) targetId: string,
+    @Body() dto: MergePlacesDto,
+  ) {
+    return this.placeMerge.merge(id, targetId, { basis: dto.basis, reason: dto.reason });
   }
 
   @Get("machine-cards/all")
