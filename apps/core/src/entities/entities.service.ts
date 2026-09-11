@@ -710,8 +710,20 @@ export class EntitiesService {
       .from(entity)
       .where(inArray(entity.type, [...PLACE_TYPES, "machine"]));
     const geos = await this.geoFor(rows.map((r) => r.id));
+    // Когда координаты автомата записаны последний раз — правило «старше
+    // приезда» (planCoordAdoption) отсекает координаты прежней точки.
+    const machineIds = rows.filter((r) => r.type === "machine").map((r) => r.id);
+    const geoWritten = new Map(
+      (machineIds.length === 0
+        ? []
+        : await this.db
+            .select({ entityId: geoPoint.entityId, updatedAt: geoPoint.updatedAt })
+            .from(geoPoint)
+            .where(inArray(geoPoint.entityId, machineIds))
+      ).map((g) => [g.entityId, tashkentDay(g.updatedAt)]),
+    );
     const open = await this.db
-      .select({ placeId: machinePlacement.locationId, machineId: machinePlacement.entityId })
+      .select({ placeId: machinePlacement.locationId, machineId: machinePlacement.entityId, since: machinePlacement.startDate })
       .from(machinePlacement)
       .where(isNull(machinePlacement.endDate));
 
@@ -723,7 +735,13 @@ export class EntitiesService {
         .filter((r) => r.type === "machine")
         .map((r) => {
           const g = geos.get(r.id);
-          return { id: r.id, name: r.name, attrs: r.attrs as Record<string, unknown>, geo: g ? { lat: g.lat, lng: g.lng } : null };
+          return {
+            id: r.id,
+            name: r.name,
+            attrs: r.attrs as Record<string, unknown>,
+            geo: g ? { lat: g.lat, lng: g.lng } : null,
+            coordsSetOn: geoWritten.get(r.id) ?? null,
+          };
         }),
       open,
     });

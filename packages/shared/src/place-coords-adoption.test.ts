@@ -115,6 +115,46 @@ describe("перенос координат с автомата на его ме
     assert.deepEqual(plan, { adopt: [], conflicts: [], nothingToAdopt: [] });
   });
 
+  it("координаты старше приезда — от прежней точки: не переносим, называем даты (склад 11.09)", () => {
+    const plan = planCoordAdoption({
+      places: [place("sklad", { type: "warehouse" })],
+      machines: [{ ...machine("m1", 41.27251, 69.34989), coordsSetOn: "2026-08-19" }],
+      open: [{ placeId: "sklad", machineId: "m1", since: "2026-09-09" }],
+    });
+    assert.deepEqual(plan.adopt, []);
+    assert.match(plan.conflicts[0]!.reason, /старше его приезда сюда \(записаны 19\.08\.2026, стоит здесь с 09\.09\.2026\)/);
+  });
+
+  it("координаты записаны в день приезда или позже — переносим; дата приезда неизвестна — тоже", () => {
+    const plan = planCoordAdoption({
+      places: [place("ofb"), place("olma")],
+      machines: [
+        { ...machine("m1", 41.2827, 69.33678), coordsSetOn: "2026-08-19" },
+        { ...machine("m2", 41.18234, 69.12856), coordsSetOn: "2026-09-09" },
+      ],
+      open: [
+        { placeId: "ofb", machineId: "m1", since: "2026-08-19" },
+        { placeId: "olma", machineId: "m2", since: null },
+      ],
+    });
+    assert.deepEqual(plan.adopt.map((a) => a.placeId), ["ofb", "olma"]);
+  });
+
+  it("свежий и устаревший автомат на одном месте — решает свежий", () => {
+    const plan = planCoordAdoption({
+      places: [place("p")],
+      machines: [
+        { ...machine("old", 41.1, 69.1), coordsSetOn: "2026-08-01" },
+        { ...machine("new", 41.33, 69.28), coordsSetOn: "2026-09-05" },
+      ],
+      open: [
+        { placeId: "p", machineId: "old", since: "2026-09-01" },
+        { placeId: "p", machineId: "new", since: "2026-09-01" },
+      ],
+    });
+    assert.deepEqual(plan.adopt.map((a) => [a.fromMachineId, a.lat]), [["new", 41.33]]);
+  });
+
   it("пометка источника называет автомат и день по-русски", () => {
     assert.equal(adoptedCoordsSource("Olma Администрация", "2026-09-11"), "перенесено с автомата «Olma Администрация» 11.09.2026");
   });

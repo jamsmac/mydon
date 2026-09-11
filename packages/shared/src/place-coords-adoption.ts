@@ -15,7 +15,14 @@ import { isPlaceType, PLACE_ATTR } from "./place-kinds";
  * - у места координаты уже есть — не трогаем: координаты места главнее;
  * - на месте автоматы с РАЗНЫМИ координатами — конфликт, не выбираем;
  * - координаты автомата вне Узбекистана — конфликт («перепутаны местами»),
- *   а не перенос ошибки на место.
+ *   а не перенос ошибки на место;
+ * - координаты СТАРШЕ приезда автомата сюда — не переносим: их вводили, пока
+ *   он стоял на прежней точке. Так на проде 11.09 оба автомата «Основного
+ *   склада» приехали 09.09 с координатами от 19.08 — это координаты точек
+ *   продаж, а не склада. Дата координат — последняя правка карточки
+ *   (`geo_point.updated_at`): «правка раньше приезда» ДОКАЗЫВАЕТ, что
+ *   координаты старше периода; обратное не доказывает ничего, но и
+ *   опровергнуть нечем — такой случай переносим.
  *
  * Перенесённое помечается источником (R-H-8): это не слово человека о месте,
  * а след ввода у автомата.
@@ -35,6 +42,8 @@ export interface AdoptionMachine {
   name: string;
   attrs: Record<string, unknown> | null;
   geo: Coord | null;
+  /** День последней записи координат автомата (YYYY-MM-DD), если известен. */
+  coordsSetOn?: string | null;
 }
 
 export interface Adoption {
@@ -83,14 +92,14 @@ function nonEmpty(v: unknown): string | null {
 export function planCoordAdoption(input: {
   places: AdoptionPlace[];
   machines: AdoptionMachine[];
-  /** Открытые периоды: какой автомат стоит на каком месте сейчас. */
-  open: { placeId: string; machineId: string }[];
+  /** Открытые периоды: какой автомат стоит на каком месте сейчас и с какого дня (null — неизвестно). */
+  open: { placeId: string; machineId: string; since?: string | null }[];
 }): AdoptionPlan {
   const machines = new Map(input.machines.map((m) => [m.id, m]));
-  const onPlace = new Map<string, AdoptionMachine[]>();
+  const onPlace = new Map<string, { m: AdoptionMachine; since: string | null }[]>();
   for (const o of input.open) {
     const m = machines.get(o.machineId);
-    if (m) onPlace.set(o.placeId, [...(onPlace.get(o.placeId) ?? []), m]);
+    if (m) onPlace.set(o.placeId, [...(onPlace.get(o.placeId) ?? []), { m, since: o.since ?? null }]);
   }
 
   const plan: AdoptionPlan = { adopt: [], conflicts: [], nothingToAdopt: [] };
@@ -98,14 +107,27 @@ export function planCoordAdoption(input: {
     if (!isPlaceType(place.type)) continue;
     if (place.hasGeo || coordFromAttrs(place.attrs).coord !== null) continue;
 
-    const withCoords = (onPlace.get(place.id) ?? [])
-      .map((m) => ({ m, c: machineCoord(m) }))
-      .filter((x): x is { m: AdoptionMachine; c: Coord } => x.c !== null);
-    if (withCoords.length === 0) {
+    const allWithCoords = (onPlace.get(place.id) ?? [])
+      .map(({ m, since }) => ({ m, since, c: machineCoord(m) }))
+      .filter((x): x is { m: AdoptionMachine; since: string | null; c: Coord } => x.c !== null);
+    if (allWithCoords.length === 0) {
       plan.nothingToAdopt.push({ id: place.id, name: place.name });
       continue;
     }
-    const listed = withCoords.map(({ m, c }) => ({ id: m.id, name: m.name, lat: c.lat, lng: c.lng }));
+    const listed = allWithCoords.map(({ m, c }) => ({ id: m.id, name: m.name, lat: c.lat, lng: c.lng }));
+    const olderThanArrival = (x: { m: AdoptionMachine; since: string | null }) =>
+      x.m.coordsSetOn != null && x.since !== null && x.m.coordsSetOn < x.since;
+    const withCoords = allWithCoords.filter((x) => !olderThanArrival(x));
+    if (withCoords.length === 0) {
+      const x = allWithCoords[0]!;
+      plan.conflicts.push({
+        placeId: place.id,
+        placeName: place.name,
+        reason: `координаты автомата старше его приезда сюда (записаны ${ruDay(x.m.coordsSetOn!)}, стоит здесь с ${ruDay(x.since!)}) — вероятно, от прежней точки`,
+        machines: listed,
+      });
+      continue;
+    }
 
     const outside = withCoords.filter(({ c }) => !inUzbekistan(c));
     if (outside.length > 0) {
@@ -140,8 +162,12 @@ export function planCoordAdoption(input: {
   return plan;
 }
 
+function ruDay(dayIso: string): string {
+  const [y, m, d] = dayIso.split("-");
+  return `${d}.${m}.${y}`;
+}
+
 /** Текст пометки у перенесённых координат: откуда и когда. */
 export function adoptedCoordsSource(machineName: string, dayIso: string): string {
-  const [y, m, d] = dayIso.split("-");
-  return `перенесено с автомата «${machineName}» ${d}.${m}.${y}`;
+  return `перенесено с автомата «${machineName}» ${ruDay(dayIso)}`;
 }
