@@ -2,8 +2,8 @@
 
 import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
-import { isPlaceType, isUnit, parseMenu, PLACE_ATTR, type RecipeLine } from "@mydon/shared";
-import { core, CoreUnavailable } from "../../lib/core";
+import { isPlaceType, isUnit, mergeRequestProblem, parseMenu, PLACE_ATTR, type MergeBasis, type RecipeLine } from "@mydon/shared";
+import { core, CoreUnavailable, type PlaceMergePreview } from "../../lib/core";
 import { ADDRESS_SOURCE_MAP, GEOCODER_USER_AGENT, NOMINATIM_REVERSE, formatReverse } from "../../lib/geocode";
 
 export interface CreateResult {
@@ -957,4 +957,53 @@ export async function applyCoordAdoption(): Promise<{ ok: true; applied: number;
   } catch (err) {
     return { ok: false, error: err instanceof CoreUnavailable ? err.detail : String(err) };
   }
+}
+
+/** Владелец места (М-2, М-11); `null` — снять: «не знаем, чьё помещение». */
+export async function setPlaceContractor(placeId: string, contractorId: string | null): Promise<ActionResult> {
+  try {
+    await core.setPlaceContractor(placeId, contractorId);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${placeId}`);
+  revalidatePath("/places");
+  return { ok: true };
+}
+
+/** Что переедет при слиянии и что мешает — до нажатия, а не после (М-9). */
+export async function previewPlaceMerge(
+  sourceId: string,
+  targetId: string,
+): Promise<{ ok: true; preview: PlaceMergePreview } | { ok: false; error: string }> {
+  try {
+    return { ok: true, preview: await core.mergePreview(sourceId, targetId) };
+  } catch (err) {
+    return { ok: false, error: err instanceof CoreUnavailable ? err.detail : String(err) };
+  }
+}
+
+/**
+ * Слить карточку места в другую (М-9). Основание и причина обязательны;
+ * совпадение адреса основанием не является (М-10). Проверки — в Core, здесь
+ * их повторяет только общая `mergeRequestProblem`, чтобы отказ пришёл сразу.
+ */
+export async function mergePlaces(
+  sourceId: string,
+  targetId: string,
+  basis: string,
+  reason: string,
+): Promise<ActionResult> {
+  const problem = mergeRequestProblem({ sourceId, targetId, basis, reason });
+  if (problem) return { ok: false, error: problem };
+  try {
+    await core.mergePlaces(sourceId, targetId, { basis: basis as MergeBasis, reason: reason.trim() });
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${sourceId}`);
+  revalidatePath(`/card/${targetId}`);
+  revalidatePath("/places");
+  revalidatePath("/domain/vendhub");
+  return { ok: true };
 }

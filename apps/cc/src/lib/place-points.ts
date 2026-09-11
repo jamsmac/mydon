@@ -1,4 +1,4 @@
-import { coordFromAttrs, isPlaceType } from "@mydon/shared";
+import { coordFromAttrs, isMergedPlace, isPlaceType } from "@mydon/shared";
 import type { CoffeePlacementRow, Entity } from "./core";
 import { KIND_COLOR, machineKindOf, type MachineKind } from "./machine-points";
 
@@ -61,7 +61,9 @@ export function placePoints(places: Entity[], machines: Entity[], placements: Co
   const onPlace = machinesByPlace(machines, placements);
   const out: PlacePoint[] = [];
   for (const p of places) {
-    if (!isPlaceType(p.type)) continue;
+    // Слитая карточка (М-9) — не место на земле, а закрытый дубль: его история
+    // переехала на целевую, точки на карте у него быть не должно.
+    if (!isPlaceType(p.type) || isMergedPlace(p.attrs)) continue;
     const c = placeCoord(p);
     if (!c) continue;
     const here = onPlace.get(p.id) ?? [];
@@ -84,7 +86,8 @@ export function placePoints(places: Entity[], machines: Entity[], placements: Co
  * «Без места» и «место без координат» — разные поломки с разными починками:
  * первое чинится в «Где стоит» автомата, второе — в карточке места.
  */
-export function placeMapCounts(places: Entity[], machines: Entity[], placements: CoffeePlacementRow[]) {
+export function placeMapCounts(allPlaces: Entity[], machines: Entity[], placements: CoffeePlacementRow[]) {
+  const places = allPlaces.filter((p) => !isMergedPlace(p.attrs));
   const pts = placePoints(places, machines, placements);
   const onMapPlaces = new Set(pts.map((p) => p.id));
   const onPlace = machinesByPlace(machines, placements);

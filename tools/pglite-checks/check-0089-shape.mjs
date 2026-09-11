@@ -20,7 +20,12 @@
 // Где прогонялось (08.09.2026): pglite 17.5 и локальный кластер PostgreSQL 15.14
 // через CHECKS_DATABASE_URL. postgres:17 — за CI (Docker в этой среде не отвечает).
 import assert from "node:assert/strict";
-import { migratedDb, ENGINE } from "./run-migrations.mjs";
+import { migratedDb, migrationsUpto, ENGINE } from "./run-migrations.mjs";
+
+// Докат — ровно до 0089: сценарий проверяет её рецепт отката («удалить последнюю
+// запись журнала»), а он верен, только пока 0089 последняя. С появлением 0090
+// (волна 2б) докат «до конца» делал последней чужую запись, и откат снимал 0090.
+const ДО_0089 = migrationsUpto(89);
 
 const OWNER = "00000000-0000-0000-0000-00000000a301";
 const ФОТО = "00000000-0000-0000-0000-00000000a389";
@@ -73,7 +78,7 @@ const ОПЫТЫ = [
 for (const опыт of ОПЫТЫ) {
   await run(опыт.дрейф);
   await assert.rejects(
-    applyMigrations(),
+    applyMigrations(ДО_0089),
     (e) => {
       const текст = `${e?.message ?? ""} ${e?.cause?.message ?? ""} ${e?.cause?.hint ?? ""}`;
       for (const re of опыт.ждём) assert.match(текст, re, `${опыт.имя}: в сообщении нет ${re}`);
@@ -91,7 +96,7 @@ for (const опыт of ОПЫТЫ) {
 }
 
 // Расхождений нет — та же миграция применяется без единой правки.
-await applyMigrations();
+await applyMigrations(ДО_0089);
 assert.deepEqual(
   await форма(),
   [
@@ -104,7 +109,7 @@ assert.deepEqual(
 assert.equal(await записей(), 90, "журнал мигратора: 0000…0089 = 90 записей");
 // Повторный прогон на УЖЕ применённой 0089: заставы обязаны молчать, иначе они
 // сами повесили бы автодеплой на второй попытке.
-await applyMigrations();
+await applyMigrations(ДО_0089);
 assert.equal(await записей(), 90, "повторный прогон задвоил запись журнала");
 
 console.log(

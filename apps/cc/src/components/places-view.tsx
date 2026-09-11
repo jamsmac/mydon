@@ -1,6 +1,13 @@
 import Link from "next/link";
-import { PLACE_TYPES, PLACE_TYPE_HINTS, PLACE_TYPE_LABELS, placeTypeLabel, type AdoptionPlan } from "@mydon/shared";
-import { core, CoreUnavailable, type CoffeePlacementRow, type Entity } from "../lib/core";
+import {
+  PLACE_TYPES,
+  PLACE_TYPE_HINTS,
+  PLACE_TYPE_LABELS,
+  isMergedPlace,
+  placeTypeLabel,
+  type AdoptionPlan,
+} from "@mydon/shared";
+import { core, CoreUnavailable, type CoffeePlacementRow, type Entity, type PlaceOwnerRow } from "../lib/core";
 import { CoreDown } from "./core-down";
 import { NewPlaceForm } from "./place-new";
 import { CoordAdoption } from "./coord-adoption";
@@ -28,6 +35,7 @@ import { mapTilesFromEnv } from "../lib/map-tiles";
  */
 export async function PlacesView() {
   let byType: { type: string; rows: Entity[] }[] = [];
+  let слитых = 0;
   // Кто где стоит СЕЙЧАС. Одним запросом на все виды мест: `placements` не
   // фильтрует по типу, поэтому склады и мастерские попадают наравне с точками.
   let стоятНаМесте = new Map<string, CoffeePlacementRow[]>();
@@ -35,7 +43,10 @@ export async function PlacesView() {
     const списки = await Promise.all(
       PLACE_TYPES.map(async (t) => ({ type: t, rows: await core.entitiesOfType("vendhub", t) })),
     );
-    byType = списки;
+    // Слитые карточки (М-9) — закрытые дубли: их история уже на целевой.
+    // В списке мест их нет; счёт — одной строкой ниже, чтобы не пропадали молча.
+    слитых = списки.reduce((n, g) => n + g.rows.filter((r) => isMergedPlace(r.attrs)).length, 0);
+    byType = списки.map((g) => ({ ...g, rows: g.rows.filter((r) => !isMergedPlace(r.attrs)) }));
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
@@ -46,6 +57,14 @@ export async function PlacesView() {
     стоятНаМесте = карта;
   } catch {
     // Состав места — дополнение: без него список мест всё равно нужен.
+  }
+
+  // Чьё место (М-2): владелец — контрагент или наша компания. Дополнение.
+  let владельцы = new Map<string, PlaceOwnerRow>();
+  try {
+    владельцы = new Map((await core.placeOwners()).map((o) => [o.entityId, o]));
+  } catch {
+    // без владельцев список мест всё равно нужен
   }
 
   // План переноса координат с автоматов (М-4). Дополнение: не пришёл — блока нет.
@@ -73,7 +92,7 @@ export async function PlacesView() {
         <p>
           {всего === 0
             ? "Мест пока нет. Заведите склад, мастерскую и локации продаж — автоматы будут стоять на них."
-            : `Мест ${всего} · занято ${занятых} · с координатами ${сКоординатами}`}
+            : `Мест ${всего} · занято ${занятых} · с координатами ${сКоординатами}${слитых > 0 ? ` · слито дублей ${слитых}` : ""}`}
         </p>
         {/* Подпись разводит дубль: склады есть и здесь, и в «Номенклатуре».
             Вопросы разные — «где физически» против «сколько заведено». */}
@@ -114,6 +133,7 @@ export async function PlacesView() {
               <thead>
                 <tr>
                   <th>Название</th>
+                  <th>Чьё</th>
                   <th>Аппараты</th>
                   <th>Адрес</th>
                   <th>Координаты</th>
@@ -125,6 +145,13 @@ export async function PlacesView() {
                   <tr key={r.id}>
                     <td>
                       <Link href={`/card/${r.id}`}>{r.name}</Link>
+                    </td>
+                    <td>
+                      {владельцы.get(r.id)?.contractorName ? (
+                        <Link href={`/card/${владельцы.get(r.id)?.contractorId ?? ""}`}>{владельцы.get(r.id)?.contractorName}</Link>
+                      ) : (
+                        <span className="hint">не знаем</span>
+                      )}
                     </td>
                     <td>
                       {(стоятНаМесте.get(r.id) ?? []).length === 0 ? (

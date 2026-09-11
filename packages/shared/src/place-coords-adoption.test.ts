@@ -106,6 +106,15 @@ describe("перенос координат с автомата на его ме
     );
   });
 
+  it("слитая карточка в перенос не попадает — её история уже на целевой", () => {
+    const plan = planCoordAdoption({
+      places: [place("dup", { attrs: { "слита в": "real" } })],
+      machines: [machine("m1", 41.3, 69.2)],
+      open: [{ placeId: "dup", machineId: "m1" }],
+    });
+    assert.deepEqual(plan, { adopt: [], conflicts: [], nothingToAdopt: [] });
+  });
+
   it("не места (контрагент) в перенос не попадают", () => {
     const plan = planCoordAdoption({
       places: [place("c", { type: "contractor" })],

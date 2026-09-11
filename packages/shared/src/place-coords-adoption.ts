@@ -1,5 +1,6 @@
 import { coordFromAttrs, type Coord } from "./geo";
 import { isPlaceType, PLACE_ATTR } from "./place-kinds";
+import { isMergedPlace } from "./place-merge";
 
 /**
  * Разовый перенос координат с автоматов на их места (волна 2, М-4).
@@ -104,7 +105,7 @@ export function planCoordAdoption(input: {
 
   const plan: AdoptionPlan = { adopt: [], conflicts: [], nothingToAdopt: [] };
   for (const place of input.places) {
-    if (!isPlaceType(place.type)) continue;
+    if (!isPlaceType(place.type) || isMergedPlace(place.attrs)) continue;
     if (place.hasGeo || coordFromAttrs(place.attrs).coord !== null) continue;
 
     const allWithCoords = (onPlace.get(place.id) ?? [])

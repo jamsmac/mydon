@@ -22,6 +22,8 @@ import { MachineCard360 } from "../../../components/machine-card-360";
 import { ProductCard360 } from "../../../components/product-card-360";
 import { LocationPanel } from "../../../components/location-panel";
 import { PlaceCoords } from "../../../components/place-coords";
+import { PlaceOwnership, type OwnerOption } from "../../../components/place-ownership";
+import { PlaceMerge } from "../../../components/place-merge";
 import { mapTilesFromEnv } from "../../../lib/map-tiles";
 import { BunkerTiles } from "../../../components/bunker-tiles";
 import {
@@ -52,8 +54,11 @@ import { MachineCardPanel } from "../../../components/machine-card-panel";
 import { MachinePartsPanel } from "../../../components/machine-parts-panel";
 import { StocktakeSession } from "../../../components/stocktake-session";
 import {
+  MERGE_ATTR,
   PLACE_ATTR,
   PLACE_TYPES,
+  contractorInDirection,
+  isMergedPlace,
   cardPrice,
   matchContractorByName,
   normalizeMachineSerial,
@@ -148,7 +153,9 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     if (domain) {
       try {
         const списки = await Promise.all(PLACE_TYPES.map((t) => core.entitiesOfType(domain, t)));
-        placeEntities = списки.flat();
+        // Слитые карточки (М-9) в выбор места не попадают: поставить автомат на
+        // закрытый дубль значило бы снова разложить историю по двум карточкам.
+        placeEntities = списки.flat().filter((e) => !isMergedPlace(e.attrs));
         places = placeEntities
           .map((e) => ({ id: e.id, name: e.name, type: e.type }))
           .sort((a, b) => a.name.localeCompare(b.name, "ru"));
@@ -437,6 +444,44 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       }));
     } catch {
       placements = [];
+    }
+  }
+
+  // Чьё место и слияние карточек одного места (волна 2б, М-2, М-9, М-11).
+  // Дополнение: не пришло — секции нет, карточка места остаётся.
+  const mergedInto = isPlace ? String(a[MERGE_ATTR.mergedInto] ?? "") : "";
+  let mergedIntoName: string | null = null;
+  let placeOwner: { id: string; name: string } | null = null;
+  let ownerOptions: OwnerOption[] = [];
+  let mergeCandidates: { id: string; name: string }[] = [];
+  if (isPlace && mergedInto !== "") {
+    try {
+      mergedIntoName = (await core.entity(mergedInto)).name;
+    } catch {
+      mergedIntoName = null;
+    }
+  } else if (isPlace) {
+    try {
+      const [owners, contractors, ours, same] = await Promise.all([
+        core.placeOwners(),
+        core.contractorsAll(),
+        core.ownCompaniesAll(),
+        entity.domain ? core.entitiesOfType(entity.domain, entity.type) : Promise.resolve([] as Entity[]),
+      ]);
+      const mine = owners.find((o) => o.entityId === entity.id);
+      if (mine?.contractorId && mine.contractorName) placeOwner = { id: mine.contractorId, name: mine.contractorName };
+      ownerOptions = [
+        ...ours.map((e) => ({ id: e.id, name: e.name, type: "own_company" as const, approved: e.approvedAt !== null })),
+        ...contractors
+          .filter((e) => !entity.domain || contractorInDirection(e, entity.domain) || e.id === placeOwner?.id)
+          .map((e) => ({ id: e.id, name: e.name, type: "contractor" as const, approved: e.approvedAt !== null })),
+      ].sort((x, y) => x.name.localeCompare(y.name, "ru"));
+      mergeCandidates = same
+        .filter((e) => e.id !== entity.id && !isMergedPlace(e.attrs))
+        .map((e) => ({ id: e.id, name: e.name }))
+        .sort((x, y) => x.name.localeCompare(y.name, "ru"));
+    } catch {
+      ownerOptions = [];
     }
   }
 
@@ -1058,7 +1103,33 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
 
       {isContractor && <ContractorFinance contracts={contractorContracts} flows={contractorFlows} />}
 
+      {isPlace && mergedInto !== "" && (
+        <div className="card" id="merged" data-toc="Слита">
+          <div className="result-title">Карточка слита</div>
+          <p>
+            Это место заведено дважды и слито в{" "}
+            <Link href={`/card/${mergedInto}`}>{mergedIntoName ?? "другую карточку"}</Link>
+            {typeof a[MERGE_ATTR.mergedOn] === "string" ? ` ${String(a[MERGE_ATTR.mergedOn]).split("-").reverse().join(".")}` : ""}. Вся
+            история — там; эта карточка закрыта и в выборе мест не показывается.
+          </p>
+        </div>
+      )}
+
+      {isPlace && mergedInto === "" && ownerOptions.length > 0 && (
+        <div className="card" id="owner" data-toc="Чьё место">
+          <div className="result-title">Чьё место</div>
+          <PlaceOwnership placeId={entity.id} placeName={entity.name} current={placeOwner} options={ownerOptions} />
+        </div>
+      )}
+
       {isPlace && <PlacePlacements rows={placements} />}
+
+      {isPlace && mergedInto === "" && mergeCandidates.length > 0 && (
+        <details className="card" id="merge">
+          <summary className="result-title">Слить с другой карточкой этого же места</summary>
+          <PlaceMerge sourceId={entity.id} sourceName={entity.name} candidates={mergeCandidates} />
+        </details>
+      )}
 
       {isSupplier && <SupplierProducts rows={supplierProducts} />}
 

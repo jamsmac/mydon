@@ -67,6 +67,11 @@ describe("точки карты — места (М-4)", () => {
     expect(placePoints([swapped, contractor], [], [])).toEqual([]);
   });
 
+  it("слитая карточка (М-9) — не место на земле: точки нет", () => {
+    const merged = ent("dup", "location", { ...geo(41.32, 69.3), attrs: { "слита в": "real", выключена: true } });
+    expect(placePoints([merged], [], [])).toEqual([]);
+  });
+
   it("пока geo нет — координаты места из attrs", () => {
     const place = ent("old", "warehouse", { attrs: { широта: "41.30", долгота: "69.25" } });
     expect(placePoints([place], [], [])[0]).toMatchObject({ lat: 41.3, lng: 69.25 });

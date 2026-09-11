@@ -92,17 +92,25 @@ const engine = await (PG_URL ? postgresEngine() : pgliteEngine());
 /** Где гоняются сценарии — печатается в их выводе, чтобы «зелёное» нельзя было спутать. */
 export const ENGINE = PG_URL ? "postgres" : "pglite";
 
-export async function migratedDb({ upto, schema } = {}) {
+/**
+ * Папка миграций «до N включительно». Нужна не только для старта базы, но и
+ * для ДОКАТА: сценарий, который проверяет рецепт одной миграции (0089 —
+ * «откат = удалить последнюю запись журнала»), обязан докатывать ровно до неё,
+ * иначе с появлением следующей миграции «последняя запись» перестаёт быть его.
+ */
+export function migrationsUpto(upto) {
   const source = path.join(REPO, "packages/db/drizzle");
-  let folder = source;
-  if (upto !== undefined) {
-    folder = fs.mkdtempSync(path.join(os.tmpdir(), "mig-upto-"));
-    fs.mkdirSync(path.join(folder, "meta"));
-    for (const f of fs.readdirSync(source)) { const m = /^(\d{4})_.+\.sql$/.exec(f); if (m && Number(m[1]) <= upto) fs.copyFileSync(path.join(source, f), path.join(folder, f)); }
-    const j = JSON.parse(fs.readFileSync(path.join(source, "meta/_journal.json"), "utf8"));
-    j.entries = j.entries.filter((e) => e.idx <= upto);
-    fs.writeFileSync(path.join(folder, "meta/_journal.json"), JSON.stringify(j, null, 2));
-  }
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "mig-upto-"));
+  fs.mkdirSync(path.join(folder, "meta"));
+  for (const f of fs.readdirSync(source)) { const m = /^(\d{4})_.+\.sql$/.exec(f); if (m && Number(m[1]) <= upto) fs.copyFileSync(path.join(source, f), path.join(folder, f)); }
+  const j = JSON.parse(fs.readFileSync(path.join(source, "meta/_journal.json"), "utf8"));
+  j.entries = j.entries.filter((e) => e.idx <= upto);
+  fs.writeFileSync(path.join(folder, "meta/_journal.json"), JSON.stringify(j, null, 2));
+  return folder;
+}
+
+export async function migratedDb({ upto, schema } = {}) {
+  const folder = upto !== undefined ? migrationsUpto(upto) : path.join(REPO, "packages/db/drizzle");
   const built = await engine(folder, schema);
   return { ...built, folder };
 }

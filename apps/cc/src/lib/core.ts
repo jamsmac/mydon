@@ -23,7 +23,7 @@ import type {
   ShrinkReport as VendingShrinkageReport,
   StockCountsReport,
 } from "@mydon/shared";
-import { ACTOR_HEADER, MAX_FIND_LIMIT, type AdoptionPlan } from "@mydon/shared";
+import { ACTOR_HEADER, MAX_FIND_LIMIT, type AdoptionPlan, type MergeBasis } from "@mydon/shared";
 import { collectAllTaskPages } from "./task-pagination";
 import { resolveActor } from "./actor";
 import { resolveOwner } from "./owner";
@@ -652,6 +652,23 @@ export interface NormFactReport {
 }
 
 /** Период размещения аппарата на точке. endDate=null — стоит сейчас. */
+export interface PlaceOwnerRow {
+  entityId: string;
+  contractorId: string | null;
+  contractorName: string | null;
+  contractorType: string | null;
+}
+
+export interface PlaceMergePreview {
+  source: { id: string; name: string; type: string };
+  target: { id: string; name: string; type: string };
+  /** «таблица.колонка» → сколько строк переедет. */
+  moves: Record<string, number>;
+  /** Препятствия; есть хоть одно — слияние откажет. */
+  blockers: string[];
+  geo: "target_keeps" | "moved_from_source" | "none";
+}
+
 export interface CoffeePlacementRow {
   id: string;
   locationId: string;
@@ -3284,6 +3301,17 @@ export const core = {
   /** Перенос координат с автоматов на места (М-4): план — чтением, применение — записью. */
   coordAdoptionPlan: () => get<AdoptionPlan & { applied: string[] }>("/entities/places/adopt-machine-coords"),
   applyCoordAdoption: () => send<AdoptionPlan & { applied: string[] }>("/entities/places/adopt-machine-coords", "POST"),
+  /** Владельцы мест (волна 2б, М-2): место → контрагент или наша компания. */
+  placeOwners: () => get<PlaceOwnerRow[]>("/entities/place-cards/owners"),
+  placesOwned: (contractorId: string) =>
+    get<{ id: string; name: string; type: string }[]>(`/entities/${contractorId}/places-owned`),
+  setPlaceContractor: (placeId: string, contractorId: string | null) =>
+    send<PlaceOwnerRow>(`/entities/${placeId}/place-card`, "PUT", { contractorId }),
+  /** Слияние карточек одного места (М-9): предпросмотр — чтением, слияние — записью. */
+  mergePreview: (sourceId: string, targetId: string) =>
+    get<PlaceMergePreview>(`/entities/${sourceId}/merge-into/${targetId}`),
+  mergePlaces: (sourceId: string, targetId: string, input: { basis: MergeBasis; reason: string }) =>
+    send<PlaceMergePreview & { mergedAt: string }>(`/entities/${sourceId}/merge-into/${targetId}`, "POST", input),
   setMachineKind: async (entityId: string, kind: string, note?: string) =>
     send<MachineCard>(`/entities/${entityId}/machine-kind`, "PATCH", {
       kind,
@@ -3561,6 +3589,8 @@ export const core = {
    * до того, как это кто-нибудь заметит.
    */
   contractorsAll: () => get<Entity[]>(`/entities?type=contractor&limit=${MAX_FIND_LIMIT}`),
+  /** Карточки нашей компании (own_company) по всем направлениям — владелец наших складов (М-11). */
+  ownCompaniesAll: () => get<Entity[]>(`/entities?type=own_company&limit=${MAX_FIND_LIMIT}`),
   entity: (id: string) => get<Entity>(`/entities/${id}`),
   createEntity: (input: Record<string, unknown>) => send<Entity>("/entities", "POST", input),
   /**
