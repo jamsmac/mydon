@@ -631,6 +631,13 @@
       "when": 1788880209444,
       "tag": "0089_attachment_artifacts",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1789143841117,
+      "tag": "0090_place_card",
+      "breakpoints": true
     }
   ]
 }
