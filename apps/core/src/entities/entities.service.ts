@@ -24,6 +24,12 @@ import {
   cardPrice,
   coordFromAttrs,
   isPlaceType,
+  adoptedCoordsSource,
+  planCoordAdoption,
+  PLACE_ATTR,
+  PLACE_TYPES,
+  tashkentDay,
+  type AdoptionPlan,
   MACHINE_KINDS,
   placeStatusConflict,
   parseRecipe,
@@ -686,6 +692,66 @@ export class EntitiesService {
       });
       return updated;
     });
+  }
+
+  /**
+   * Разовый перенос координат с автоматов на их места (волна 2, М-4).
+   *
+   * План строит чистый `planCoordAdoption` (правила «не угадывать» — там).
+   * Применение идёт ТОЙ ЖЕ дверью, что правка из панели, — `update`: attrs
+   * места получают координаты и пометку источника, geo_point синхронизируется,
+   * в журнал ложится `entity.update` с автором запроса. Каждое место — своя
+   * транзакция: провал одного не откатывает остальные, а отчёт называет, что
+   * применилось.
+   */
+  async adoptMachineCoords(opts: { dryRun: boolean }): Promise<AdoptionPlan & { applied: string[] }> {
+    const rows = await this.db
+      .select({ id: entity.id, name: entity.name, type: entity.type, attrs: entity.attrs })
+      .from(entity)
+      .where(inArray(entity.type, [...PLACE_TYPES, "machine"]));
+    const geos = await this.geoFor(rows.map((r) => r.id));
+    const open = await this.db
+      .select({ placeId: machinePlacement.locationId, machineId: machinePlacement.entityId })
+      .from(machinePlacement)
+      .where(isNull(machinePlacement.endDate));
+
+    const plan = planCoordAdoption({
+      places: rows
+        .filter((r) => isPlaceType(r.type))
+        .map((r) => ({ id: r.id, name: r.name, type: r.type, attrs: r.attrs as Record<string, unknown>, hasGeo: geos.has(r.id) })),
+      machines: rows
+        .filter((r) => r.type === "machine")
+        .map((r) => {
+          const g = geos.get(r.id);
+          return { id: r.id, name: r.name, attrs: r.attrs as Record<string, unknown>, geo: g ? { lat: g.lat, lng: g.lng } : null };
+        }),
+      open,
+    });
+
+    const applied: string[] = [];
+    if (opts.dryRun) return { ...plan, applied };
+
+    const day = tashkentDay(new Date());
+    for (const a of plan.adopt) {
+      const [fresh] = await this.db.select().from(entity).where(eq(entity.id, a.placeId));
+      if (!fresh) continue;
+      // Между планом и записью месту могли поставить координаты руками — не затираем.
+      if (coordFromAttrs(fresh.attrs as Record<string, unknown>).coord !== null) continue;
+      const source = adoptedCoordsSource(a.fromMachineName, day);
+      const attrs: Record<string, unknown> = {
+        ...((fresh.attrs ?? {}) as Record<string, unknown>),
+        [PLACE_ATTR.lat]: a.lat,
+        [PLACE_ATTR.lng]: a.lng,
+        [PLACE_ATTR.coordsSource]: source,
+      };
+      if (a.address !== null) {
+        attrs[PLACE_ATTR.address] = a.address;
+        attrs[PLACE_ATTR.addressSource] = source;
+      }
+      await this.update(a.placeId, { attrs });
+      applied.push(a.placeId);
+    }
+    return { ...plan, applied };
   }
 
   /**

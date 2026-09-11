@@ -23,7 +23,7 @@ import type {
   ShrinkReport as VendingShrinkageReport,
   StockCountsReport,
 } from "@mydon/shared";
-import { ACTOR_HEADER, MAX_FIND_LIMIT } from "@mydon/shared";
+import { ACTOR_HEADER, MAX_FIND_LIMIT, type AdoptionPlan } from "@mydon/shared";
 import { collectAllTaskPages } from "./task-pagination";
 import { resolveActor } from "./actor";
 import { resolveOwner } from "./owner";
@@ -3281,6 +3281,9 @@ export const core = {
     ),
   /** Виды и состояния всего парка одним запросом — для списка автоматов. */
   machineCards: () => get<MachineCard[]>("/entities/machine-cards/all"),
+  /** Перенос координат с автоматов на места (М-4): план — чтением, применение — записью. */
+  coordAdoptionPlan: () => get<AdoptionPlan & { applied: string[] }>("/entities/places/adopt-machine-coords"),
+  applyCoordAdoption: () => send<AdoptionPlan & { applied: string[] }>("/entities/places/adopt-machine-coords", "POST"),
   setMachineKind: async (entityId: string, kind: string, note?: string) =>
     send<MachineCard>(`/entities/${entityId}/machine-kind`, "PATCH", {
       kind,

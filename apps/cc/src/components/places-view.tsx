@@ -1,8 +1,9 @@
 import Link from "next/link";
-import { PLACE_TYPES, PLACE_TYPE_HINTS, PLACE_TYPE_LABELS, placeTypeLabel } from "@mydon/shared";
+import { PLACE_TYPES, PLACE_TYPE_HINTS, PLACE_TYPE_LABELS, placeTypeLabel, type AdoptionPlan } from "@mydon/shared";
 import { core, CoreUnavailable, type CoffeePlacementRow, type Entity } from "../lib/core";
 import { CoreDown } from "./core-down";
 import { NewPlaceForm } from "./place-new";
+import { CoordAdoption } from "./coord-adoption";
 import { mapTilesFromEnv } from "../lib/map-tiles";
 
 /**
@@ -47,6 +48,14 @@ export async function PlacesView() {
     // Состав места — дополнение: без него список мест всё равно нужен.
   }
 
+  // План переноса координат с автоматов (М-4). Дополнение: не пришёл — блока нет.
+  let переносКоординат: AdoptionPlan | null = null;
+  try {
+    переносКоординат = await core.coordAdoptionPlan();
+  } catch {
+    переносКоординат = null;
+  }
+
   const всего = byType.reduce((n, g) => n + g.rows.length, 0);
   const сКоординатами = byType.reduce(
     (n, g) => n + g.rows.filter((r) => r.geo != null).length,
@@ -73,6 +82,10 @@ export async function PlacesView() {
           показаны с координатами и тем, что на них сейчас стоит.
         </p>
       </div>
+
+      {переносКоординат && (переносКоординат.adopt.length > 0 || переносКоординат.conflicts.length > 0) && (
+        <CoordAdoption plan={переносКоординат} />
+      )}
 
       <section className="group-block">
         <div className="section-title">Новое место</div>

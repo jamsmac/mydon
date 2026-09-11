@@ -942,3 +942,19 @@ export async function unbindSaleAlias(entityId: string, aliasId: string): Promis
   revalidatePath(`/card/${entityId}`);
   return { ok: true };
 }
+
+/**
+ * Перенести координаты с автоматов на их места (волна 2, М-4). План и правила
+ * «не угадывать» — в Core (`planCoordAdoption`); здесь только кнопка. Конфликты
+ * не применяются никогда: их решает человек в карточке места.
+ */
+export async function applyCoordAdoption(): Promise<{ ok: true; applied: number; conflicts: number } | { ok: false; error: string }> {
+  try {
+    const res = await core.applyCoordAdoption();
+    revalidatePath("/places");
+    revalidatePath("/domain/vendhub");
+    return { ok: true, applied: res.applied.length, conflicts: res.conflicts.length };
+  } catch (err) {
+    return { ok: false, error: err instanceof CoreUnavailable ? err.detail : String(err) };
+  }
+}
