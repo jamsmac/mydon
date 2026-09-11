@@ -10,6 +10,10 @@ import { BunkerLevels } from "./bunker-levels";
 export interface MachineListItem {
   id: string;
   name: string;
+  /** Имя на показ (М-12): «K-014 · место»; без номера — имя карточки. */
+  displayName: string;
+  inventoryNo: string | null;
+  labelPending: boolean;
   serial: string | null;
   point: string | null;
   /** Вид из machine_card; null — карточка вида не заведена. */
@@ -109,7 +113,7 @@ export function MachinesBrowser({ items }: { items: MachineListItem[] }) {
       if (kind !== "all" && kindOf(m) !== kind) return false;
       if (status !== "all" && m.status !== status) return false;
       if (needle === "") return true;
-      return [m.name, m.serial ?? "", m.point ?? ""].some((s) =>
+      return [m.name, m.displayName, m.inventoryNo ?? "", m.serial ?? "", m.point ?? ""].some((s) =>
         s.toLowerCase().includes(needle),
       );
     });
@@ -127,10 +131,11 @@ export function MachinesBrowser({ items }: { items: MachineListItem[] }) {
   const row = (m: MachineListItem) => (
     <Link href={`/card/${m.id}`} className="row" key={m.id}>
       <div className="t">
-        <b>{m.name}</b>
+        <b>{m.displayName}</b>
         <small>
+          {m.inventoryNo ? `карточка «${m.name}» · ` : ""}
           {m.serial ? `серийник ${m.serial}` : "серийник не указан"}
-          {m.point ? ` · ${m.point}` : ""}
+          {!m.inventoryNo && m.point ? ` · ${m.point}` : ""}
           {m.statusNote ? ` · ${m.statusNote}` : ""}
         </small>
       </div>
@@ -140,6 +145,7 @@ export function MachinesBrowser({ items }: { items: MachineListItem[] }) {
         </span>
       )}
       {m.bunkers && <BunkerLevels rows={m.bunkers} compact />}
+      {m.labelPending && <span className="chip h">номер не наклеен</span>}
       {m.status !== "in_service" && (
         <span className={statusChip(m.status)}>{machineStatusLabel(m.status)}</span>
       )}
@@ -155,14 +161,15 @@ export function MachinesBrowser({ items }: { items: MachineListItem[] }) {
         <span className="mb-emoji" aria-hidden>
           {KIND_EMOJI[kindOf(m)] ?? "❔"}
         </span>
-        <b className="mb-name">{m.name}</b>
+        <b className="mb-name">{m.displayName}</b>
         {m.status !== "in_service" && (
           <span className={statusChip(m.status)}>{machineStatusLabel(m.status)}</span>
         )}
       </div>
       <div className="mb-sub">
+        {m.inventoryNo ? `«${m.name}» · ` : ""}
         {m.serial ? <span className="mono">{m.serial}</span> : "серийник не указан"}
-        {m.point ? ` · ${m.point}` : ""}
+        {!m.inventoryNo && m.point ? ` · ${m.point}` : ""}
       </div>
       {m.fillRate !== null ? (
         <>

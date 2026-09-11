@@ -1,5 +1,6 @@
-import { normalizeMachineSerial, parseMenu } from "@mydon/shared";
+import { machineDisplayName, normalizeMachineSerial, parseMenu } from "@mydon/shared";
 import { MachinesBrowser, type MachineListItem } from "./machines-browser";
+import { MachineNumbersBlock } from "./machine-numbers-block";
 import {
   core,
   CoreUnavailable,
@@ -87,7 +88,7 @@ export async function VendingMachinesPanel({ machines }: { machines: Entity[] })
 
   // Вид и состояние всего парка одним запросом; провал — фильтры по виду
   // просто опираются на attrs-категорию.
-  const cardById = new Map<string, { kind: string; status: string; statusNote: string | null }>();
+  const cardById = new Map<string, { kind: string; status: string; statusNote: string | null; inventoryNo: string | null; labelPending: boolean }>();
   try {
     for (const c of await core.machineCards()) cardById.set(c.entityId, c);
   } catch {
@@ -128,10 +129,26 @@ export async function VendingMachinesPanel({ machines }: { machines: Entity[] })
     // без кофе-данных карточки просто без бункеров
   }
 
+  // Где стоит СЕЙЧАС — вторая часть имени «K-014 · место» (М-12). Не текстовое
+  // «точка» из паспорта: его решение 09.09 признало конкурирующим источником.
+  const placeOf = new Map<string, string>();
+  try {
+    for (const p of await core.coffeePlacements()) if (p.endDate === null) placeOf.set(p.entityId, p.locationName);
+  } catch {
+    // без размещений — имя без места
+  }
+
+  // План номеров и очередь наклейки (волна 3). Дополнение: не пришло — блока нет.
+  let numberPlan: { id: string; name: string; inventoryNo: string }[] = [];
+  try {
+    numberPlan = await core.machineNumberPlan();
+  } catch {
+    numberPlan = [];
+  }
+
   const cards = [...machines].sort((a, b) => a.name.localeCompare(b.name, "ru"));
 
   const items: MachineListItem[] = cards.map((e) => {
-    const attrs = e.attrs ?? {};
     const card = cardById.get(e.id);
     // Канон вида — machine_card; фолбэк — attrs-категория (10 кофе / 11 снек).
     const kind =
@@ -143,12 +160,16 @@ export async function VendingMachinesPanel({ machines }: { machines: Entity[] })
             ? "snack"
             : (card?.kind ?? null);
     const live = e.externalRef ? liveBySerial.get(normalizeMachineSerial(e.externalRef)) : undefined;
-    const point = attrs["точка"];
+    const place = placeOf.get(e.id) ?? null;
+    const inventoryNo = card?.inventoryNo ?? null;
     return {
       id: e.id,
       name: e.name,
+      displayName: machineDisplayName({ name: e.name, inventoryNo }, place),
+      inventoryNo,
+      labelPending: card?.labelPending ?? false,
       serial: e.externalRef ?? null,
-      point: typeof point === "string" && point !== "" ? point : null,
+      point: place,
       kind,
       status: card?.status ?? "in_service",
       statusNote: card?.statusNote ?? null,
@@ -172,7 +193,15 @@ export async function VendingMachinesPanel({ machines }: { machines: Entity[] })
           Добавь карточку кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
         </div>
       ) : (
-        <MachinesBrowser items={items} />
+        <>
+          <MachineNumbersBlock
+            plan={numberPlan}
+            toLabel={items
+              .filter((m) => m.inventoryNo !== null && m.labelPending)
+              .map((m) => ({ id: m.id, displayName: m.displayName, name: m.name }))}
+          />
+          <MachinesBrowser items={items} />
+        </>
       )}
       <NewEntityForm domain="vendhub" type="machine" label={typeOne("machine")} />
     </>

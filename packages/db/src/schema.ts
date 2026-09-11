@@ -2440,37 +2440,60 @@ export const machineStatusEnum = pgEnum("machine_status", ["in_service", "wareho
  * Сюда же лягут ответы на открытые вопросы полевого ТЗ, когда они появятся:
  * гарантия до (вопрос 4) и наличие механического счётчика (вопрос 10).
  */
-export const machineCard = pgTable("machine_card", {
-  entityId: uuid("entity_id")
-    .primaryKey()
-    .references(() => entity.id, { onDelete: "cascade" }),
-  kind: machineKindEnum("kind").notNull(),
-  /**
-   * Работает ли автомат. Умолчание `in_service`: парк работает, и молчаливое
-   * исключение автомата из обслуживания опаснее лишней задачи (см.
-   * `DEFAULT_MACHINE_STATUS` в @mydon/shared).
-   */
-  status: machineStatusEnum("status").default("in_service").notNull(),
-  /** Почему автомат не в строю: «отправлен в ремонт 05.08», номер заявки. */
-  statusNote: text("status_note"),
-  /** Когда состояние менялось последний раз — «в ремонте с …» без чтения журнала. */
-  statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
-  note: text("note"),
-  createdBy: text("created_by"),
-  /**
-   * Кто поставил ТЕКУЩИЙ вид.
-   *
-   * `created_by` помнит только того, кто завёл карточку, и при смене вида не
-   * меняется — а заводит карточки массовый прогон. Без этой колонки любая
-   * карточка вечно выглядит проставленной инструментом, даже там, где вид
-   * назвал владелец: обещание «через полгода будет видно, что выбрал человек»
-   * (docs/REGISTRY_CLEANUP.md) держалось только на `audit_log`, куда никто не
-   * смотрит из карточки.
-   */
-  updatedBy: text("updated_by"),
-  createdAt: createdAt(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+export const machineCard = pgTable(
+  "machine_card",
+  {
+    entityId: uuid("entity_id")
+      .primaryKey()
+      .references(() => entity.id, { onDelete: "cascade" }),
+    kind: machineKindEnum("kind").notNull(),
+    /**
+     * Работает ли автомат. Умолчание `in_service`: парк работает, и молчаливое
+     * исключение автомата из обслуживания опаснее лишней задачи (см.
+     * `DEFAULT_MACHINE_STATUS` в @mydon/shared).
+     */
+    status: machineStatusEnum("status").default("in_service").notNull(),
+    /** Почему автомат не в строю: «отправлен в ремонт 05.08», номер заявки. */
+    statusNote: text("status_note"),
+    /** Когда состояние менялось последний раз — «в ремонте с …» без чтения журнала. */
+    statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
+    note: text("note"),
+    createdBy: text("created_by"),
+    /**
+     * Кто поставил ТЕКУЩИЙ вид.
+     *
+     * `created_by` помнит только того, кто завёл карточку, и при смене вида не
+     * меняется — а заводит карточки массовый прогон. Без этой колонки любая
+     * карточка вечно выглядит проставленной инструментом, даже там, где вид
+     * назвал владелец: обещание «через полгода будет видно, что выбрал человек»
+     * (docs/REGISTRY_CLEANUP.md) держалось только на `audit_log`, куда никто не
+     * смотрит из карточки.
+     */
+    updatedBy: text("updated_by"),
+    /**
+     * Инвентарный номер — наш, с буквой вида: K-014 (М-6…М-8). Серийник —
+     * заводской и чужой (`entity.external_ref`), по нему сходится Ourvend; это
+     * два разных номера. Присваивает система (М-12), `label_pending` держит
+     * правду о наклейке: пока сотрудник не подтвердил, что номер на автомате
+     * наклеен, он висит в очереди «наклеить номер» — как у узлов.
+     */
+    inventoryNo: text("inventory_no"),
+    labelPending: boolean("label_pending").default(false).notNull(),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // Та же форма, что у part_unit_inventory_no_key: «k-014» и «K-014 » —
+    // одна наклейка, а не две.
+    uniqueIndex("machine_card_inventory_no_key")
+      .on(sql`upper(regexp_replace(${t.inventoryNo}, '\\s', '', 'g'))`)
+      .where(sql`inventory_no is not null`),
+    // Одна форма номера в БАЗЕ, а не только в сервисе: «K-14» рядом с «K-014»
+    // уникальный индекс не поймал бы (canonicalMachineNo в @mydon/shared).
+    // Серии — те же K/S/D/C (MACHINE_SERIES); новая серия — новая миграция.
+    check("machine_card_inventory_no_canonical", sql`inventory_no is null or inventory_no ~ '^[KSDC]-[0-9]{3,6}$'`),
+  ],
+);
 
 /**
  * Карточка места — то, что относится ТОЛЬКО к местам (волна 2б, М-1…М-3, М-11).

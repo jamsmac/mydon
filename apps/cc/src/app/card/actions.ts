@@ -1007,3 +1007,29 @@ export async function mergePlaces(
   revalidatePath("/domain/vendhub");
   return { ok: true };
 }
+
+/** Номер автомата (волна 3): вписать свой / подтвердить наклейку. Проверку серии делает Core. */
+export async function setMachineNumber(
+  machineId: string,
+  input: { inventoryNo?: string | null; confirmLabel?: boolean },
+): Promise<ActionResult> {
+  try {
+    await core.setMachineNumber(machineId, input);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${machineId}`);
+  revalidatePath("/domain/vendhub");
+  return { ok: true };
+}
+
+/** Присвоить номера всем автоматам без номера (М-12): номер сразу, наклейка догоняет. */
+export async function applyMachineNumberPlan(): Promise<{ ok: true; assigned: number } | { ok: false; error: string }> {
+  try {
+    const res = await core.applyMachineNumberPlan();
+    revalidatePath("/domain/vendhub");
+    return { ok: true, assigned: res.assigned.length };
+  } catch (err) {
+    return { ok: false, error: err instanceof CoreUnavailable ? err.detail : String(err) };
+  }
+}
