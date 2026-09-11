@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { UnitsService, type CreateUnitInput } from "./units.service";
+import { requestActor } from "../common/request-actor";
 
 function asDomain(value: string): Domain {
   if (!(DOMAINS as readonly string[]).includes(value)) {
@@ -38,7 +39,7 @@ export class UnitsController {
         salesPrice: body.salesPrice,
         notes: body.notes,
       },
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 
@@ -62,18 +63,18 @@ export class UnitsController {
       actorRef?: string;
     },
   ) {
-    return this.units.applyAction(id, action, body, body.actorRef ?? "owner");
+    return this.units.applyAction(id, action, body, body.actorRef ?? requestActor("owner"));
   }
 
   @Patch(":id/vin")
   setVin(@Param("id") id: string, @Body() body: { vin?: string; actorRef?: string }) {
     if (typeof body.vin !== "string") throw new BadRequestException("Нет VIN");
-    return this.units.setVin(id, body.vin, body.actorRef ?? "owner");
+    return this.units.setVin(id, body.vin, body.actorRef ?? requestActor("owner"));
   }
 
   @Patch(":id/vin/unbind")
   unbindVin(@Param("id") id: string, @Body() body: { actorRef?: string }) {
-    return this.units.unbindVin(id, body.actorRef ?? "owner");
+    return this.units.unbindVin(id, body.actorRef ?? requestActor("owner"));
   }
 
   @Post(":id/reserve")
@@ -84,13 +85,13 @@ export class UnitsController {
     return this.units.reserve(
       id,
       { endDate: body.endDate ?? "", clientId: body.clientId, note: body.note },
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 
   @Patch(":id/reserve/cancel")
   cancelReserve(@Param("id") id: string, @Body() body: { actorRef?: string }) {
-    return this.units.cancelReserve(id, body.actorRef ?? "owner");
+    return this.units.cancelReserve(id, body.actorRef ?? requestActor("owner"));
   }
 
   @Patch(":id/sales-stage")
@@ -104,7 +105,7 @@ export class UnitsController {
       id,
       body.stage,
       { lostReason: body.lostReason, salesPrice: body.salesPrice, clientId: body.clientId },
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 }

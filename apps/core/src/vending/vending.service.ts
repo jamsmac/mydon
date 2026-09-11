@@ -72,6 +72,7 @@ import {
   type Slot,
   type StockCountRow,
   type StockCountsReport,
+  actorKindOf,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { ApprovalsService } from "../approvals/approvals.service";
@@ -1721,7 +1722,7 @@ export class VendingService {
           payload: { adjustments, countedAt: countedAt.toISOString() },
         });
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actor),
           actorRef: actor,
           action: "vending.stock.recount",
           after: { adjustments },
@@ -2447,7 +2448,7 @@ export class VendingService {
         payload: { product: row.name, before, after, actor },
       });
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actor),
         actorRef: actor,
         action: "vending.product.set_rules",
         target: row.id,
@@ -2864,7 +2865,7 @@ export class VendingService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(receivedBy),
         actorRef: receivedBy,
         action: "vending.purchase_order.receive",
         target: order.id,
@@ -2937,7 +2938,7 @@ export class VendingService {
         payload: { product: row.name, oldPrice, newPrice: price, actor },
       });
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actor),
         actorRef: actor,
         action: "vending.product.set_price",
         target: row.id,
@@ -3087,7 +3088,7 @@ export class VendingService {
         payload: { product: row.name, oldPrice, newPrice: price, actor },
       });
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actor),
         actorRef: actor,
         action: "vending.product.set_sale_price",
         target: row.id,
@@ -3187,7 +3188,7 @@ export class VendingService {
         );
         await tx.insert(auditLog).values(
           записанные.map((item) => ({
-            actorKind: "human" as const,
+            actorKind: actorKindOf(actor),
             actorRef: actor,
             action: "vending.product.set_sale_price",
             target: item.id,

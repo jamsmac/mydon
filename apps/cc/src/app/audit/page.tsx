@@ -9,12 +9,17 @@ export const dynamic = "force-dynamic";
  * Подпись автора. Раньше ЛЮБОЙ actorKind=human подписывался «ты» — а Core
  * пишет действия сотрудников именно с actorKind=human: работа оператора
  * выглядела работой владельца. Теперь person:<id>/staff:<id> резолвятся в имя.
+ *
+ * «Ты» — только ссылка `owner` (R-H-9): человек с другой ссылкой (логин из
+ * tailnet) подписывается ею, а не владельцем. Агент — по имени: «агент» без
+ * имени не отвечает на вопрос «кто это сделал».
  */
-function actorLabel(e: AuditEntry, people: Map<string, string>): string {
-  const id = /(?:person|staff):([0-9a-f-]{36})/.exec(e.actorRef ?? "")?.[1];
+export function actorLabel(e: Pick<AuditEntry, "actorKind" | "actorRef">, people: Map<string, string>): string {
+  const ref = e.actorRef ?? "";
+  const id = /(?:person|staff):([0-9a-f-]{36})/.exec(ref)?.[1];
   if (id) return people.get(id) ?? "сотрудник";
-  if (e.actorKind === "human") return "ты";
-  if (e.actorKind === "agent") return "агент";
+  if (e.actorKind === "agent") return ref.startsWith("agent:") ? `агент ${ref.slice("agent:".length)}` : "агент";
+  if (e.actorKind === "human") return ref === "owner" || ref === "" ? "ты" : ref;
   return "система";
 }
 

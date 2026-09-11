@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { ImportsService, type CreateImportInput, type ImportItem } from "./imports.service";
+import { requestActor } from "../common/request-actor";
 
 function asDomain(value: string): Domain {
   if (!(DOMAINS as readonly string[]).includes(value)) {
@@ -45,14 +46,14 @@ export class ImportsController {
         balanceDueDate: body.balanceDueDate,
         notes: body.notes,
       },
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 
   /** Подписание (за обе стороны) → материализация единиц + план оплат. */
   @Patch(":id/sign")
   sign(@Param("id") id: string, @Body() body: { actorRef?: string }) {
-    return this.imports.sign(id, body.actorRef ?? "owner");
+    return this.imports.sign(id, body.actorRef ?? requestActor("owner"));
   }
 
   /** Отметить оплату графика: prepayment | balance. */
@@ -65,7 +66,7 @@ export class ImportsController {
     if (kind !== "prepayment" && kind !== "balance") {
       throw new BadRequestException("kind: prepayment | balance");
     }
-    return this.imports.markPaid(id, kind, body.actorRef ?? "owner");
+    return this.imports.markPaid(id, kind, body.actorRef ?? requestActor("owner"));
   }
 
   /** Массовое действие по единицам контракта (отгрузка, ГТД, склад). */
@@ -76,7 +77,7 @@ export class ImportsController {
     @Body()
     body: { declarationNumber?: string; declarationDate?: string; transportCompany?: string; actorRef?: string },
   ) {
-    return this.imports.bulkUnitAction(id, action, body, body.actorRef ?? "owner");
+    return this.imports.bulkUnitAction(id, action, body, body.actorRef ?? requestActor("owner"));
   }
 
   /** Пересчитать lifecycle вручную (обычно двигается сам после действий). */
@@ -87,6 +88,6 @@ export class ImportsController {
 
   @Patch(":id/cancel")
   cancel(@Param("id") id: string, @Body() body: { actorRef?: string }) {
-    return this.imports.cancel(id, body.actorRef ?? "owner");
+    return this.imports.cancel(id, body.actorRef ?? requestActor("owner"));
   }
 }

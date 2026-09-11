@@ -221,7 +221,7 @@ export class EntitiesService {
         .set({ decision: "approved", decidedAt: new Date() })
         .where(and(eq(approval.decision, "pending"), sql`${approval.payload}->'entityApprove'->>'entityId' = ${id}`));
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "entity.approve",
         target: id,
@@ -326,7 +326,7 @@ export class EntitiesService {
       const [updated] = await tx.update(entity).set(patch).where(eq(entity.id, entityId)).returning();
       await tx.delete(entityDraft).where(eq(entityDraft.id, draft.id));
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "entity.field.approve",
         target: entityId,
@@ -351,7 +351,7 @@ export class EntitiesService {
     if (!draft) return { ok: true };
     await this.db.delete(entityDraft).where(eq(entityDraft.id, draft.id));
     await this.audit.record({
-      actorKind: "human",
+      actorKind: actorKindOf(actorRef),
       actorRef,
       action: "entity.field.reject",
       target: entityId,
@@ -623,7 +623,7 @@ export class EntitiesService {
         .set({ decision: "rejected", decidedAt: new Date() })
         .where(and(eq(approval.decision, "pending"), sql`${approval.payload}->'entityApprove'->>'entityId' = ${id}`));
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "entity.delete",
         target: id,

@@ -27,6 +27,7 @@ import {
 } from "@mydon/shared";
 import { and, desc, eq, gte, inArray, isNull, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { requestActor } from "../common/request-actor";
 
 /** Транзакция Drizzle — та же, что даёт `db.transaction(async (tx) => …)`. */
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -290,7 +291,7 @@ export class MaintenanceService {
           note: input.note ?? null,
           counterValue: input.counterValue ?? null,
           clientKey: input.clientKey ?? null,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .onConflictDoNothing({ target: maintenanceLog.clientKey })
         .returning();
@@ -316,7 +317,7 @@ export class MaintenanceService {
 
       await tx.insert(auditLog).values({
         actorKind: input.personId ? "human" : "system",
-        actorRef: input.createdBy ?? "owner",
+        actorRef: input.createdBy ?? requestActor("owner"),
         action: "maintenance.log_created",
         target: row.id,
         after: row,
@@ -837,7 +838,7 @@ export class MaintenanceService {
           outcome: "done",
           note: input.note ?? null,
           clientKey: input.clientKey ?? null,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .onConflictDoNothing({ target: maintenanceLog.clientKey })
         .returning();
@@ -924,7 +925,7 @@ export class MaintenanceService {
             installLogId: log.id,
             warrantyUntil: removed.warrantyUntil,
             note: input.note ?? null,
-            createdBy: input.createdBy ?? "owner",
+            createdBy: input.createdBy ?? requestActor("owner"),
           })
           .returning();
       }
@@ -946,7 +947,7 @@ export class MaintenanceService {
           tx,
           input.partKind as PartKind,
           { serialNumber: input.newSerial, model: input.model, warrantyUntil: input.warrantyUntil },
-          input.createdBy ?? "owner",
+          input.createdBy ?? requestActor("owner"),
         );
       }
 
@@ -964,13 +965,13 @@ export class MaintenanceService {
           warrantyUntil: input.warrantyUntil ?? unit.warrantyUntil ?? null,
           reason: input.reason ?? null,
           note: input.note ?? null,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .returning();
 
       await tx.insert(auditLog).values({
         actorKind: input.personId ? "human" : "system",
-        actorRef: input.createdBy ?? "owner",
+        actorRef: input.createdBy ?? requestActor("owner"),
         action: "maintenance.part_swapped",
         target: installed.id,
         before: removed,
@@ -1055,7 +1056,7 @@ export class MaintenanceService {
           outcome: "done",
           note: input.note ?? null,
           clientKey: input.clientKey ?? null,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .onConflictDoNothing({ target: maintenanceLog.clientKey })
         .returning();
@@ -1141,7 +1142,7 @@ export class MaintenanceService {
           tx,
           input.partKind as PartKind,
           { serialNumber, model, warrantyUntil },
-          input.createdBy ?? "owner",
+          input.createdBy ?? requestActor("owner"),
         );
         partUnitId = created.id;
       }
@@ -1161,13 +1162,13 @@ export class MaintenanceService {
           warrantyUntil,
           reason: input.reason ?? null,
           note: input.note ?? null,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .returning();
 
       await tx.insert(auditLog).values({
         actorKind: input.personId ? "human" : "system",
-        actorRef: input.createdBy ?? "owner",
+        actorRef: input.createdBy ?? requestActor("owner"),
         action: "maintenance.part_installed",
         target: installed.id,
         after: installed,
@@ -1200,7 +1201,7 @@ export class MaintenanceService {
           outcome: "done",
           note: input.note ?? null,
           clientKey: input.clientKey ?? null,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .onConflictDoNothing({ target: maintenanceLog.clientKey })
         .returning();
@@ -1277,13 +1278,13 @@ export class MaintenanceService {
           installLogId: log.id,
           warrantyUntil: removed.warrantyUntil,
           note: input.note ?? null,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .returning();
 
       await tx.insert(auditLog).values({
         actorKind: input.personId ? "human" : "system",
-        actorRef: input.createdBy ?? "owner",
+        actorRef: input.createdBy ?? requestActor("owner"),
         action: "maintenance.part_removed",
         target: removed.id,
         before: removed,

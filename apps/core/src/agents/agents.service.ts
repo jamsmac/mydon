@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { agent, agentRun, agentSkillCatalog, auditLog, task } from "@mydon/db";
-import { TZ, agentWorkPaused } from "@mydon/shared";
+import { TZ, agentWorkPaused, actorKindOf } from "@mydon/shared";
 import { and, asc, eq, isNotNull, isNull, notInArray, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { snapshotFreshness } from "../routines/board";
@@ -324,7 +324,7 @@ export class AgentsService {
         .returning();
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "agent.create",
         target: created.name,
@@ -365,7 +365,7 @@ export class AgentsService {
         .returning();
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "agent.update",
         target: name,
@@ -399,7 +399,7 @@ export class AgentsService {
         .returning();
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "agent.archive",
         target: before.name,
@@ -919,7 +919,7 @@ export class AgentsService {
     // журнала не должно её отменять. Само создание задачи свой след
     // (`task.create`) уже оставило той же транзакцией.
     await this.db.insert(auditLog).values({
-      actorKind: "human",
+      actorKind: actorKindOf(actor),
       actorRef: actor,
       action: "agent.skill.run",
       target: `${name}/${skill}`,

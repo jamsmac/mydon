@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import {
   DELIMITERS,
@@ -365,7 +366,7 @@ export async function importFile(
         periodTo: str("periodTo"),
         account: str("account"),
         note: str("note") ?? `Загружено файлом «${file.name}», ${readAs}`,
-        importedBy: "owner",
+        importedBy: await resolveActor(),
       });
     }
   } catch (err) {

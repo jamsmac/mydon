@@ -2599,6 +2599,18 @@ describe("Права актора на приёмку и назначение (�
     );
   });
 
+  it("агент из панели (R-H-9) не принимает и не оценивает работу — и слышит почему, а не «проставь роль»", async () => {
+    const db = правовойStub([], { id: "t1", status: "done", quality: null, resultNote: "г" });
+    await assert.rejects(
+      () => makeTasks(db).rate("t1", "accepted", "agent:claude-code"),
+      /только человек — это решение владельца, не агента/,
+    );
+    await assert.rejects(
+      () => makeTasks(db).confirm("t1", "agent:claude-code"),
+      /только человек — это решение владельца, не агента/,
+    );
+  });
+
   it("правка срока прав назначения не требует, смена исполнителя — требует", async () => {
     const задача = {
       id: "t1",

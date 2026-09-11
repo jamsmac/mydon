@@ -18,7 +18,7 @@ import {
   vendingPurchaseOrder,
 } from "@mydon/db";
 import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
-import { DOMAINS, type Domain } from "@mydon/shared";
+import { DOMAINS, type Domain, actorKindOf } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import { EventsService } from "../events/events.service";
@@ -167,7 +167,7 @@ export class ApprovalsService {
         payload: { approvalId: id, decision },
       });
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: `approval.${decision}`,
         target: id,
@@ -221,7 +221,7 @@ export class ApprovalsService {
       .where(eq(entity.id, entityId))
       .returning();
     await tx.insert(auditLog).values({
-      actorKind: "human",
+      actorKind: actorKindOf(actorRef),
       actorRef,
       action: "entity.approve",
       target: entityId,
@@ -302,7 +302,7 @@ export class ApprovalsService {
       created += 1;
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "entity.create",
         target: createdRow.id,
@@ -370,7 +370,7 @@ export class ApprovalsService {
       },
     });
     await tx.insert(auditLog).values({
-      actorKind: "human",
+      actorKind: actorKindOf(actorRef),
       actorRef,
       action: "vending.purchase_order.create",
       target: order.id,

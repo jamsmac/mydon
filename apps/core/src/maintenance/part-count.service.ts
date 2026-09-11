@@ -6,6 +6,7 @@ import { DB, type Db } from "../db/db.module";
 import { settingValue } from "../system/settings";
 import { todayInTz } from "./maintenance.service";
 import { PartsService, partUnitLabel, type PartUnitView } from "./parts.service";
+import { requestActor } from "../common/request-actor";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type SessionRow = typeof partCountSession.$inferSelect;
@@ -101,7 +102,7 @@ export class PartCountService {
     const existing = await this.openAt(this.db, input.location);
     const expected = (await this.parts.atLocation(input.location)).length;
     if (existing) return { session: existing, resumed: true, photoRequired, expected };
-    const actorRef = input.actorRef ?? "owner";
+    const actorRef = input.actorRef ?? requestActor("owner");
     const [session] = await this.db
       .insert(partCountSession)
       .values({
@@ -204,7 +205,7 @@ export class PartCountService {
   }
 
   async addLine(sessionId: string, input: AddCountLineInput): Promise<{ line: CountLineView; status: "found" | "new"; how: string | null }> {
-    const actorRef = input.actorRef ?? "owner";
+    const actorRef = input.actorRef ?? requestActor("owner");
     return this.db.transaction(async (tx) => {
       const session = await this.session(tx, sessionId);
       if (session.appliedAt) throw new BadRequestException("Сессия уже применена — начни новую");
@@ -413,7 +414,7 @@ export class PartCountService {
    * новые — заведены с номером от системы, не найденные — в «неизвестно где».
    */
   async apply(sessionId: string, input: { actorRef?: string; personId?: string } = {}): Promise<ApplyReport> {
-    const actorRef = input.actorRef ?? "owner";
+    const actorRef = input.actorRef ?? requestActor("owner");
     const today = todayInTz();
     return this.db.transaction(async (tx) => {
       const [locked] = await tx.select({ id: partCountSession.id }).from(partCountSession).where(eq(partCountSession.id, sessionId)).for("update").limit(1);

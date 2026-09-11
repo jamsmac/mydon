@@ -2,6 +2,7 @@ import { BadRequestException, Inject, Injectable, NotFoundException } from "@nes
 import { auditLog, brvValue, tnvedRate } from "@mydon/db";
 import { desc, eq } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { actorKindOf } from "@mydon/shared";
 
 type TnvedRow = typeof tnvedRate.$inferSelect;
 type BrvRow = typeof brvValue.$inferSelect;
@@ -127,7 +128,7 @@ export class CatalogService {
           .where(eq(tnvedRate.id, input.id))
           .returning();
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actorRef),
           actorRef,
           action: "catalog.tnved_updated",
           target: input.id,
@@ -138,7 +139,7 @@ export class CatalogService {
       }
       const [created] = await tx.insert(tnvedRate).values(values).returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "catalog.tnved_created",
         target: created.id,
@@ -159,7 +160,7 @@ export class CatalogService {
         .where(eq(tnvedRate.id, id))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "catalog.tnved_deactivated",
         target: id,
@@ -194,7 +195,7 @@ export class CatalogService {
         })
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "catalog.brv_set",
         target: created.id,

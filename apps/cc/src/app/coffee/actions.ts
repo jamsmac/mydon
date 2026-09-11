@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
 
@@ -25,7 +26,7 @@ export async function submitCoffeeRefill(input: {
   enteredDate: string;
 }): Promise<ActionResult> {
   try {
-    await core.submitCoffeeRefill({ ...input, createdBy: "panel" });
+    await core.submitCoffeeRefill({ ...input, createdBy: await resolveActor() });
     revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
@@ -108,7 +109,7 @@ export async function recordCoffeeConsumable(input: {
 /** Отметить мойку/обслуживание бункера или точки целиком. */
 export async function recordCoffeeWash(input: { locationId: string; position?: number; note?: string }): Promise<ActionResult> {
   try {
-    await core.recordCoffeeWash({ ...input, performedBy: "panel" });
+    await core.recordCoffeeWash({ ...input, performedBy: await resolveActor() });
     revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
@@ -260,7 +261,7 @@ export async function createCoffeeAlertTask(input: {
       ownerRef: input.ownerRef ?? "",
       priority: "high",
       source: "coffee-alert",
-      createdBy: "panel",
+      createdBy: await resolveActor(),
       due: new Date(Date.now() + 24 * 3600_000).toISOString(),
     });
     revalidatePath("/domain/vendhub");

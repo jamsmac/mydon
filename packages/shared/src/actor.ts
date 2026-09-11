@@ -47,3 +47,44 @@ export function toolActor(name: string): string {
 export function agentActor(name: string): string {
   return `${ACTOR_PREFIX.agent}${name}`;
 }
+
+/**
+ * Заголовок, которым панель передаёт Core актора записи (R-H-9). Одна
+ * константа на обе стороны: две копии строки разъехались бы на первой правке,
+ * и Core молча перестал бы видеть актора — журнал снова подписывал бы всё
+ * владельцем, без единой ошибки.
+ */
+export const ACTOR_HEADER = "x-mydon-actor";
+
+/**
+ * Формат ссылки, которую можно передать заголовком и записать в журнал:
+ * `owner`, `agent:claude-code`, `person:<uuid>`, логин tailnet. Только ASCII
+ * без пробелов — значение заголовка в `fetch` обязано быть ASCII, иначе запись
+ * падает целиком, а пробелы, переводы строк и разметка в журнале не нужны.
+ * Одна проверка на обе стороны: панель не отправит того, что Core отбросит.
+ */
+const ACTOR_REF_PATTERN = /^[A-Za-z0-9_.:@+-]{1,120}$/;
+
+export function isActorRef(ref: string | null | undefined): ref is string {
+  return typeof ref === "string" && ACTOR_REF_PATTERN.test(ref);
+}
+
+/**
+ * Человек, которого панель видит по логину, но записать логином не может
+ * (логин не укладывается в формат ссылки). Честнее «не опознан», чем
+ * молча записать владельцем.
+ */
+export const UNRECOGNIZED_HUMAN_ACTOR = "tailnet:unrecognized";
+
+/**
+ * Имя агента, которое можно объявить в панели: `claude-code`, `codex`.
+ * Строчные латиница, цифры и дефис — оно становится частью ссылки
+ * `agent:<имя>` в журнале, и мусор в нём прочитает человек.
+ */
+const AGENT_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{1,39}$/;
+
+/** Нормализовать имя агента; не годится — `null`. */
+export function parseAgentName(raw: string | null | undefined): string | null {
+  const name = (raw ?? "").trim().toLowerCase();
+  return AGENT_NAME_PATTERN.test(name) ? name : null;
+}

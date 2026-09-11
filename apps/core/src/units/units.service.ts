@@ -26,6 +26,7 @@ import {
   type Domain,
   type SalesStage,
   type UnitStatus,
+  actorKindOf,
 } from "@mydon/shared";
 import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -219,7 +220,7 @@ export class UnitsService {
         })
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "unit.create",
         target: created.id,
@@ -294,7 +295,7 @@ export class UnitsService {
         throw new ConflictException("Статус уже изменён параллельным действием — обнови список");
       }
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: `unit.${action}`,
         target: id,
@@ -324,7 +325,7 @@ export class UnitsService {
         .where(eq(globerentUnit.id, id))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "unit.vin_set",
         target: id,
@@ -351,7 +352,7 @@ export class UnitsService {
         .where(eq(globerentUnit.id, id))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "unit.vin_unbind",
         target: id,
@@ -401,7 +402,7 @@ export class UnitsService {
         .set({ status: "RESERVED", updatedAt: new Date() })
         .where(eq(globerentUnit.id, id));
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "unit.reserved",
         target: id,
@@ -426,7 +427,7 @@ export class UnitsService {
         .where(and(eq(globerentUnit.id, id), eq(globerentUnit.status, "RESERVED")))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "unit.reserve_cancelled",
         target: id,
@@ -476,7 +477,7 @@ export class UnitsService {
         .where(eq(globerentUnit.id, id))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "unit.sales_stage",
         target: id,

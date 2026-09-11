@@ -17,6 +17,7 @@ import {
 } from "class-validator";
 import { Type } from "class-transformer";
 import { StockService } from "./stock.service";
+import { requestActor } from "../common/request-actor";
 
 /** Заявка на движение склада. Приход — с ценой; расход/перемещение — позже. */
 export class CreateMovementDto {
@@ -329,7 +330,7 @@ export class StockController {
   /** Карточки реестра для товаров прайса: связать по имени или завести (У6). `?dryRun=1` — только план. */
   @Post("vending-cards")
   vendingCards(@Query("dryRun") dryRun?: string, @Query("actor") actor?: string) {
-    return this.stock.ensureVendingCards({ dryRun: dryRun === "1" || dryRun === "true", actorRef: actor ?? "owner" });
+    return this.stock.ensureVendingCards({ dryRun: dryRun === "1" || dryRun === "true", actorRef: actor ?? requestActor("owner") });
   }
 
   /** Остаток пары «склад × ингредиент» — что показать перед вводом факта. */

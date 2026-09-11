@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../lib/actor";
 import { revalidatePath } from "next/cache";
 import { core, coreOwnerWriteHeaders } from "../lib/core";
 import { DOMAIN_TITLES, typeOne } from "../lib/labels";
@@ -86,7 +87,7 @@ export async function decideApproval(
       // сервисного токена. Токен владельца проставится лишь при подтверждённом
       // владельце; из общего SERVICE_TOKEN он не выводится.
       headers: await coreOwnerWriteHeaders(),
-      body: JSON.stringify({ decision, actor: "panel" }),
+      body: JSON.stringify({ decision, actor: await resolveActor() }),
       cache: "no-store",
       // «Одобрить» может исполнять большой импорт (тысячи строк одной
       // транзакцией) — 8с обрывали ожидание на живом одобрении 2026-08-03,

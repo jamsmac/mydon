@@ -11,6 +11,7 @@ import {
   preorderActionError,
   type Domain,
   type PreorderStatus,
+  actorKindOf,
 } from "@mydon/shared";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -100,7 +101,7 @@ export class PreordersService {
         })
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "preorder.create",
         target: created.id,
@@ -159,7 +160,7 @@ export class PreordersService {
         throw new ConflictException("Статус уже изменён параллельным действием — обнови список");
       }
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: `preorder.${action}`,
         target: id,
@@ -194,7 +195,7 @@ export class PreordersService {
         .where(eq(grPreorder.id, id))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "preorder.cancelled",
         target: id,

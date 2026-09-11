@@ -5,6 +5,7 @@ import { normalizeMachineSerial } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { VendingLedgerService } from "../stock/vending-ledger";
 import { VendingService } from "./vending.service";
+import { requestActor } from "../common/request-actor";
 
 type RefillRow = typeof vendingRefill.$inferSelect;
 
@@ -89,7 +90,7 @@ export class RefillService {
           clientKey: input.clientKey,
           source: input.source ?? "bot",
           note: input.note ?? null,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         })
         .onConflictDoNothing({ target: vendingRefill.clientKey })
         .returning();
@@ -156,12 +157,12 @@ export class RefillService {
         dt: performedAt.toISOString().slice(0, 10),
         note: `заливка автомата ${input.machineSerial}`,
         clientKey: `vending-refill:${created.id}`,
-        createdBy: input.createdBy ?? "owner",
+        createdBy: input.createdBy ?? requestActor("owner"),
       });
 
       await tx.insert(auditLog).values({
         actorKind: input.personId ? "human" : "system",
-        actorRef: input.createdBy ?? "owner",
+        actorRef: input.createdBy ?? requestActor("owner"),
         action: "vending.refill_created",
         target: created.id,
         after: created,

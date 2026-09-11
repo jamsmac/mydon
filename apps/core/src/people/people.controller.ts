@@ -14,6 +14,7 @@ import { DOMAINS, STAFF_ROLES, type Domain } from "@mydon/shared";
 import { OwnerMutationGuard } from "../common/owner-mutation.guard";
 import { InvitesService } from "./invites.service";
 import { PeopleService } from "./people.service";
+import { requestActor } from "../common/request-actor";
 
 export class ActorDto {
   @IsOptional() @IsString() @MaxLength(128)
@@ -109,7 +110,7 @@ export class PeopleController {
   @Post(":id/invite")
   @UseGuards(OwnerMutationGuard)
   async invite(@Param("id", ParseUUIDPipe) id: string, @Body() dto: InviteDto) {
-    const res = await this.invites.issue(id, dto.roles ?? [], dto.actor ?? "owner");
+    const res = await this.invites.issue(id, dto.roles ?? [], dto.actor ?? requestActor("owner"));
     return { code: res.code, expiresAt: res.expiresAt.toISOString(), name: res.person.name };
   }
 
@@ -127,7 +128,7 @@ export class PeopleController {
   @Post(":id/revoke")
   @UseGuards(OwnerMutationGuard)
   revoke(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ActorDto) {
-    return this.invites.revoke(id, dto.actor ?? "owner");
+    return this.invites.revoke(id, dto.actor ?? requestActor("owner"));
   }
 
   /**
@@ -138,7 +139,7 @@ export class PeopleController {
   @Post(":id/roles")
   @UseGuards(OwnerMutationGuard)
   setRoles(@Param("id", ParseUUIDPipe) id: string, @Body() dto: RolesDto) {
-    return this.invites.setRoles(id, dto.roles, dto.actor ?? "owner");
+    return this.invites.setRoles(id, dto.roles, dto.actor ?? requestActor("owner"));
   }
 
   @Post("link")

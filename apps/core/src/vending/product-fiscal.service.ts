@@ -7,6 +7,7 @@ import {
   validateFiscalPatch,
   type ProductFiscal,
   type ProductFiscalPatch,
+  actorKindOf,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 
@@ -95,7 +96,7 @@ export class ProductFiscalService {
         payload: { product: row.name, before, after, readyBefore, readyAfter, actor },
       });
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actor),
         actorRef: actor,
         action: "vending.product.set_fiscal",
         target: productId,

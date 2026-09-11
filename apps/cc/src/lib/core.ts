@@ -23,8 +23,9 @@ import type {
   ShrinkReport as VendingShrinkageReport,
   StockCountsReport,
 } from "@mydon/shared";
-import { MAX_FIND_LIMIT } from "@mydon/shared";
+import { ACTOR_HEADER, MAX_FIND_LIMIT } from "@mydon/shared";
 import { collectAllTaskPages } from "./task-pagination";
+import { resolveActor } from "./actor";
 import { resolveOwner } from "./owner";
 
 /**
@@ -57,6 +58,15 @@ async function ownerActionHeaders(): Promise<Record<string, string>> {
   if (!OWNER_ACTION_TOKEN) return {};
   const { isOwner } = await resolveOwner();
   return isOwner ? { "x-owner-action-token": OWNER_ACTION_TOKEN } : {};
+}
+
+/**
+ * Актор записи (R-H-9) — заголовком на КАЖДОЙ записи панели. Core отдаёт его
+ * умолчаниям сервисов (`requestActor`), поэтому вызов, не подписанный явным
+ * полем, подписывается тем, кто действует, а не владельцем по умолчанию.
+ */
+async function actorHeaders(): Promise<Record<string, string>> {
+  return { [ACTOR_HEADER]: await resolveActor() };
 }
 
 export class CoreUnavailable extends Error {
@@ -1504,7 +1514,7 @@ export function coreWriteHeaders(hasJsonBody = true): Record<string, string> {
  * заголовков ТОЛЬКО когда серверный контекст подтвердил владельца.
  */
 export async function coreOwnerWriteHeaders(hasJsonBody = true): Promise<Record<string, string>> {
-  return { ...coreWriteHeaders(hasJsonBody), ...(await ownerActionHeaders()) };
+  return { ...coreWriteHeaders(hasJsonBody), ...(await ownerActionHeaders()), ...(await actorHeaders()) };
 }
 
 /** Запись в Core. Ошибку отдаём словами: её увидит владелец, а не разработчик. */
@@ -1518,9 +1528,11 @@ async function send<T>(
   // Owner-only мутации (R-P5-5: approvals-решения, роли person, автономия
   // агентов) несут второй пояс. Токен подставится лишь при подтверждённом
   // владельце — обычные мутации идут только с сервисным токеном, как сейчас.
-  const headers = opts.owner
-    ? { ...coreWriteHeaders(body !== undefined), ...(await ownerActionHeaders()) }
-    : coreWriteHeaders(body !== undefined);
+  const headers = {
+    ...coreWriteHeaders(body !== undefined),
+    ...(opts.owner ? await ownerActionHeaders() : {}),
+    ...(await actorHeaders()),
+  };
   try {
     res = await fetch(`${BASE}${path}`, {
       method,
@@ -3112,8 +3124,8 @@ export const core = {
   createTask: (input: Record<string, unknown>) => send<Task>("/tasks", "POST", input),
   rateTask: (id: string, quality: "excellent" | "accepted" | "redo") =>
     send<Task>(`/tasks/${id}/quality`, "POST", { quality }),
-  /** Приёмка работы. Панель ходит от владельца — сегодняшнее поведение. */
-  confirmTask: (id: string) => send<Task>(`/tasks/${id}/confirm`, "POST", { actor: "owner" }),
+  /** Приёмка работы — от имени того, кто действует в панели (R-H-9). */
+  confirmTask: async (id: string) => send<Task>(`/tasks/${id}/confirm`, "POST", { actor: await resolveActor() }),
   setTaskStatus: (id: string, input: Record<string, unknown>) =>
     send<Task>(`/tasks/${id}`, "PATCH", input),
   editTask: (id: string, input: Record<string, unknown>) =>
@@ -3158,30 +3170,32 @@ export const core = {
   partSetNumber: (id: string, input: { inventoryNo?: string; confirmLabel?: boolean; actorRef?: string }) =>
     send<PartUnit>(`/parts/${id}/number`, "POST", input),
   partUpdate: (id: string, patch: Record<string, unknown>) => send<PartUnit>(`/parts/${id}`, "PATCH", patch),
-  partRetire: (id: string, reason: string, actorRef = "owner") =>
-    send<PartUnit>(`/parts/${id}/retire`, "POST", { reason, actorRef }),
+  partRetire: async (id: string, reason: string) =>
+    send<PartUnit>(`/parts/${id}/retire`, "POST", { reason, actorRef: (await resolveActor()) }),
   /** Перемещение узла вне автомата (У3): мойка → сушка → склад, склад ↔ ремонт. */
   partMove: (id: string, input: { to: PartLocation; note?: string; actorRef?: string }) =>
     send<{ unit: PartUnit; from: string | null; logId: string | null }>(`/parts/${id}/move`, "POST", input),
   /** «Помыт»: с мойки на сушку или сразу на склад — по настройке Core. */
-  partWashed: (id: string, actorRef = "owner") =>
-    send<{ unit: PartUnit; from: string | null; logId: string | null }>(`/parts/${id}/washed`, "POST", { actorRef }),
+  partWashed: async (id: string) =>
+    send<{ unit: PartUnit; from: string | null; logId: string | null }>(`/parts/${id}/washed`, "POST", { actorRef: (await resolveActor()) }),
   partsProvision: (input: { dryRun?: boolean; machineIds?: string[]; actorRef?: string }) =>
     send<PartsProvisionReport>("/parts/provision", "POST", input),
   /** Сверка проекции товаров с леджером (У6). */
   vendingParity: () => get<VendingParity>("/stock/vending-parity"),
   /** Карточки реестра для товаров прайса (У6): связать или завести; dryRun — только план. */
   vendingCards: (dryRun: boolean) =>
-    send<{ linked: string[]; created: string[]; ambiguous: string[]; already: number }>(`/stock/vending-cards?dryRun=${dryRun ? "1" : "0"}&actor=owner`, "POST", {}),
+    send<{ linked: string[]; created: string[]; ambiguous: string[]; already: number }>(`/stock/vending-cards?dryRun=${dryRun ? "1" : "0"}`, "POST", {}),
   /** Инвентаризация узлов (У4): сессии, сводка, применение, откат. */
   partCountSessions: (limit = 50) => get<PartCountSessionListRow[]>(`/parts/count/sessions?limit=${limit}`),
   partCountSummary: (id: string) => get<PartCountSummary>(`/parts/count/sessions/${id}`),
   partCountStart: (input: { location: string; personId?: string; note?: string; actorRef?: string }) =>
     send<{ session: PartCountSession; resumed: boolean; photoRequired: boolean; expected: number }>("/parts/count/sessions", "POST", input),
-  partCountApply: (id: string, actorRef = "owner") => send<PartCountApplyReport>(`/parts/count/sessions/${id}/apply`, "POST", { actorRef }),
-  partCountReverse: (id: string, actorRef = "owner") =>
-    send<{ session: PartCountSession; restored: string[]; skipped: string[] }>(`/parts/count/sessions/${id}/reverse`, "POST", { actorRef }),
-  partCountRemoveLine: (lineId: string, actorRef = "owner") => send<{ ok: boolean }>(`/parts/count/lines/${lineId}/remove`, "POST", { actorRef }),
+  partCountApply: async (id: string) =>
+    send<PartCountApplyReport>(`/parts/count/sessions/${id}/apply`, "POST", { actorRef: (await resolveActor()) }),
+  partCountReverse: async (id: string) =>
+    send<{ session: PartCountSession; restored: string[]; skipped: string[] }>(`/parts/count/sessions/${id}/reverse`, "POST", { actorRef: (await resolveActor()) }),
+  partCountRemoveLine: async (lineId: string) =>
+    send<{ ok: boolean }>(`/parts/count/lines/${lineId}/remove`, "POST", { actorRef: (await resolveActor()) }),
   /** История экземпляров по серийнику и/или модели — все периоды в обе стороны. */
   partHistory: (q: { serial?: string; model?: string }) => {
     const qs = new URLSearchParams();
@@ -3233,10 +3247,10 @@ export const core = {
    * тира, а не любая правка карточки. Панель слала тир общим patch'ем и писала
    * «Сохранено» — экран врал о самом чувствительном поле агента.
    */
-  setAgentAutonomy: (name: string, autonomyDefault: AutonomyTier, actor = "owner") =>
+  setAgentAutonomy: async (name: string, autonomyDefault: AutonomyTier) =>
     send<AgentCard>(`/agents/${encodeURIComponent(name)}/autonomy`, "PATCH", {
       autonomyDefault,
-      actor,
+      actor: (await resolveActor()),
     }, { owner: true }),
   archiveAgent: (name: string) => send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "DELETE"),
   /**
@@ -3267,10 +3281,10 @@ export const core = {
     ),
   /** Виды и состояния всего парка одним запросом — для списка автоматов. */
   machineCards: () => get<MachineCard[]>("/entities/machine-cards/all"),
-  setMachineKind: (entityId: string, kind: string, note?: string) =>
+  setMachineKind: async (entityId: string, kind: string, note?: string) =>
     send<MachineCard>(`/entities/${entityId}/machine-kind`, "PATCH", {
       kind,
-      actor: "owner",
+      actor: (await resolveActor()),
       ...(note !== undefined ? { note } : {}),
     }),
   setMachineStatus: (entityId: string, status: string, note?: string, placeId?: string) =>
@@ -3670,14 +3684,14 @@ export const core = {
       поАвтоматам: { machineId: string; имя: string | null; сумма: number; с: string | null }[];
     }>("/collections/cash-estimate"),
   /** Приём инкассации. `denominations` необязательна — сумма купюр должна совпасть с `amount`, иначе Core отказывает с обеими цифрами. */
-  receiveCollection: (id: string, amount: number, denominations?: DenominationCounts) =>
+  receiveCollection: async (id: string, amount: number, denominations?: DenominationCounts) =>
     send<CollectionRow>(`/collections/${id}/receive`, "POST", {
       amount,
-      manager: "owner",
+      manager: (await resolveActor()),
       ...(denominations ? { denominations } : {}),
     }),
-  cancelCollection: (id: string) =>
-    send<CollectionRow>(`/collections/${id}/cancel`, "POST", { manager: "owner" }),
+  cancelCollection: async (id: string) =>
+    send<CollectionRow>(`/collections/${id}/cancel`, "POST", { manager: (await resolveActor()) }),
   /** Сверка по автоматам за период: наличная выручка против изъятого (R-K11). */
   reconcileCollections: (from: string, to: string) =>
     get<ReconcileResult>(
@@ -3735,11 +3749,11 @@ export const core = {
     get<ProductSales>(`/sales/by-product?entityId=${entityId}&days=${days}`),
   /** Имена продаж без карточки и алиаса. */
   salesUnmatched: (days = 90) => get<UnmatchedSaleName[]>(`/sales/unmatched-names?days=${days}`),
-  addSaleAlias: (name: string, entityId: string) =>
+  addSaleAlias: async (name: string, entityId: string) =>
     send<{ id: string; name: string; entityId: string }>("/sales/alias", "POST", {
       name,
       entityId,
-      actor: "owner",
+      actor: (await resolveActor()),
     }),
   removeSaleAlias: (id: string) => send<{ ok: boolean }>(`/sales/alias/${id}`, "DELETE"),
   /** Весь словарь алиасов — для резолвинга имён в лентах прихода/остатков. */
@@ -3852,7 +3866,7 @@ export const core = {
   fxRates: () => get<FxCurrent[]>("/finance/fx"),
   setFxRate: (input: { currency: string; rate: number; note?: string }) =>
     send<FxCurrent[]>("/finance/fx", "PUT", input),
-  refreshFxRates: () => send<FxRefreshResult>("/finance/fx/refresh", "POST", { actorRef: "owner" }),
+  refreshFxRates: async () => send<FxRefreshResult>("/finance/fx/refresh", "POST", { actorRef: (await resolveActor()) }),
   createFinanceFlow: (input: Record<string, unknown>) =>
     send<FinanceFlow>("/finance/flows", "POST", input),
   payFinanceFlow: (id: string, rate?: number) =>

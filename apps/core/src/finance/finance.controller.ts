@@ -3,6 +3,7 @@ import { DOMAINS, type Domain } from "@mydon/shared";
 import { Type } from "class-transformer";
 import { ArrayMaxSize, IsArray, IsBoolean, IsNumber, IsOptional, IsString, MaxLength, ValidateNested } from "class-validator";
 import { FinanceService, type CreateFlowInput } from "./finance.service";
+import { requestActor } from "../common/request-actor";
 
 function asDomain(value: string): Domain {
   if (!(DOMAINS as readonly string[]).includes(value)) {
@@ -118,14 +119,14 @@ export class FinanceController {
     }
     return this.finance.setFx(
       { currency: body.currency, rate: body.rate, note: body.note },
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 
   /** Подтянуть курсы из ЦБ РУз. Ручной курс, заданный сегодня, не перекрывается. */
   @Post("fx/refresh")
   refreshFx(@Body() body: { actorRef?: string }) {
-    return this.finance.refreshFxFromCbu(body?.actorRef ?? "owner");
+    return this.finance.refreshFxFromCbu(body?.actorRef ?? requestActor("owner"));
   }
 
   /** Финансовый свод: агинг, «к сроку ≤ 7 дней», термометр, кэш-флоу. */
@@ -187,19 +188,19 @@ export class FinanceController {
       date: body.date,
       dueDate: body.dueDate,
     };
-    return this.finance.createFlow(input, body.actorRef ?? "owner");
+    return this.finance.createFlow(input, body.actorRef ?? requestActor("owner"));
   }
 
   /** Отметить обязательство оплаченным. */
   @Patch("flows/:id/pay")
   pay(@Param("id") id: string, @Body() body: { rate?: number; actorRef?: string }) {
-    return this.finance.markPaid(id, { rate: body.rate }, body.actorRef ?? "owner");
+    return this.finance.markPaid(id, { rate: body.rate }, body.actorRef ?? requestActor("owner"));
   }
 
   /** Отменить ошибочную запись — строка остаётся в журнале. */
   @Patch("flows/:id/cancel")
   cancel(@Param("id") id: string, @Body() body: { actorRef?: string }) {
-    return this.finance.cancelFlow(id, body.actorRef ?? "owner");
+    return this.finance.cancelFlow(id, body.actorRef ?? requestActor("owner"));
   }
 
   /**
@@ -209,7 +210,7 @@ export class FinanceController {
    */
   @Post("bank-statement")
   importBankStatement(@Body() dto: ImportBankStatementDto, @Query("actorRef") actorRef?: string) {
-    return this.finance.importBankStatement(dto, actorRef ?? "owner");
+    return this.finance.importBankStatement(dto, actorRef ?? requestActor("owner"));
   }
 
   /**

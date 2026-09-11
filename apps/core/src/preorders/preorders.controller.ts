@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { PreordersService, type CreatePreorderInput } from "./preorders.service";
+import { requestActor } from "../common/request-actor";
 
 function asDomain(value: string): Domain {
   if (!(DOMAINS as readonly string[]).includes(value)) {
@@ -33,7 +34,7 @@ export class PreordersController {
         notes: body.notes,
         submitImmediately: body.submitImmediately,
       },
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 
@@ -44,11 +45,11 @@ export class PreordersController {
     @Body()
     body: { contractRef?: string; factoryPriceUsd?: number; promisedDeliveryDate?: string; actorRef?: string },
   ) {
-    return this.preorders.applyAction(id, action, body, body.actorRef ?? "owner");
+    return this.preorders.applyAction(id, action, body, body.actorRef ?? requestActor("owner"));
   }
 
   @Patch(":id/cancel")
   cancel(@Param("id") id: string, @Body() body: { reason?: string; actorRef?: string }) {
-    return this.preorders.cancel(id, body.reason ?? "", body.actorRef ?? "owner");
+    return this.preorders.cancel(id, body.reason ?? "", body.actorRef ?? requestActor("owner"));
   }
 }

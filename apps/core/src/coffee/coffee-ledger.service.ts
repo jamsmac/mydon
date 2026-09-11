@@ -4,6 +4,8 @@ import { and, desc, eq, isNull, lte, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { StockService } from "../stock/stock.service";
 import { settingValue } from "../system/settings";
+import { actorKindOf } from "@mydon/shared";
+import { requestActor } from "../common/request-actor";
 
 /**
  * Кофе ↔ складской леджер (спека vendhub-parts, R-PU-9, У5).
@@ -172,7 +174,7 @@ export class CoffeeLedgerService {
           batchCode: `возврат из бункера ${unitLabel}`,
           note: `возврат бункера ${unitLabel} ${input.returnedDate}: брутто ${input.weight} − тара ${tare}`,
           clientKey: `coffee-return:${input.containerNumber}:${input.position}:${input.returnedDate}:${input.weight}`,
-          createdBy: input.createdBy ?? "owner",
+          createdBy: input.createdBy ?? requestActor("owner"),
         });
         stockMovementId = posted.movement.id;
       }
@@ -217,8 +219,8 @@ export class CoffeeLedgerService {
     await this.db.delete(coffeeContainerReturn).where(eq(coffeeContainerReturn.id, id));
     if (row.stockMovementId) await this.stock.removeReturn(row.stockMovementId);
     await this.db.insert(auditLog).values({
-      actorKind: "human",
-      actorRef: opts.actor ?? "owner",
+      actorKind: actorKindOf(opts.actor ?? requestActor("owner")),
+      actorRef: opts.actor ?? requestActor("owner"),
       action: "coffee.container_return_deleted",
       target: id,
       before: row,

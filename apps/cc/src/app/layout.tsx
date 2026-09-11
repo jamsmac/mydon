@@ -2,7 +2,9 @@ import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import localFont from "next/font/local";
 import { cookies, headers } from "next/headers";
+import Link from "next/link";
 import { core } from "../lib/core";
+import { ACTOR_COOKIE, declaredAgentRef } from "../lib/actor";
 import { CONSOLE_HEADER, THEME_BG, THEME_COOKIE, THEME_HEADER, isThemeChoice, type ThemeChoice } from "../lib/theme";
 import { Sidebar, TabBar } from "../components/nav";
 import { FloatingChat } from "../components/floating-chat";
@@ -150,6 +152,11 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   const rawTheme = (await cookies()).get(THEME_COOKIE)?.value;
   const themeChoice: ThemeChoice | "system" = isThemeChoice(rawTheme) ? rawTheme : "system";
 
+  // Объявленный агент (R-H-9) — плашкой на КАЖДОЙ странице: пока она видна,
+  // записи из этого браузера подписываются агентом, а не владельцем. Без
+  // плашки забытое объявление молча отдало бы агенту решения владельца.
+  const declaredAgent = declaredAgentRef((await cookies()).get(ACTOR_COOKIE)?.value);
+
   // Тема — АТРИБУТОМ В РАЗМЕТКЕ, до любого скрипта (Р-Д2-1): прежний ручной
   // штамп темы ставил её из `useEffect` на каждой странице, и первый кадр
   // консоли был светлым.
@@ -176,6 +183,11 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
             <h1>MYDON</h1>
             <span className="sub">· командный центр</span>
             <span className="sp" />
+            {declaredAgent !== null && (
+              <Link href="/actor" className="chip h" title="Записи из этого браузера подписываются агентом — нажми, чтобы вернуть авторство себе">
+                действует {declaredAgent.replace("agent:", "агент ")}
+              </Link>
+            )}
             <HeaderActions pendingCount={inbox} themeChoice={themeChoice} />
           </header>
 

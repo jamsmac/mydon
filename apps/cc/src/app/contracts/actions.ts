@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
 
@@ -63,7 +64,7 @@ export async function createContract(form: FormData): Promise<ActionResult & { i
       agentId: str("agentId"),
       agentCommissionAmount: num("agentCommission"),
       agentCommissionCurrency: str("agentCommissionCurrency"),
-      actorRef: "owner",
+      actorRef: await resolveActor(),
     });
     refresh(created.id);
     return { ok: true, id: created.id };
@@ -95,7 +96,7 @@ export async function addContractPayment(id: string, form: FormData): Promise<Ac
       amount,
       currency,
       ...(docNo !== "" ? { docNo } : {}),
-      actorRef: "owner",
+      actorRef: await resolveActor(),
     });
     refresh(id);
     return { ok: true };
@@ -111,7 +112,7 @@ export async function addContractAct(id: string, form: FormData): Promise<Action
       actDate: String(form.get("actDate") ?? "").trim(),
       signedBySeller: String(form.get("signedBySeller") ?? "").trim() || undefined,
       signedByBuyer: String(form.get("signedByBuyer") ?? "").trim() || undefined,
-      actorRef: "owner",
+      actorRef: await resolveActor(),
     });
     refresh(id);
     return { ok: true };

@@ -10,6 +10,7 @@ import {
 } from "@nestjs/common";
 import { IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from "class-validator";
 import { SalesService } from "./sales.service";
+import { requestActor } from "../common/request-actor";
 
 export class AddAliasDto {
   /** Имя из источника — ровно как в продажах. */
@@ -78,12 +79,12 @@ export class SalesController {
   /** Привязать имя источника к карточке товара (решение владельца). */
   @Post("alias")
   addAlias(@Body() dto: AddAliasDto) {
-    return this.sales.addAlias(dto.name, dto.entityId, dto.actor ?? "owner");
+    return this.sales.addAlias(dto.name, dto.entityId, dto.actor ?? requestActor("owner"));
   }
 
   @Delete("alias/:id")
   async removeAlias(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string) {
-    await this.sales.removeAlias(id, actor ?? "owner");
+    await this.sales.removeAlias(id, actor ?? requestActor("owner"));
     return { ok: true };
   }
 

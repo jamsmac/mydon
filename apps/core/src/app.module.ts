@@ -1,7 +1,8 @@
 import { Module } from "@nestjs/common";
-import { APP_GUARD } from "@nestjs/core";
+import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { PersonalDomainGuard } from "./common/personal-domain.guard";
+import { RequestActorInterceptor } from "./common/request-actor";
 import { ServiceTokenGuard } from "./common/service-token.guard";
 import { AgentsModule } from "./agents/agents.module";
 import { AppsModule } from "./apps/apps.module";
@@ -97,6 +98,8 @@ import { VerificationModule } from "./verification/verification.module";
     // Личный контур за identity (R-P5-4): гейтит только запросы с domain=personal
     // и только при включённом OWNER_IDENTITY_ENFORCED; иначе — как сегодня.
     { provide: APP_GUARD, useClass: PersonalDomainGuard },
+    // Актор запроса (R-H-9): заголовок панели доезжает до умолчаний сервисов.
+    { provide: APP_INTERCEPTOR, useClass: RequestActorInterceptor },
   ],
 })
 export class AppModule {}

@@ -15,6 +15,7 @@ import {
   strictNumber,
   tashkentDay,
   tashkentDayStartOf,
+  actorKindOf,
 } from "@mydon/shared";
 import { and, asc, desc, eq, gte, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { Cron } from "croner";
@@ -735,7 +736,7 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
         throw new BadRequestException("Имя уже привязано к другой карточке — сначала отвяжи там");
       }
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actor),
         actorRef: actor,
         action: "sales.alias_added",
         target: row.id,
@@ -769,7 +770,7 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
       if (!row) throw new NotFoundException("Такой привязки нет");
       await tx.delete(productNameAlias).where(eq(productNameAlias.id, id));
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actor),
         actorRef: actor,
         action: "sales.alias_removed",
         target: id,

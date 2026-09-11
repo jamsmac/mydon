@@ -1,6 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { auditLog, coffeeOrder, collection, entity, person, sale } from "@mydon/db";
-import { cashInMachines, orderIsCash, parseDenominations, type DenominationCounts } from "@mydon/shared";
+import { cashInMachines, orderIsCash, parseDenominations, type DenominationCounts, actorKindOf } from "@mydon/shared";
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
@@ -217,7 +217,7 @@ export class CollectionsService {
         .returning();
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(managerRef),
         actorRef: managerRef,
         action: "collection.received",
         target: id,
@@ -242,7 +242,7 @@ export class CollectionsService {
         .where(eq(collection.id, id))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(managerRef),
         actorRef: managerRef,
         action: "collection.cancelled",
         target: id,

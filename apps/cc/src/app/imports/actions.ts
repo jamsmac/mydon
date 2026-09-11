@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
 
@@ -48,7 +49,7 @@ export async function createImport(form: FormData): Promise<ActionResult> {
       balanceAmount: num("balanceAmount"),
       balanceDueDate: str("balanceDueDate"),
       notes: str("notes"),
-      actorRef: "owner",
+      actorRef: await resolveActor(),
     });
     refresh(created.id);
     return { ok: true, id: created.id };

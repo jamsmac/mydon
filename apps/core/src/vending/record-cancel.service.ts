@@ -9,7 +9,7 @@ import {
   vendingStock,
   vendingStockCount,
 } from "@mydon/db";
-import { can, type CashCategorySummary } from "@mydon/shared";
+import { can, type CashCategorySummary, actorKindOf } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { VendingLedgerService } from "../stock/vending-ledger";
 import { readIntSetting } from "../system/settings";
@@ -87,7 +87,7 @@ export class RecordCancelService {
           occurredAt: now,
         });
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actor.ref),
           actorRef: actor.ref,
           action: `vending.${kind}.cancel`,
           target: recordId,

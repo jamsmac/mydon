@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Get, Post } from "@nestjs/common";
 import { RegistryImportService, type ImportPayload } from "./registry-import.service";
+import { requestActor } from "../common/request-actor";
 
 /**
  * Импорт реестра GLOBERENT из книги владельца. Мутация — закрыта общим
@@ -13,7 +14,7 @@ export class RegistryImportController {
   @Post("globerent")
   importGloberent(@Body() body: ImportPayload & { actorRef?: string }) {
     const { actorRef, ...payload } = body;
-    return this.service.importGloberent(payload, actorRef ?? "owner");
+    return this.service.importGloberent(payload, actorRef ?? requestActor("owner"));
   }
 
   /** Отчёт: приходы, стоящие на договорах другой компании. Чтение открыто. */
@@ -33,7 +34,7 @@ export class RegistryImportController {
     }
     return this.service.unlinkForeignContractLinks(
       body.flowIds.map((v) => String(v)),
-      body.actorRef ?? "owner",
+      body.actorRef ?? requestActor("owner"),
     );
   }
 }
