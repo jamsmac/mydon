@@ -5,7 +5,6 @@ import { LocationPanel, type LocationPeriod, type PlaceOption } from "./location
 
 const mocks = vi.hoisted(() => ({
   refresh: vi.fn(),
-  saveLocation: vi.fn(),
   setMachineStatus: vi.fn(),
 }));
 
@@ -18,7 +17,6 @@ vi.mock("next/dynamic", () => ({
 }));
 
 vi.mock("../app/card/actions", () => ({
-  saveLocation: mocks.saveLocation,
   setMachineStatus: mocks.setMachineStatus,
 }));
 
@@ -46,9 +44,7 @@ function панель(over: Partial<Parameters<typeof LocationPanel>[0]> = {}) {
       places={places}
       status="in_service"
       statusNote={null}
-      lat={null}
-      lng={null}
-      address={null}
+      placeGeo={null}
       {...over}
     />,
   );
@@ -153,5 +149,22 @@ describe("«Где стоит»: место и состояние одной з�
     панель();
     // История свёрнута в <details> — проверяем наличие текста, не видимость.
     expect(screen.getByText(/Поставьте его на место формой «Где стоит» выше/)).toBeInTheDocument();
+  });
+
+  it("координаты — у места (М-4): показываются от текущего места, правятся в его карточке", () => {
+    панель({
+      periods: [период()],
+      placeGeo: { placeId: "loc-1", lat: "41.311081", lng: "69.240562", address: "Ташкент, ул. Олмачи" },
+    });
+    expect(screen.getByText("41.311081, 69.240562")).toBeVisible();
+    expect(screen.getByText("Ташкент, ул. Олмачи")).toBeVisible();
+    expect(screen.getByRole("link", { name: "✎ Координаты места" })).toHaveAttribute("href", "/card/loc-1#geo");
+    // Своего редактора координат у автомата больше нет — один вход в одни данные.
+    expect(screen.queryByLabelText("Широта")).toBeNull();
+  });
+
+  it("место без координат — говорит, где их отметить, а не «＋ отметить» у автомата", () => {
+    панель({ periods: [период()], placeGeo: { placeId: "loc-1", lat: null, lng: null, address: null } });
+    expect(screen.getByText("не отмечены — в карточке места")).toBeVisible();
   });
 });

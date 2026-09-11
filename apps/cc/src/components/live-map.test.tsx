@@ -1,8 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import type { Entity } from "../lib/core";
-import { KIND_COLOR } from "../lib/machine-points";
+import { POINT_COLOR, type PlacePoint } from "../lib/place-points";
 import { OSM_TILES } from "../lib/map-tiles";
 import LiveMap from "./live-map";
 
@@ -31,22 +30,13 @@ vi.mock("react-leaflet", () => ({
   useMap: () => ({ setView: vi.fn(), fitBounds: vi.fn() }),
 }));
 
-function machine(id: string, name: string, category: number | ""): Entity {
-  return {
-    id,
-    type: "machine",
-    name,
-    externalRef: null,
-    attrs: { категория: category },
-    createdAt: "2026-08-24T00:00:00.000Z",
-    updatedAt: "2026-08-24T00:00:00.000Z",
-    geo: { lat: 41.3111, lng: 69.2797, address: "Ташкент, ул. Олмачи" },
-  };
+function point(id: string, name: string, kind: PlacePoint["kind"], machines: { id: string; name: string }[] = []): PlacePoint {
+  return { id, name, lat: 41.3111, lng: 69.2797, kind, address: "Ташкент, ул. Олмачи", machines };
 }
 
-describe("карта автоматов (LiveMap)", () => {
+describe("карта парка (LiveMap): точка — место", () => {
   it("без настройки рисует бесключевой OSM с атрибуцией contributors", () => {
-    render(<LiveMap machines={[machine("m1", "Olma", 10)]} />);
+    render(<LiveMap points={[point("p1", "Olma", "coffee")]} />);
     const tiles = screen.getByTestId("tile-layer");
     expect(tiles).toHaveAttribute("data-url", "https://tile.openstreetmap.org/{z}/{x}/{y}.png");
     expect(tiles.getAttribute("data-attribution")).toContain("OpenStreetMap");
@@ -55,31 +45,29 @@ describe("карта автоматов (LiveMap)", () => {
   });
 
   it("настроенная подложка приходит пропом и уходит в TileLayer", () => {
-    render(
-      <LiveMap
-        machines={[]}
-        tiles={{ url: "https://tiles.example.uz/{z}/{x}/{y}.png", attribution: "проверка" }}
-      />,
-    );
+    render(<LiveMap points={[]} tiles={{ url: "https://tiles.example.uz/{z}/{x}/{y}.png", attribution: "проверка" }} />);
     const tiles = screen.getByTestId("tile-layer");
     expect(tiles).toHaveAttribute("data-url", "https://tiles.example.uz/{z}/{x}/{y}.png");
     expect(tiles).toHaveAttribute("data-attribution", "проверка");
   });
 
-  it("смена подложки не трогает точки: цвета кофе/снек и ссылка на карточку целы", () => {
+  it("цвет точки — по виду автоматов на месте; пустое место — своим цветом", () => {
     render(
       <LiveMap
-        machines={[machine("m1", "Кофейный", 10), machine("m2", "Снековый", 20)]}
+        points={[point("p1", "Кофейная", "coffee"), point("p2", "Снековая", "snack"), point("p3", "Склад", "empty")]}
         tiles={OSM_TILES}
       />,
     );
-    const markers = screen.getAllByTestId("marker");
-    expect(markers.map((m) => m.getAttribute("data-color"))).toEqual([
-      KIND_COLOR.coffee,
-      KIND_COLOR.snack,
+    expect(screen.getAllByTestId("marker").map((m) => m.getAttribute("data-color"))).toEqual([
+      POINT_COLOR.coffee,
+      POINT_COLOR.snack,
+      POINT_COLOR.empty,
     ]);
-    const links = screen.getAllByRole("link", { name: "Открыть карточку →" });
-    expect(links[0]).toHaveAttribute("href", "/card/m1");
-    expect(links[1]).toHaveAttribute("href", "/card/m2");
+  });
+
+  it("во всплывашке — место и его автоматы со ссылками на карточки", () => {
+    render(<LiveMap points={[point("p1", "KIUT Библиотека", "coffee", [{ id: "m1", name: "KIUT Библиотека" }])]} />);
+    expect(screen.getByRole("link", { name: "Открыть место →" })).toHaveAttribute("href", "/card/p1");
+    expect(screen.getByRole("link", { name: "KIUT Библиотека" })).toHaveAttribute("href", "/card/m1");
   });
 });

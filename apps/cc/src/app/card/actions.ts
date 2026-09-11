@@ -4,6 +4,7 @@ import { resolveActor } from "../../lib/actor";
 import { revalidatePath } from "next/cache";
 import { isPlaceType, isUnit, parseMenu, PLACE_ATTR, type RecipeLine } from "@mydon/shared";
 import { core, CoreUnavailable } from "../../lib/core";
+import { ADDRESS_SOURCE_MAP, GEOCODER_USER_AGENT, NOMINATIM_REVERSE, formatReverse } from "../../lib/geocode";
 
 export interface CreateResult {
   ok: boolean;
@@ -577,17 +578,22 @@ async function writeMenu(
 }
 
 /**
- * Локация автомата: координаты и адрес.
+ * Координаты и адрес МЕСТА (М-4: координата принадлежит месту, а не автомату).
  *
  * Точечная запись, как меню и раскладка: читаем свежую карточку и меняем
  * ТОЛЬКО эти ключи. Пустое значение удаляет поле — «координат нет» честнее
- * нуля, который увёл бы автомат на карте в Гвинейский залив. Пара пишется
+ * нуля, который увёл бы точку на карте в Гвинейский залив. Пара пишется
  * целиком: одна половина координаты бесполезна. Ключи кириллические — Core
  * по ним синхронизирует типизированную точку geo_point.
+ *
+ * Источник (R-H-8). `addressSource: "map"` — адрес в поле ровно тот, что
+ * подставил геокодер: пишем пометку «по карте». Человек адрес поправил —
+ * пометку снимаем: теперь это его слово. Координаты человек поменял — снимаем
+ * и пометку «перенесено с автомата».
  */
 export async function saveLocation(
   id: string,
-  input: { lat: string; lng: string; address: string },
+  input: { lat: string; lng: string; address: string; addressSource?: "map" | "human" },
 ): Promise<ActionResult> {
   const число = (v: string): number | null => {
     const n = Number(String(v).trim().replace(",", "."));
@@ -613,6 +619,7 @@ export async function saveLocation(
     return fail(err);
   }
   const attrs: Record<string, unknown> = { ...(entity.attrs ?? {}) };
+  const было = { lat: число(String(attrs[PLACE_ATTR.lat] ?? "")), lng: число(String(attrs[PLACE_ATTR.lng] ?? "")) };
   if (естьОбе) {
     attrs[PLACE_ATTR.lat] = lat;
     attrs[PLACE_ATTR.lng] = lng;
@@ -620,9 +627,14 @@ export async function saveLocation(
     delete attrs[PLACE_ATTR.lat];
     delete attrs[PLACE_ATTR.lng];
   }
+  if (!естьОбе || было.lat !== lat || было.lng !== lng) delete attrs[PLACE_ATTR.coordsSource];
+
   const адрес = input.address.trim();
+  const прежнийАдрес = typeof attrs[PLACE_ATTR.address] === "string" ? String(attrs[PLACE_ATTR.address]).trim() : "";
   if (адрес.length > 0) attrs[PLACE_ATTR.address] = адрес;
   else delete attrs[PLACE_ATTR.address];
+  if (адрес.length > 0 && input.addressSource === "map") attrs[PLACE_ATTR.addressSource] = ADDRESS_SOURCE_MAP;
+  else if (адрес.length === 0 || адрес !== прежнийАдрес) delete attrs[PLACE_ATTR.addressSource];
 
   try {
     await core.updateEntity(id, { name: entity.name, externalRef: entity.externalRef, attrs });
@@ -630,7 +642,36 @@ export async function saveLocation(
     return fail(err);
   }
   revalidatePath(`/card/${id}`);
+  // Точки карты и счёт «с координатами» живут на списке мест и обзоре.
+  revalidatePath("/places");
+  revalidatePath("/domain/vendhub");
   return { ok: true };
+}
+
+/**
+ * Адрес по точке на карте (М-5). Подсказка для поля «Адрес», а не запись:
+ * сохраняет её владелец, и то с пометкой источника. Сбой или пустой ответ —
+ * `address: null` и слова, почему: форма не должна молча оставлять поле пустым.
+ */
+export async function reverseGeocode(
+  lat: number,
+  lng: number,
+): Promise<{ ok: true; address: string | null } | { ok: false; error: string }> {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return { ok: false, error: "Координаты вне диапазона" };
+  }
+  const url = `${NOMINATIM_REVERSE}?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1&accept-language=ru`;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": GEOCODER_USER_AGENT, Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return { ok: false, error: `Геокодер ответил ${res.status} — впишите адрес руками` };
+    return { ok: true, address: formatReverse(await res.json()) };
+  } catch {
+    return { ok: false, error: "Геокодер не ответил — впишите адрес руками" };
+  }
 }
 
 

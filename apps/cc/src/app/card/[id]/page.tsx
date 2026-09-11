@@ -21,6 +21,7 @@ import {
 import { MachineCard360 } from "../../../components/machine-card-360";
 import { ProductCard360 } from "../../../components/product-card-360";
 import { LocationPanel } from "../../../components/location-panel";
+import { PlaceCoords } from "../../../components/place-coords";
 import { mapTilesFromEnv } from "../../../lib/map-tiles";
 import { BunkerTiles } from "../../../components/bunker-tiles";
 import {
@@ -51,6 +52,7 @@ import { MachineCardPanel } from "../../../components/machine-card-panel";
 import { MachinePartsPanel } from "../../../components/machine-parts-panel";
 import { StocktakeSession } from "../../../components/stocktake-session";
 import {
+  PLACE_ATTR,
   PLACE_TYPES,
   cardPrice,
   matchContractorByName,
@@ -130,6 +132,9 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   // Нужны форме «Где стоит» на вкладке «Локация» — место и состояние там
   // записываются вместе (решение 09.09.2026).
   let places: { id: string; name: string; type: string }[] = [];
+  // Те же места целиком (с geo): координаты автомата — это координаты его
+  // текущего места (М-4), а не поля в карточке автомата.
+  let placeEntities: Entity[] = [];
   if (entity.type === "machine") {
     try {
       coffeePlacements = (await core.coffeePlacements()).filter((p) => p.entityId === entity.id);
@@ -142,14 +147,14 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     const domain = entity.domain;
     if (domain) {
       try {
-        const списки = await Promise.all(
-          PLACE_TYPES.map(async (t) =>
-            (await core.entitiesOfType(domain, t)).map((e) => ({ id: e.id, name: e.name, type: t })),
-          ),
-        );
-        places = списки.flat().sort((a, b) => a.name.localeCompare(b.name, "ru"));
+        const списки = await Promise.all(PLACE_TYPES.map((t) => core.entitiesOfType(domain, t)));
+        placeEntities = списки.flat();
+        places = placeEntities
+          .map((e) => ({ id: e.id, name: e.name, type: e.type }))
+          .sort((a, b) => a.name.localeCompare(b.name, "ru"));
       } catch {
         places = [];
+        placeEntities = [];
       }
     }
   }
@@ -184,6 +189,23 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   const lat = entity.geo ? String(entity.geo.lat) : coord(a["широта"]);
   const lng = entity.geo ? String(entity.geo.lng) : coord(a["долгота"]);
   const hasGeo = lat !== null && lng !== null;
+
+  // Автомат: координаты и адрес — ТЕКУЩЕГО МЕСТА (открытый период), М-4.
+  // Свои поля «широта/долгота» у автомата — наследие до волны 2; они больше
+  // ни на карте, ни здесь не показываются, чтобы не было двух правд.
+  const openPlacement = coffeePlacements.find((p) => p.endDate === null) ?? null;
+  const currentPlace = openPlacement ? (placeEntities.find((e) => e.id === openPlacement.locationId) ?? null) : null;
+  const placeGeo = currentPlace
+    ? {
+        placeId: currentPlace.id,
+        lat: currentPlace.geo ? String(currentPlace.geo.lat) : coord((currentPlace.attrs ?? {})["широта"]),
+        lng: currentPlace.geo ? String(currentPlace.geo.lng) : coord((currentPlace.attrs ?? {})["долгота"]),
+        address:
+          currentPlace.geo?.address ??
+          (typeof (currentPlace.attrs ?? {})["адрес"] === "string" ? String((currentPlace.attrs ?? {})["адрес"]) : null),
+      }
+    : null;
+  const machineHasGeo = placeGeo !== null && placeGeo.lat !== null && placeGeo.lng !== null;
 
   // Рецепт показываем только у товара с принципом «рецепт»: состав из
   // ингредиентов и себестоимость. Ингредиенты берём того же направления —
@@ -864,7 +886,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   // Карточка автомата — своя вёрстка (образец «Карточка 360»): hero-шапка,
   // KPI и вкладки-виджеты. Остальные типы живут в общей плоской карточке ниже.
   if (isMachine) {
-    const mapHref = hasGeo ? `https://maps.google.com/?q=${String(lat)},${String(lng)}` : null;
+    const mapHref = machineHasGeo ? `https://maps.google.com/?q=${placeGeo!.lat},${placeGeo!.lng}` : null;
     return (
       <>
         <div className="page-head">
@@ -899,7 +921,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           partsCount={machineParts.filter((p) => p.removedOn === null).length}
           pricesCount={prices.length}
           photosCount={photos.length}
-          hasGeo={hasGeo}
+          hasGeo={machineHasGeo}
           mapHref={mapHref}
           menuCount={menu.length}
           slots={{
@@ -980,12 +1002,9 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                   places={places}
                   status={machineCard?.status ?? null}
                   statusNote={machineCard?.statusNote ?? null}
-                  lat={lat}
-                  lng={lng}
-                  address={typeof a["адрес"] === "string" ? a["адрес"] : null}
+                  placeGeo={placeGeo}
                   sourceStays={stays ? <StayTimeline stays={stays.stays} /> : undefined}
                   {...(stays ? { sourceMoves: stays.moves } : {})}
-                  tiles={mapTilesFromEnv()}
                 />
               </>
             ),
@@ -1045,19 +1064,34 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
 
       {isComponent && <ComponentInstances rows={componentInstances} />}
 
-      {hasGeo && (
-        <div className="card" id="geo" data-toc="Где стоит">
-          <div className="result-title">Где стоит</div>
-          <p>
-            <a
-              href={`https://maps.google.com/?q=${String(lat)},${String(lng)}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Открыть локацию на карте ({String(lat)}, {String(lng)})
-            </a>
-          </p>
+      {isPlace ? (
+        <div className="card" id="geo" data-toc="Где находится">
+          <div className="result-title">Где находится</div>
+          <PlaceCoords
+            entityId={entity.id}
+            lat={lat}
+            lng={lng}
+            address={entity.geo?.address ?? (typeof a[PLACE_ATTR.address] === "string" ? String(a[PLACE_ATTR.address]) : null)}
+            addressSource={typeof a[PLACE_ATTR.addressSource] === "string" ? String(a[PLACE_ATTR.addressSource]) : null}
+            coordsSource={typeof a[PLACE_ATTR.coordsSource] === "string" ? String(a[PLACE_ATTR.coordsSource]) : null}
+            tiles={mapTilesFromEnv()}
+          />
         </div>
+      ) : (
+        hasGeo && (
+          <div className="card" id="geo" data-toc="Где стоит">
+            <div className="result-title">Где стоит</div>
+            <p>
+              <a
+                href={`https://maps.google.com/?q=${String(lat)},${String(lng)}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Открыть локацию на карте ({String(lat)}, {String(lng)})
+              </a>
+            </p>
+          </div>
+        )
       )}
 
       {isProduct && (

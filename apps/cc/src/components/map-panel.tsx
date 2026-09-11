@@ -2,10 +2,9 @@
 
 import { useState } from "react";
 import dynamic from "next/dynamic";
-import type { Entity } from "../lib/core";
-import { machineCounts, KIND_COLOR } from "../lib/machine-points";
+import { POINT_COLOR, type PlacePoint } from "../lib/place-points";
 import type { MapTiles } from "../lib/map-tiles";
-import { MachineMap } from "./machine-map";
+import { PlaceScheme } from "./place-scheme";
 
 // Leaflet трогает window — только на клиенте. Пока грузится, показываем схему.
 const LiveMap = dynamic(() => import("./live-map"), {
@@ -17,16 +16,28 @@ const LiveMap = dynamic(() => import("./live-map"), {
   ),
 });
 
+/** Числа для подписи — считаются на сервере (`placeMapCounts`). */
+export interface MapPanelCounts {
+  machinesTotal: number;
+  machinesOnMap: number;
+  coffee: number;
+  snack: number;
+  unknown: number;
+  machinesNoPlace: number;
+  machinesOnPlacesNoCoords: number;
+  emptyPlacesOnMap: number;
+}
+
 /**
- * Панель карты автоматов. Два вида одних и тех же точек:
+ * Панель карты парка. Точка — место (М-4), на нём — автоматы. Два вида одних
+ * и тех же точек:
  *  • «Карта» — настоящая карта с дорогами (Leaflet; подложка — `tiles`
  *    с сервера, дефолт OSM, см. lib/map-tiles.ts);
  *  • «Схема» — наша SVG-сетка, работает без интернета (запас на сбой подложки).
- * Переключатель наверху. Ни маршрутов, ни денег — только отображение (этап интерфейса).
  */
-export function MapPanel({ machines, tiles }: { machines: Entity[]; tiles?: MapTiles }) {
+export function MapPanel({ points, counts, tiles }: { points: PlacePoint[]; counts: MapPanelCounts; tiles?: MapTiles }) {
   const [mode, setMode] = useState<"live" | "scheme">("live");
-  const c = machineCounts(machines);
+  const c = counts;
 
   const tab = (active: boolean): React.CSSProperties => ({
     padding: "4px 12px",
@@ -51,22 +62,29 @@ export function MapPanel({ machines, tiles }: { machines: Entity[]; tiles?: MapT
           </button>
         </div>
         <div style={{ display: "flex", gap: 14, marginLeft: "auto", fontSize: 11.5, color: "var(--tx-2)", flexWrap: "wrap" }}>
-          <span><span style={{ color: KIND_COLOR.coffee }}>●</span> кофе {c.coffee}</span>
-          <span><span style={{ color: KIND_COLOR.snack }}>●</span> снеки и напитки {c.snack}</span>
-          {c.unknown > 0 && <span><span style={{ color: KIND_COLOR.unknown }}>○</span> тип не указан {c.unknown}</span>}
+          <span><span style={{ color: POINT_COLOR.coffee }}>●</span> кофе {c.coffee}</span>
+          <span><span style={{ color: POINT_COLOR.snack }}>●</span> снеки и напитки {c.snack}</span>
+          {c.unknown > 0 && <span><span style={{ color: POINT_COLOR.unknown }}>○</span> тип не указан {c.unknown}</span>}
+          {c.emptyPlacesOnMap > 0 && (
+            <span><span style={{ color: POINT_COLOR.empty }}>○</span> мест без автоматов {c.emptyPlacesOnMap}</span>
+          )}
         </div>
       </div>
 
       {mode === "live" ? (
-        <LiveMap machines={machines} {...(tiles ? { tiles } : {})} />
+        <LiveMap points={points} {...(tiles ? { tiles } : {})} />
       ) : (
-        <MachineMap machines={machines} />
+        <PlaceScheme points={points} />
       )}
 
       <div style={{ padding: "8px 6px 2px", fontSize: 11.5, color: "var(--tx-3)", display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <span>на карте {c.onMap} из {c.total}</span>
-        {c.noCoords > 0 && <span style={{ color: "#FF6B1A" }}>без координат {c.noCoords} — добавьте адрес в карточке</span>}
-        <span style={{ marginLeft: "auto" }}>маршруты — следующий этап</span>
+        <span>автоматов на карте {c.machinesOnMap} из {c.machinesTotal}</span>
+        {c.machinesOnPlacesNoCoords > 0 && (
+          <span style={{ color: "#FF6B1A" }}>{c.machinesOnPlacesNoCoords} стоят на местах без координат</span>
+        )}
+        {c.machinesNoPlace > 0 && (
+          <span style={{ color: "#FF6B1A" }}>{c.machinesNoPlace} без места в «Где стоит»</span>
+        )}
       </div>
     </div>
   );
