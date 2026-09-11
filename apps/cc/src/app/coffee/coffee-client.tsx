@@ -465,7 +465,7 @@ function TableTab({
     <>
       {fillByLocation.size > 0 && (
         <>
-          <div className="section-title">Наглядно: уровни бункеров (последняя заливка против эталона)</div>
+          <div className="section-title">Наглядно: последняя заливка против эталона — не текущий остаток</div>
           <div className="bunker-grid">
             {[...fillByLocation.entries()]
               .sort((a, b) => a[0].localeCompare(b[0], "ru"))

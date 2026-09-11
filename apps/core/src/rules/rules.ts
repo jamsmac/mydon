@@ -546,14 +546,20 @@ export const RULES: Rule[] = [
   // ── Кофе-бункеры: проактивный мониторинг (порт monitor-stock донора) ──
   // Как и infra.disk: одно и то же событие, два правила по порогу — тяжёлый
   // случай будит немедленно, обычный ждёт до брифинга.
+  //
+  // Порог меряет ПОСЛЕДНЮЮ ЗАЛИВКУ против эталона, а не текущий остаток: между
+  // взвешиваниями остаток бункера система не наблюдает (R-B-9,
+  // docs/REPLENISHMENT_MODEL.md). Прежний текст «Бункер почти пуст» будил
+  // владельца утверждением, которого система знать не может, и отправлял
+  // решать не ту задачу — везти ингредиент, а не выяснять, почему недолили.
   {
     id: "coffee.underfill.critical",
     eventType: "coffee.underfill",
     urgency: "immediate",
     when: (c) => num(c.payload.fillRatio) < 0.3,
     format: (c) =>
-      `☕🔴 Бункер почти пуст: ${str(c.payload.location)}, бункер ${str(c.payload.position)} ` +
-      `(${str(c.payload.ingredient)}) — ${num(c.payload.netFillWeight)} г из ${num(c.payload.targetFillWeight)} г эталона.`,
+      `☕🔴 Сильный недолив при последней заливке: ${str(c.payload.location)}, бункер ${str(c.payload.position)} ` +
+      `(${str(c.payload.ingredient)}) — залили ${num(c.payload.netFillWeight)} г из ${num(c.payload.targetFillWeight)} г эталона.`,
   },
   {
     id: "coffee.underfill.watch",
@@ -561,8 +567,8 @@ export const RULES: Rule[] = [
     urgency: "briefing",
     when: (c) => num(c.payload.fillRatio) >= 0.3,
     format: (c) =>
-      `☕🟡 Недолив: ${str(c.payload.location)}, бункер ${str(c.payload.position)} ` +
-      `(${str(c.payload.ingredient)}) — ${num(c.payload.netFillWeight)} г из ${num(c.payload.targetFillWeight)} г эталона.`,
+      `☕🟡 Недолив при последней заливке: ${str(c.payload.location)}, бункер ${str(c.payload.position)} ` +
+      `(${str(c.payload.ingredient)}) — залили ${num(c.payload.netFillWeight)} г из ${num(c.payload.targetFillWeight)} г эталона.`,
   },
   {
     id: "coffee.anomaly.critical",

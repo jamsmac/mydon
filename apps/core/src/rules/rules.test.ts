@@ -113,7 +113,7 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.equal(formatAmount("не число"), "0 UZS");
   });
 
-  it("недолив бункера: почти пустой — немедленно, обычный — в брифинг", () => {
+  it("недолив бункера: сильный — немедленно, обычный — в брифинг", () => {
     const critical = applyRules(
       ctx("coffee.underfill", { location: "AH", position: 7, ingredient: "Кофе", netFillWeight: 80, targetFillWeight: 600, fillRatio: 0.13 }),
     );
@@ -127,6 +127,18 @@ describe("Правила уведомлений (FR-2)", () => {
     );
     assert.equal(watch.length, 1);
     assert.equal(watch[0].urgency, "briefing");
+  });
+
+  it("недолив говорит о последней заливке, а не о текущем остатке — его система не наблюдает (R-B-9)", () => {
+    for (const fillRatio of [0.13, 0.67]) {
+      const [n] = applyRules(
+        ctx("coffee.underfill", { location: "AH", position: 7, ingredient: "Кофе", netFillWeight: 80, targetFillWeight: 600, fillRatio }),
+      );
+      assert.ok(n);
+      assert.match(n.text, /при последней заливке/);
+      assert.match(n.text, /залили 80 г из 600 г эталона/);
+      assert.doesNotMatch(n.text, /пуст/);
+    }
   });
 
   it("расхождение расхода: сильное — немедленно, умеренное — в брифинг", () => {

@@ -2,8 +2,9 @@ import type { CoffeeFillStatusRow } from "../lib/core";
 
 /**
  * Наглядные бункеры — как в референс-приложении владельца (его слово,
- * 2026-08-04): восемь столбиков-«канистр» точки, уровень = чистый вес
- * последней заливки против эталона позиции. Недолив — оранжевым, норма —
+ * 2026-08-04): восемь столбиков-«канистр» точки, высота = чистый вес
+ * ПОСЛЕДНЕЙ ЗАЛИВКИ против эталона позиции — не текущий остаток (R-B-9):
+ * между взвешиваниями его система не наблюдает. Недолив — оранжевым, норма —
  * зелёным, без эталона — приглушённо (высота честно неизвестна, показываем
  * половину с пометкой «?»), пустая позиция — контур без заливки.
  *
@@ -28,8 +29,8 @@ export function BunkerLevels({ rows, compact = false }: { rows: CoffeeFillStatus
         const pct = known ? Math.max(6, Math.min(100, Math.round(r.fillRatio! * 100))) : 50;
         const cls = r.status === "underfill" ? "hot" : known ? "ok" : "dim";
         const title =
-          `Бункер ${pos}${r.ingredientName ? ` · ${r.ingredientName}` : ""}: ${r.netFillWeight} г` +
-          (r.targetFillWeight !== null ? ` из ${r.targetFillWeight} г (${Math.round((r.fillRatio ?? 0) * 100)}%)` : " · эталон не задан");
+          `Бункер ${pos}${r.ingredientName ? ` · ${r.ingredientName}` : ""}: последняя заливка ${r.netFillWeight} г` +
+          (r.targetFillWeight !== null ? ` из ${r.targetFillWeight} г эталона (${Math.round((r.fillRatio ?? 0) * 100)}%)` : " · эталон не задан");
         return (
           <div className="bunker" key={pos} title={title}>
             <div className="bk-bar">
