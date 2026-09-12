@@ -31,6 +31,8 @@ export interface ParsedReturns {
   returns: { position: number; containerNumber: number; weight: number }[];
   locationNote: string | null;
   rejected: string[];
+  /** Как взвешен весь список: с крышкой (умолчание) или без — строкой «без крышки». */
+  weighedWithLid: boolean;
 }
 
 /** Сообщение — про возвраты? Хотя бы одна строка «позиция. набор. вес». */
@@ -108,6 +110,7 @@ export async function recordContainerReturns(
         position: r.position,
         containerNumber: r.containerNumber,
         weight: r.weight,
+        weighedWithLid: parsed.weighedWithLid,
         returnedDate,
         ...(parsed.locationNote ? { locationNote: parsed.locationNote } : {}),
         createdBy: `person:${person.id}`,
@@ -127,7 +130,10 @@ export async function recordContainerReturns(
   if (failed.length === parsed.returns.length) {
     lines.push("⚠️ Сервер не ответил — ни одна строка не записана. Отправь сообщение ещё раз через минуту.");
   } else {
-    lines.push(`✅ Остатки записал: ${saved} из ${parsed.returns.length} наборов${where}.`);
+    // Состояние называем в ответе, только когда оно НЕ обычное: иначе строка
+    // «с крышкой» в каждом ответе перестанет читаться уже к третьему разу.
+    const how = parsed.weighedWithLid ? "" : " — взвешено БЕЗ крышки";
+    lines.push(`✅ Остатки записал: ${saved} из ${parsed.returns.length} наборов${where}${how}.`);
     if (posted.length > 0) lines.push(`📦 На склад: ${posted.join("; ")}.`);
     if (unposted.length > 0) {
       lines.push(`⚠️ Не оприходовано — ${unposted.join("; ")}. Тара и ингредиент — на карточке узла в панели.`);

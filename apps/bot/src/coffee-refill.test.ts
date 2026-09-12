@@ -162,7 +162,11 @@ describe("Заливка бункера: полный визард (точка �
     const afterBefore = await handleCoffeeRefillBefore(1, "-", deps);
     assert.match(afterBefore.text, /ПОСЛЕ засыпки/i);
 
-    const done = await handleCoffeeRefillWeight(1, "1200", deps, ME);
+    const asked = await handleCoffeeRefillWeight(1, "1200", deps, ME);
+    assert.match(asked.text, /с крышкой или без/i, "текстом вес пришёл — состояние спрашиваем кнопкой");
+    assert.equal(calls.length, 0, "до ответа про крышку ничего не записано");
+    const { edit: done } = await handleCoffeeRefillCallback(1, { kind: "lid", withLid: true }, ME, deps);
+    assert.ok(done);
     assert.match(done.text, /✅ Записал/);
     assert.match(done.text, /American Hospital/);
     // Главная строка — чистый вес: 1200 брутто − 600 тара набора 7 на позиции 7.
@@ -178,6 +182,7 @@ describe("Заливка бункера: полный визард (точка �
     assert.ok(!("packageCount" in refillCall.input), "упаковки больше не спрашиваем — учёт в граммах");
     assert.equal(refillCall.input.containerNumber, 7);
     assert.equal(refillCall.input.createdBy, `person:${ME.id}`);
+    assert.equal(refillCall.input.weighedWithLid, true);
     assert.match(String(refillCall.input.enteredDate), /^\d{4}-\d{2}-\d{2}$/);
 
     // Обход продолжается: точка остаётся выбранной, дальше — меню точки.
@@ -195,7 +200,10 @@ describe("Заливка бункера: полный визард (точка �
     await handleCoffeeRefillCallback(1, { kind: "position", position: 1 }, ME, deps);
     await handleCoffeeRefillContainer(1, "-", ME, deps);
     await handleCoffeeRefillBefore(1, "-", deps);
-    const done = await handleCoffeeRefillWeight(1, "600", deps, ME);
+    await handleCoffeeRefillWeight(1, "600", deps, ME);
+    const { edit: done } = await handleCoffeeRefillCallback(1, { kind: "lid", withLid: false }, ME, deps);
+    assert.ok(done);
+    assert.equal((calls[0] as { input: Record<string, unknown> }).input.weighedWithLid, false, "«без крышки» доезжает до Core");
 
     assert.match(done.text, /Набор не назван/i, "без набора честно говорим, что нетто не посчитать");
     const refillCall = calls[0] as { kind: string; input: Record<string, unknown> };
@@ -395,14 +403,38 @@ describe("Заливка кнопками: цифровая клавиатура
     assert.equal(calls.length, 0);
   });
 
+  it("подтверждение называет состояние: «без крышки» доезжает до Core одним нажатием", async () => {
+    const { deps, calls } = await toContainerStep();
+    await type(deps, "7");
+    await done(deps);
+    await skip(deps);
+    await type(deps, "1600");
+    // Отдельного шага «а крышка была?» нет: состояние — это и есть «готово».
+    await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done", variant: "nolid" } }, ME, deps);
+    const call = calls[0] as { input: Record<string, unknown> };
+    assert.equal(call.input.filledWeight, 1600);
+    assert.equal(call.input.weighedWithLid, false);
+  });
+
+  it("старая кнопка «Готово» без варианта читается как прежнее правило — с крышкой", async () => {
+    const { deps, calls } = await toContainerStep();
+    await type(deps, "7");
+    await done(deps);
+    await skip(deps);
+    await type(deps, "1600");
+    await done(deps);
+    assert.equal((calls[0] as { input: Record<string, unknown> }).input.weighedWithLid, true);
+  });
+
   it("текстовый ввод продолжает работать и даёт тот же итог", async () => {
     const { deps, calls } = await toContainerStep();
     await handleCoffeeRefillContainer(1, "7", ME, deps);
     await handleCoffeeRefillBefore(1, "-", deps);
-    const fin = await handleCoffeeRefillWeight(1, "1600", deps, ME);
+    await handleCoffeeRefillWeight(1, "1600", deps, ME);
+    const { edit: fin } = await handleCoffeeRefillCallback(1, { kind: "lid", withLid: true }, ME, deps);
     const call = calls[0] as { input: Record<string, unknown> };
     assert.equal(call.input.filledWeight, 1600);
-    assert.match(fin.text, /Чистый ингредиент: 1000 г/);
+    assert.match(fin!.text, /Чистый ингредиент: 1000 г/);
   });
 });
 
@@ -853,6 +885,7 @@ describe("Дробный вес и честные 4xx (аудит 18.08)", () =>
       measuredBefore: null,
     });
     await handleCoffeeRefillWeight(31, "1200,5", deps, ME);
+    await handleCoffeeRefillCallback(31, { kind: "lid", withLid: true }, ME, deps);
     const refill = calls.find((c) => (c as { kind: string }).kind === "refill") as
       | { input: Record<string, unknown> }
       | undefined;
@@ -878,8 +911,9 @@ describe("Дробный вес и честные 4xx (аудит 18.08)", () =>
       containerNumber: 7,
       measuredBefore: null,
     });
-    const reply = await handleCoffeeRefillWeight(32, "1600", deps, ME);
-    assert.match(reply.text, /ошибка в данных/i);
-    assert.doesNotMatch(reply.text, /ещё раз через минуту/, "совет-ловушка вечного ретрая исчез");
+    await handleCoffeeRefillWeight(32, "1600", deps, ME);
+    const { edit: reply } = await handleCoffeeRefillCallback(32, { kind: "lid", withLid: true }, ME, deps);
+    assert.match(reply!.text, /ошибка в данных/i);
+    assert.doesNotMatch(reply!.text, /ещё раз через минуту/, "совет-ловушка вечного ретрая исчез");
   });
 });

@@ -48,7 +48,7 @@ try {
   assert.equal(ret.replay, false); assert.equal(ret.netWeight, 377); assert.equal(ret.tare, 410); assert.equal(ret.unitLabel, "H-27-1");
   assert.equal(ret.ingredientName, "Кофе зерновой"); assert.ok(ret.stockMovementId); assert.equal(ret.reason, null);
   const [mv] = await run(`select m.kind, m.qty, m.unit, m.dt, b.batch_code, b.opened_on, b.source from stock_movement m join stock_batch b on b.id = m.batch_id where m.id = $1`, [ret.stockMovementId]);
-  assert.equal(mv.kind, "return"); assert.equal(Number(mv.qty), 377); assert.equal(mv.batch_code, "возврат из бункера H-27-1"); assert.equal(new Date(mv.opened_on).toISOString().slice(0, 10), "2026-08-10"); assert.equal(mv.source, "coffee-return");
+  assert.equal(mv.kind, "return"); assert.equal(Number(mv.qty), 377); assert.equal(mv.batch_code, "возврат из бункера H-27-1 2026-08-10 · 787 г"); assert.equal(new Date(mv.opened_on).toISOString().slice(0, 10), "2026-08-10"); assert.equal(mv.source, "coffee-return");
   const replay = await ledger.recordContainerReturn({ position: 1, containerNumber: 27, weight: 787, returnedDate: "2026-08-10" });
   assert.equal(replay.replay, true); assert.equal(replay.id, ret.id); assert.equal(replay.stockMovementId, ret.stockMovementId);
   assert.equal((await run(`select count(*)::int as n from stock_movement where kind = 'return'`))[0].n, 1, "дубль возврата не приходуется второй раз");

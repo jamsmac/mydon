@@ -160,6 +160,10 @@ export class SubmitRefillDto {
   @IsOptional() @IsInt() @Min(1)
   packageCount?: number;
 
+  /** Была ли крышка на бункере при ЭТИХ замерах; нет — `true` (прежнее правило R-B-19). */
+  @IsOptional() @IsBoolean()
+  weighedWithLid?: boolean;
+
   @IsISO8601()
   enteredDate!: string;
 
@@ -200,6 +204,10 @@ export class RecordContainerReturnDto {
 
   @IsInt() @Min(0) @Max(10000)
   weight!: number;
+
+  /** Была ли крышка при взвешивании возврата; нет — `true` (прежнее правило R-B-19). */
+  @IsOptional() @IsBoolean()
+  weighedWithLid?: boolean;
 
   @IsISO8601()
   returnedDate!: string;

@@ -4,7 +4,14 @@ import { and, desc, eq, isNull, lte, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { StockService } from "../stock/stock.service";
 import { settingValue } from "../system/settings";
-import { actorKindOf } from "@mydon/shared";
+import {
+  actorKindOf,
+  CANONICAL_BASIS,
+  isWeighBasis,
+  toBasis,
+  WEIGH_BASIS_LABELS,
+  type WeighBasis,
+} from "@mydon/shared";
 import { requestActor } from "../common/request-actor";
 
 /**
@@ -22,12 +29,15 @@ export interface RecordReturnInput {
   position: number;
   containerNumber: number;
   weight: number;
+  /** Была ли крышка при взвешивании возврата; нет — `true` (прежнее правило). */
+  weighedWithLid?: boolean;
   returnedDate: string;
   locationNote?: string;
   createdBy?: string;
 }
 
 export type ReturnPostingReason =
+  | "крышка: замер и тара в разных состояниях, вес крышки неизвестен"
   | "нет тары"
   | "брутто меньше тары"
   | "остаток нулевой"
@@ -126,35 +136,54 @@ export class CoffeeLedgerService {
           eq(coffeeContainerReturn.position, input.position),
           eq(coffeeContainerReturn.containerNumber, input.containerNumber),
           eq(coffeeContainerReturn.weight, input.weight),
+          // Состояние — часть замера: «1900 с крышкой» и «1900 без крышки» это
+          // разные взвешивания, а не повтор одного (решение 12.09.2026).
+          eq(coffeeContainerReturn.weighedWithLid, input.weighedWithLid ?? true),
           eq(coffeeContainerReturn.returnedDate, input.returnedDate),
         ),
       )
       .limit(1);
     const unit = await this.hopperUnit(input.containerNumber, input.position);
     const unitLabel = this.unitLabelOf(unit, input.containerNumber, input.position);
+    const tare = await this.tareOf(unit, input.containerNumber, input.position);
+    // Замер и тара могут быть в разных состояниях (с крышкой / без): приводим
+    // к основанию тары по весу крышки ЭТОГО бункера. Вес крышки неизвестен —
+    // не вычитаем «как есть» (это был бы сдвиг ровно в крышку), а честно
+    // называем причину (решение 12.09.2026 вместо допущения R-B-19).
+    const weighedBasis: WeighBasis = (input.weighedWithLid ?? true) ? "with_lid" : "without_lid";
+    const tareBasis: WeighBasis = isWeighBasis(unit?.tareBasis) ? unit.tareBasis : CANONICAL_BASIS;
+    const weightInTareBasis = toBasis(input.weight, weighedBasis, tareBasis, unit?.lidWeight ?? null);
+    const noReasonYet = (): ReturnPostingReason =>
+      tare == null
+        ? "нет тары"
+        : weightInTareBasis === null
+          ? "крышка: замер и тара в разных состояниях, вес крышки неизвестен"
+          : "ингредиент неизвестен";
     if (dup) {
       return {
         id: dup.id,
         replay: true,
         partUnitId: dup.partUnitId,
         unitLabel,
-        tare: dup.netWeight != null ? dup.weight - dup.netWeight : null,
+        // Тара — с карточки, а не «брутто минус нетто»: при разных основаниях
+        // взвешивания эта разность больше не равна таре.
+        tare,
         netWeight: dup.netWeight,
         ingredientId: dup.ingredientId,
         ingredientName: null,
         stockMovementId: dup.stockMovementId,
-        reason: dup.stockMovementId ? null : dup.netWeight == null ? "нет тары" : "ингредиент неизвестен",
+        reason: dup.stockMovementId ? null : dup.netWeight == null ? noReasonYet() : "ингредиент неизвестен",
       };
     }
 
-    const tare = await this.tareOf(unit, input.containerNumber, input.position);
     const ingredient = await this.pairedIngredient(input.containerNumber, input.position, input.returnedDate);
     let netWeight: number | null = null;
     let reason: ReturnPostingReason | null = null;
     if (tare == null) reason = "нет тары";
-    else if (input.weight < tare) reason = "брутто меньше тары";
+    else if (weightInTareBasis === null) reason = "крышка: замер и тара в разных состояниях, вес крышки неизвестен";
+    else if (weightInTareBasis < tare) reason = "брутто меньше тары";
     else {
-      netWeight = input.weight - tare;
+      netWeight = weightInTareBasis - tare;
       if (netWeight === 0) reason = "остаток нулевой";
       else if (!ingredient) reason = "ингредиент неизвестен";
       else if (!ingredient.entityId) reason = "у ингредиента нет карточки склада";
@@ -171,9 +200,25 @@ export class CoffeeLedgerService {
           qty: netWeight,
           unit: "г",
           dt: input.returnedDate,
-          batchCode: `возврат из бункера ${unitLabel}`,
-          note: `возврат бункера ${unitLabel} ${input.returnedDate}: брутто ${input.weight} − тара ${tare}`,
-          clientKey: `coffee-return:${input.containerNumber}:${input.position}:${input.returnedDate}:${input.weight}`,
+          // Код партии уникален в паре с ингредиентом (`stock_batch_code_key`), а
+          // один бункер возвращают снова и снова: без даты и веса ВТОРОЙ
+          // проведённый возврат того же бункера падал бы 500-й. На проде это
+          // ещё не выстрелило только потому, что из 1080 возвратов не проведён
+          // ни один (все до 03.08.2026, до появления леджера) — поймано
+          // сценарием `check-lid.mjs` 12.09.2026.
+          batchCode: `возврат из бункера ${unitLabel} ${input.returnedDate} · ${input.weight} г${weighedBasis === CANONICAL_BASIS ? "" : " без крышки"}`,
+          // В примечании видно, ЧТО взвесили и как это привели: без этого
+          // «брутто 1900 − тара 1300 = 400» при разных основаниях не сходится
+          // руками, и человек решит, что ошиблась система.
+          note:
+            `возврат бункера ${unitLabel} ${input.returnedDate}: брутто ${input.weight} (${WEIGH_BASIS_LABELS[weighedBasis]})` +
+            (weighedBasis === tareBasis ? "" : ` → ${weightInTareBasis} (${WEIGH_BASIS_LABELS[tareBasis]})`) +
+            ` − тара ${tare}`,
+          // Старые ключи не трогаем: до решения всё мерили с крышкой, и
+          // изменение формы ключа завело бы повтор как новый приход.
+          clientKey:
+            `coffee-return:${input.containerNumber}:${input.position}:${input.returnedDate}:${input.weight}` +
+            (weighedBasis === CANONICAL_BASIS ? "" : `:${weighedBasis}`),
           createdBy: input.createdBy ?? requestActor("owner"),
         });
         stockMovementId = posted.movement.id;
@@ -186,6 +231,7 @@ export class CoffeeLedgerService {
         position: input.position,
         containerNumber: input.containerNumber,
         weight: input.weight,
+        weighedWithLid: weighedBasis === "with_lid",
         returnedDate: input.returnedDate,
         locationNote: input.locationNote ?? null,
         partUnitId: unit?.id ?? null,

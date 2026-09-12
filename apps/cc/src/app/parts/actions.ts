@@ -50,9 +50,14 @@ export async function savePartUnit(id: string, form: FormData): Promise<ActionRe
   const setNumber = int("setNumber");
   const hopperPosition = int("hopperPosition");
   const tareWeight = int("tareWeight");
+  const lidWeight = int("lidWeight");
   if (setNumber === undefined || hopperPosition === undefined || tareWeight === undefined) {
     return { ok: false, error: "Набор, позиция и тара — целые числа" };
   }
+  if (lidWeight === undefined) return { ok: false, error: "Вес крышки — целое число грамм" };
+  // Поля крышки есть только в форме бункера: у прочих узлов их нет вовсе, и
+  // слать `tareBasis: null` нельзя — основание не бывает пустым.
+  const hasLid = form.has("tareBasis");
   try {
     await core.partUpdate(id, {
       serialNumber: text("serialNumber"),
@@ -61,6 +66,7 @@ export async function savePartUnit(id: string, form: FormData): Promise<ActionRe
       setNumber,
       hopperPosition,
       tareWeight,
+      ...(hasLid ? { tareBasis: String(form.get("tareBasis")), lidWeight } : {}),
       note: text("note"),
       actorRef: await resolveActor(),
     });

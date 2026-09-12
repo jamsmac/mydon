@@ -149,6 +149,7 @@ export type CoffeeRefillCallback =
   | { kind: "location"; id: string }
   | { kind: "position"; position: number; ingredientId?: string }
   | { kind: "num"; press: NumpadPress }
+  | { kind: "lid"; withLid: boolean }
   | { kind: "dupSkip" }
   | { kind: "dupWrite" }
   | { kind: "cancel" };
@@ -160,6 +161,8 @@ export function parseCoffeeRefillCallback(data: string): CoffeeRefillCallback | 
   // Хвост с ингредиентом — только у двусмысленной позиции (см. positionKeyboard).
   const pos = /^cf:pos:([1-8])(?::([0-9a-f-]{36}))?$/.exec(data);
   if (pos) return pos[2] ? { kind: "position", position: Number(pos[1]), ingredientId: pos[2] } : { kind: "position", position: Number(pos[1]) };
+  if (data === "cf:lid:1") return { kind: "lid", withLid: true };
+  if (data === "cf:lid:0") return { kind: "lid", withLid: false };
   if (data === "cf:dup:skip") return { kind: "dupSkip" };
   if (data === "cf:dup:write") return { kind: "dupWrite" };
   const press = parseNumpadCallback("cf", data);
@@ -199,11 +202,42 @@ function beforeStep(draft = ""): StaffReply {
   };
 }
 
-/** Вес обязателен — «пропустить» на нём нет: молча потерянный вес хуже вопроса. */
+/**
+ * Вес обязателен — «пропустить» на нём нет: молча потерянный вес хуже вопроса.
+ *
+ * Подтверждений два, и они же называют состояние: с крышкой бункер был на
+ * весах или без (решение 12.09.2026 вместо допущения R-B-19). Отдельного шага
+ * «а крышка была?» нет намеренно — лишний вопрос в поле отвечают не глядя, и
+ * данные становятся хуже, чем были.
+ */
 function weightStep(position: number, draft = ""): StaffReply {
   return {
     text: numpadText(`Бункер ${position}. Сколько весит ПОСЛЕ засыпки, с бункером?`, draft, "г"),
-    keyboard: numpadKeyboard("cf"),
+    keyboard: numpadKeyboard("cf", {
+      done: [
+        { text: "✅ с крышкой", variant: "lid" },
+        { text: "✅ без крышки", variant: "nolid" },
+      ],
+    }),
+  };
+}
+
+/**
+ * То же состояние, но для тех, кто присылает вес текстом: кнопок там не было,
+ * и спросить больше негде. Оба пути обязаны записывать ОДНО И ТО ЖЕ.
+ */
+function lidStep(weight: number): StaffReply {
+  return {
+    text: `Вес ${weight} г. Бункер был на весах с крышкой или без?`,
+    keyboard: {
+      inline_keyboard: [
+        [
+          { text: "С крышкой", callback_data: "cf:lid:1" },
+          { text: "Без крышки", callback_data: "cf:lid:0" },
+        ],
+        [{ text: "✖️ Отмена", callback_data: "cf:cancel" }],
+      ],
+    },
   };
 }
 
@@ -235,6 +269,8 @@ export function coffeeRefillStepHint(step: string): string {
       return "Сколько весил бункер ДО досыпки, с остатком? Число, или «-» если пустой.";
     case "weight":
       return "Напиши вес ПОСЛЕ засыпки, с бункером, граммы (например 1600). «отмена» — бросить.";
+    case "lid":
+      return "Ответь кнопкой: бункер взвешен с крышкой или без.";
     case "dup":
       return "Такая запись уже есть — ответь кнопкой: повтор или вторая заливка.";
     default:
@@ -348,6 +384,15 @@ export async function handleCoffeeRefillCallback(
     };
   }
 
+  if (cb.kind === "lid") {
+    // Пришли сюда только с ТЕКСТОВОГО ввода веса: у кнопочного состояние уже
+    // названо тем нажатием, которым закончили набор.
+    if (conv.step !== "lid") return { answer: "Кнопка устарела" };
+    deps.conversations.advance(chatId, "lid", { weighedWithLid: cb.withLid });
+    const done = await saveRefill(chatId, person, deps);
+    return { answer: cb.withLid ? "Записал" : "Записал (без крышки)", edit: done };
+  }
+
   if (cb.kind === "dupWrite") {
     deps.conversations.advance(chatId, "weight", { dupConfirmed: true });
     const done = await saveRefill(chatId, person, deps);
@@ -428,9 +473,16 @@ async function numpadPress(
     if (press.kind === "skip") return { answer: "Вес обязателен" };
     const weight = parseAmount(draft);
     if (weight === null || weight <= 0) return { answer: "Сначала набери вес" };
-    deps.conversations.advance(chatId, "weight", { filledWeight: weight, draft: "" });
+    // Вариант подтверждения и есть состояние замера. Его отсутствие (старое
+    // сообщение с одной кнопкой «Готово» в чате) читаем как прежнее правило.
+    const weighedWithLid = press.kind === "done" && press.variant === "nolid" ? false : true;
+    deps.conversations.advance(chatId, "weight", { filledWeight: weight, weighedWithLid, draft: "" });
     const done = await saveRefill(chatId, person, deps);
-    return { answer: "Записал", edit: done };
+    return { answer: weighedWithLid ? "Записал" : "Записал (без крышки)", edit: done };
+  }
+
+  if (step === "lid") {
+    return { answer: "Ответь кнопкой: с крышкой или без" };
   }
 
   if (step === "dup") {
@@ -488,9 +540,9 @@ export async function handleCoffeeRefillWeight(
   if (weight === null || weight <= 0) {
     return { text: "Не понял число. Напиши вес в граммах, например 1600." };
   }
-  deps.conversations.advance(chatId, "weight", { filledWeight: weight, draft: "" });
+  deps.conversations.advance(chatId, "lid", { filledWeight: weight, draft: "" });
   if (!person) return { text: coffeeRefillStepHint("") };
-  return saveRefill(chatId, person, deps);
+  return lidStep(Math.round(weight));
 }
 
 /**
@@ -513,6 +565,9 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
   const containerNumber = typeof conv.data.containerNumber === "number" ? conv.data.containerNumber : null;
   const measuredBefore =
     typeof conv.data.measuredBefore === "number" ? Math.round(conv.data.measuredBefore) : null;
+  // Оба замера («до» и «после») — один акт взвешивания, состояние у них общее.
+  // Не сказали — прежнее правило R-B-19, как и у всех записей до решения.
+  const weighedWithLid = conv.data.weighedWithLid !== false;
 
   if (!locationId || !Number.isFinite(position) || !Number.isFinite(filledWeight)) {
     deps.conversations.clear(chatId);
@@ -569,6 +624,7 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
       ...(ingredientId !== null ? { ingredientId } : {}),
       ...(containerNumber !== null ? { containerNumber } : {}),
       ...(measuredBefore !== null ? { measuredBefore } : {}),
+      weighedWithLid,
       filledWeight,
       enteredDate: todayIso(),
       createdBy: `person:${person.id}`,

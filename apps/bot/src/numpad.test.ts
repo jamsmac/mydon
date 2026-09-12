@@ -81,6 +81,17 @@ describe("Цифровая клавиатура: вид", () => {
     assert.ok(JSON.stringify(numpadKeyboard("cf")).includes("cf:cancel"));
   });
 
+  it("подтверждений может быть два, и вариант доезжает до разбора", () => {
+    const kb = numpadKeyboard("cf", { done: [{ text: "✅ с крышкой", variant: "lid" }, { text: "✅ без крышки", variant: "nolid" }] });
+    const flat = kb.inline_keyboard.flat();
+    assert.ok(flat.some((b) => b.callback_data === "cf:n:ok:lid"));
+    assert.ok(flat.some((b) => b.callback_data === "cf:n:ok:nolid"));
+    assert.ok(!flat.some((b) => b.callback_data === "cf:n:ok"), "одиночного «Готово» рядом нет — иначе состояние можно обойти");
+    assert.ok(flat.some((b) => b.callback_data === "cf:n:del"), "«⌫» и «0» остаются на месте");
+    assert.deepEqual(parseNumpadCallback("cf", "cf:n:ok:nolid"), { kind: "done", variant: "nolid" });
+    assert.deepEqual(parseNumpadCallback("cf", "cf:n:ok"), { kind: "done" });
+  });
+
   it("пустой набор показан прочерком, а не нулём", () => {
     assert.ok(numpadText("Вес?", "").includes("Набрано: —"));
     assert.ok(numpadText("Вес?", "0").includes("Набрано: 0"), "ноль — это значение");

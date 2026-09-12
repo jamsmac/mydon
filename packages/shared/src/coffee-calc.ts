@@ -157,6 +157,13 @@ export interface ReturnLine {
 
 export interface ParsedReturnMessage {
   returns: ReturnLine[];
+  /**
+   * Как взвешивали ВЕСЬ этот набор: с крышкой или без (решение 12.09.2026).
+   * Пометка на сообщение, а не на строку: набор снимают и взвешивают подряд,
+   * одними весами и одним движением — строчная пометка была бы приглашением
+   * ошибиться в одной из восьми.
+   */
+  weighedWithLid: boolean;
   /** Заголовок сообщения («Кпп остатки») — подсказка точки, сырьём. */
   locationNote: string | null;
   /** Строки, похожие на возврат, но с числами вне диапазонов — на разбор глазами. */
@@ -166,20 +173,42 @@ export interface ParsedReturnMessage {
 const RETURN_LINE = /^(\d{1,2})[.\s]+(\d{1,3})[.\s]+(\d{1,5})\s*\.?$/;
 
 /**
+ * Пометка состояния на отдельной строке. Читается ДО подсказки точки, иначе
+ * «без крышки» первой строкой стало бы «названием точки».
+ */
+const WITHOUT_LID_LINE = /^без\s*крыш[а-яё]*\s*\.?$/i;
+const WITH_LID_LINE = /^с\s*крыш[а-яё]*\s*\.?$/i;
+
+/**
  * Разобрать сообщение о возвратах наборов. Формат из рабочей группы владельца:
  * строка «позиция. набор. вес» (напр. «1. 027. 787», допускаются пробелы вместо
  * точек — «7  024. 936»). Первая строка без чисел («Кпп остатки») — подсказка
  * точки, сохраняется как есть. Числа вне диапазонов (позиция 1–8, набор 1–27,
  * вес ≤10000) не «чинятся», а уходят в rejected — решает человек.
+ *
+ * Отдельной строкой можно пометить состояние: «без крышки» (или «с крышкой»)
+ * относится ко всему сообщению. Ничего не написали — «с крышкой»: так мерили
+ * до решения 12.09.2026, и молчание значит прежнее правило, а не «неизвестно».
  */
 export function parseContainerReturnMessage(text: string): ParsedReturnMessage {
   const returns: ReturnLine[] = [];
   const rejected: string[] = [];
   let locationNote: string | null = null;
+  // Умолчание — прежнее правило R-B-19: до решения весь поток мерили с крышкой,
+  // и молчащее сообщение значит именно это, а не «неизвестно».
+  let weighedWithLid = true;
 
   for (const rawLine of text.split("\n")) {
     const line = rawLine.trim();
     if (line.length === 0) continue;
+    if (WITHOUT_LID_LINE.test(line)) {
+      weighedWithLid = false;
+      continue;
+    }
+    if (WITH_LID_LINE.test(line)) {
+      weighedWithLid = true;
+      continue;
+    }
     const m = RETURN_LINE.exec(line);
     if (!m) {
       if (locationNote === null && returns.length === 0 && rejected.length === 0) locationNote = line;
@@ -196,8 +225,8 @@ export function parseContainerReturnMessage(text: string): ParsedReturnMessage {
   }
 
   // Ни одной валидной строки — это не сообщение о возвратах, заголовок не в счёт.
-  if (returns.length === 0 && rejected.length === 0) return { returns: [], locationNote: null, rejected: [] };
-  return { returns, locationNote, rejected };
+  if (returns.length === 0 && rejected.length === 0) return { returns: [], locationNote: null, rejected: [], weighedWithLid: true };
+  return { returns, locationNote, rejected, weighedWithLid };
 }
 
 // ── Расход по наборам: заливка − возврат через тару ─────────────────────────

@@ -23,7 +23,12 @@ export const NUMPAD_MAX_DIGITS = 5;
 export type NumpadPress =
   | { kind: "digit"; digit: string }
   | { kind: "erase" }
-  | { kind: "done" }
+  /**
+   * Подтверждение набора. `variant` — когда «готово» не одно: на весе бункера
+   * это «с крышкой» / «без крышки», и состояние называется тем же нажатием,
+   * которым и так заканчивают набор (лишнего шага у техника не появляется).
+   */
+  | { kind: "done"; variant?: string }
   | { kind: "skip" };
 
 /**
@@ -36,6 +41,7 @@ export function parseNumpadCallback(prefix: string, data: string): NumpadPress |
   const tail = data.slice(head.length);
   if (tail === "del") return { kind: "erase" };
   if (tail === "ok") return { kind: "done" };
+  if (tail.startsWith("ok:")) return { kind: "done", variant: tail.slice(3) };
   if (tail === "skip") return { kind: "skip" };
   return /^[0-9]$/.test(tail) ? { kind: "digit", digit: tail } : null;
 }
@@ -58,15 +64,22 @@ export function applyPress(draft: string, press: NumpadPress): string {
  */
 export function numpadKeyboard(
   prefix: string,
-  opts: { skip?: boolean; cancel?: boolean } = {},
+  opts: { skip?: boolean; cancel?: boolean; done?: { text: string; variant: string }[] } = {},
 ): NonNullable<StaffReply["keyboard"]> {
   const key = (t: string, d: string) => ({ text: t, callback_data: `${prefix}:n:${d}` });
   const rows = [
     [key("1", "1"), key("2", "2"), key("3", "3")],
     [key("4", "4"), key("5", "5"), key("6", "6")],
     [key("7", "7"), key("8", "8"), key("9", "9")],
-    [key("⌫", "del"), key("0", "0"), key("✅ Готово", "ok")],
   ];
+  // Подтверждений может быть два (см. `variant`): тогда «⌫» и «0» остаются
+  // внизу вместе, а варианты идут отдельной строкой — иначе пять кнопок в ряд
+  // становятся неприцельными, а промах тут дороже лишней строки.
+  if (opts.done === undefined) rows.push([key("⌫", "del"), key("0", "0"), key("✅ Готово", "ok")]);
+  else {
+    rows.push([key("⌫", "del"), key("0", "0")]);
+    rows.push(opts.done.map((d) => key(d.text, `ok:${d.variant}`)));
+  }
   if (opts.skip === true) rows.push([key("— пропустить", "skip")]);
   if (opts.cancel !== false) rows.push([{ text: "✖️ Отмена", callback_data: `${prefix}:cancel` }]);
   return { inline_keyboard: rows };

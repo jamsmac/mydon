@@ -1761,6 +1761,8 @@ export class CoreClient {
     ingredientId?: string;
     filledWeight: number;
     measuredBefore?: number;
+    /** Была ли крышка на бункере при ЭТИХ замерах; нет — `true` (прежнее правило R-B-19). */
+    weighedWithLid?: boolean;
     packageCount?: number | null;
     enteredDate: string;
     createdBy?: string;
@@ -1796,6 +1798,8 @@ export class CoreClient {
     position: number;
     containerNumber: number;
     weight: number;
+    /** Была ли крышка при взвешивании; нет — `true` (прежнее правило R-B-19). */
+    weighedWithLid?: boolean;
     returnedDate: string;
     locationNote?: string;
     createdBy?: string;

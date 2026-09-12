@@ -16,6 +16,8 @@ import {
   DEFAULT_COFFEE_PARTS_TEMPLATE,
   formatInventoryNo,
   isValidInventoryNo,
+  isWeighBasis,
+  LID_WEIGHT_MAX,
   normalizeInventoryNo,
   parsePartsTemplate,
   partLabel,
@@ -95,6 +97,13 @@ export interface UpdatePartUnitInput {
   setNumber?: number | null;
   hopperPosition?: number | null;
   tareWeight?: number | null;
+  /** С чем взвешена тара: `with_lid` (умолчание) или `without_lid`. */
+  tareBasis?: string;
+  /**
+   * Вес крышки этого бункера. Знаем — замеры «с крышкой» и «без» приводятся
+   * друг к другу, и техник взвешивает как удобно (решение 12.09.2026).
+   */
+  lidWeight?: number | null;
   purchaseDate?: string | null;
   purchasePrice?: string | null;
   warrantyUntil?: string | null;
@@ -414,6 +423,8 @@ export class PartsService {
         "setNumber",
         "hopperPosition",
         "tareWeight",
+        "tareBasis",
+        "lidWeight",
         "purchaseDate",
         "purchasePrice",
         "warrantyUntil",
@@ -423,6 +434,17 @@ export class PartsService {
       }
       if ((values.setNumber !== undefined || values.hopperPosition !== undefined) && before.partKind !== "hopper") {
         throw new BadRequestException("Набор и позиция — только у бункера");
+      }
+      // Крышка есть только у бункера, и её вес — число из замера, а не из головы:
+      // диапазон держит и CHECK в базе (part_unit_lid_weight_sane).
+      if (values.lidWeight != null && before.partKind !== "hopper") {
+        throw new BadRequestException("Крышка — только у бункера");
+      }
+      if (values.lidWeight != null && (values.lidWeight <= 0 || values.lidWeight > LID_WEIGHT_MAX)) {
+        throw new BadRequestException(`Вес крышки — от 1 до ${LID_WEIGHT_MAX} г; ${values.lidWeight} г не похоже на крышку`);
+      }
+      if (values.tareBasis !== undefined && !isWeighBasis(values.tareBasis)) {
+        throw new BadRequestException("Основание тары — «с крышкой» или «без крышки»");
       }
       // Бункер получил набор и позицию, а номер ещё системный счётчик и наклейки
       // нет — переименовываем в H-<набор>-<позиция> (R-PU-2): наклейка будет одна.
