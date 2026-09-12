@@ -1,4 +1,14 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  type OnApplicationShutdown,
+  type OnModuleInit,
+} from "@nestjs/common";
+import { Cron } from "croner";
 import {
   auditLog,
   collection,
@@ -19,13 +29,14 @@ import {
   maintenanceKindLabel,
   normKey,
   normsFor,
+  normsForNow,
   partLabel,
   suggestInventoryNo,
   TZ,
   type DueStatus,
   type PartKind,
 } from "@mydon/shared";
-import { and, desc, eq, gte, inArray, isNull, lte, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { requestActor } from "../common/request-actor";
 
@@ -203,9 +214,52 @@ function recalcDue(
   return firstDue(before.dueOn ?? todayInTz(), next);
 }
 
+/**
+ * Причина автоматического выключения норматива. Строка, а не булев флаг: в
+ * журнале и в панели должно быть видно, ПОЧЕМУ график исчез, иначе через месяц
+ * его заведут обратно руками.
+ */
+export const AUTO_OFF_UNIDENTIFIED = "узел не опознан: нет номера с наклейкой на этом автомате";
+
 /** Сегодняшний календарный день по Ташкенту (YYYY-MM-DD). */
 export function todayInTz(now = new Date()): string {
   return now.toLocaleDateString("en-CA", { timeZone: TZ });
+}
+
+/**
+ * Какие виды узлов стоят на автомате ОПОЗНАННЫМИ: номер выдан И наклейка
+ * подтверждена (решение владельца 12.09.2026).
+ *
+ * Именно наклейка, а не строка в реестре. Номер, выданный системой, но не
+ * перенесённый на железо, не даёт технику отличить один миксер от другого — а
+ * без этого «помыл» нечем подписать, и норматив требовал бы работу, у которой
+ * нет подлежащего. На 12.09.2026 у ста миксеров были номера и НИ ОДНОЙ
+ * наклейки: разница между двумя условиями ровно в этом и состоит.
+ */
+async function identifiedPartsOf(tx: Tx | Db, machineIds: readonly string[]): Promise<Map<string, Set<PartKind>>> {
+  const out = new Map<string, Set<PartKind>>();
+  if (machineIds.length === 0) return out;
+  const rows = await tx
+    .select({ machineId: machinePart.machineId, partKind: partUnit.partKind })
+    .from(machinePart)
+    .innerJoin(partUnit, eq(partUnit.id, machinePart.partUnitId))
+    .where(
+      and(
+        inArray(machinePart.machineId, [...machineIds]),
+        // Открытый период: узел стоит на автомате сейчас, а не стоял когда-то.
+        isNull(machinePart.removedOn),
+        isNull(partUnit.retiredAt),
+        isNotNull(partUnit.inventoryNo),
+        eq(partUnit.labelPending, false),
+      ),
+    );
+  for (const r of rows) {
+    if (r.machineId === null) continue;
+    const set = out.get(r.machineId) ?? new Set<PartKind>();
+    set.add(r.partKind);
+    out.set(r.machineId, set);
+  }
+  return out;
 }
 
 /**
@@ -216,8 +270,47 @@ export function todayInTz(now = new Date()): string {
  * считается на чтении.
  */
 @Injectable()
-export class MaintenanceService {
+export class MaintenanceService implements OnModuleInit, OnApplicationShutdown {
+  private readonly logger = new Logger(MaintenanceService.name);
+  private normsCron: Cron | null = null;
+
   constructor(@Inject(DB) private readonly db: Db) {}
+
+  /**
+   * Суточная сверка нормативов «про опознанный узел» по всему парку.
+   *
+   * ОДНИМ МЕХАНИЗМОМ, А НЕ ХУКОМ НА КАЖДОЕ ДЕЙСТВИЕ. Наклейку подтверждают,
+   * узел ставят и снимают в четырёх разных местах; хук, забытый в одном из
+   * них, дал бы норматив, который не появляется НИКОГДА, и заметить это было
+   * бы нечем. Сверка по парку раз в сутки даёт тот же результат с задержкой до
+   * утра — а наклейки клеят днями, не секундами.
+   *
+   * 06:20 Ташкента — после моста задач (06:15) и сверки пробелов (06:00): к
+   * утреннему брифингу график уже правдив.
+   */
+  onModuleInit(): void {
+    this.normsCron = new Cron("20 6 * * *", { timezone: TZ }, () => {
+      void this.reconcileAllIdentifiedNorms("agent:maintenance-norms").catch((error: unknown) =>
+        this.logger.warn(`Сверка нормативов не отработала: ${error instanceof Error ? error.message : String(error)}`),
+      );
+    });
+  }
+
+  onApplicationShutdown(): void {
+    this.normsCron?.stop();
+    this.normsCron = null;
+  }
+
+  /** Сверка по всем размеченным автоматам — то же, что делает суточный прогон. */
+  async reconcileAllIdentifiedNorms(
+    actorRef = requestActor("owner"),
+  ): Promise<{ created: PlanRow[]; deactivated: PlanRow[]; reactivated: PlanRow[] }> {
+    const cards = await this.db.select({ entityId: machineCard.entityId }).from(machineCard);
+    return this.reconcileIdentifiedNorms(
+      cards.map((c) => c.entityId),
+      actorRef,
+    );
+  }
 
   /**
    * Карточка узла для нового экземпляра (R-PU-1, R-PU-2): номер присваивает
@@ -585,13 +678,14 @@ export class MaintenanceService {
         .from(maintenancePlan)
         .where(inArray(maintenancePlan.entityId, entityIds));
       const taken = new Set(existing.map((p) => normKey(p.entityId, p.kind, p.partKind)));
+      const identified = await identifiedPartsOf(tx, entityIds);
 
       const created: PlanRow[] = [];
       let skipped = 0;
       const seen = new Set<string>();
       for (const entityId of entityIds) {
         seen.add(entityId);
-        for (const norm of normsFor(kindOf.get(entityId))) {
+        for (const norm of normsForNow(kindOf.get(entityId), identified.get(entityId) ?? new Set())) {
           if (taken.has(normKey(entityId, norm.kind, norm.partKind))) {
             skipped += 1;
             continue;
@@ -628,6 +722,87 @@ export class MaintenanceService {
       const coffee = [...seen].filter((id) => kindOf.get(id) === "coffee").length;
       return { created, skipped, coffee, other: seen.size - coffee };
     });
+  }
+
+  /**
+   * Привести нормативы «про опознанный узел» в соответствие с реальностью.
+   *
+   * Работает в обе стороны, и это главное: наклеили номер на миксер — норматив
+   * мойки появляется сам (принцип накопления Н-1); узел сняли, списали или
+   * наклейку отменили — норматив выключается, а не остаётся краснеть о
+   * предмете, которого на автомате нет.
+   *
+   * ВЫКЛЮЧАЕТСЯ, А НЕ УДАЛЯЕТСЯ: история «за этим следили» остаётся, и
+   * повторное появление узла включает норматив обратно тем же вызовом.
+   *
+   * Вызывается там, где меняется опознанность узла: подтверждение наклейки,
+   * установка и снятие узла. Отдельным прогоном по всему парку — когда правило
+   * меняется (как 12.09.2026, когда норматив мойки миксера впервые стал
+   * зависеть от наклейки).
+   */
+  async reconcileIdentifiedNorms(
+    machineIds: string[],
+    actorRef = requestActor("owner"),
+  ): Promise<{ created: PlanRow[]; deactivated: PlanRow[]; reactivated: PlanRow[] }> {
+    if (machineIds.length === 0) return { created: [], deactivated: [], reactivated: [] };
+    const deactivated: PlanRow[] = [];
+    const reactivated: PlanRow[] = [];
+    await this.db.transaction(async (tx) => {
+      const cards = await tx
+        .select({ entityId: machineCard.entityId, kind: machineCard.kind })
+        .from(machineCard)
+        .where(inArray(machineCard.entityId, machineIds));
+      const kindOf = new Map(cards.map((c) => [c.entityId, c.kind]));
+      const identified = await identifiedPartsOf(tx, machineIds);
+      const plans = await tx.select().from(maintenancePlan).where(inArray(maintenancePlan.entityId, machineIds));
+      for (const plan of plans) {
+        const norm = normsFor(kindOf.get(plan.entityId)).find(
+          (n) => n.kind === plan.kind && (n.partKind ?? null) === (plan.partKind ?? null),
+        );
+        if (norm?.requiresIdentifiedPart !== true) continue;
+        const ok = norm.partKind !== null && (identified.get(plan.entityId)?.has(norm.partKind) ?? false);
+        if (plan.isActive && !ok) {
+          const [after] = await tx
+            .update(maintenancePlan)
+            .set({ isActive: false, autoOffReason: AUTO_OFF_UNIDENTIFIED, updatedAt: new Date() })
+            .where(eq(maintenancePlan.id, plan.id))
+            .returning();
+          await tx.insert(auditLog).values({
+            actorKind: actorKindOf(actorRef),
+            actorRef,
+            action: "maintenance.plan_deactivated",
+            target: plan.id,
+            before: plan,
+            after,
+          });
+          deactivated.push(after);
+          continue;
+        }
+        // Включаем обратно ТОЛЬКО то, что выключили мы сами. Норматив,
+        // выключенный человеком («этот моем реже»), остаётся выключенным:
+        // иначе сверка молча переиграла бы владельца.
+        if (!plan.isActive && ok && plan.autoOffReason === AUTO_OFF_UNIDENTIFIED) {
+          const [after] = await tx
+            .update(maintenancePlan)
+            .set({ isActive: true, autoOffReason: null, updatedAt: new Date() })
+            .where(eq(maintenancePlan.id, plan.id))
+            .returning();
+          await tx.insert(auditLog).values({
+            actorKind: actorKindOf(actorRef),
+            actorRef,
+            action: "maintenance.plan_reactivated",
+            target: plan.id,
+            before: plan,
+            after,
+          });
+          reactivated.push(after);
+        }
+      }
+    });
+    // Заведение — существующим механизмом: он сам пропустит нормативы, чей
+    // предмет не опознан, и не тронет уже заведённые.
+    const { created } = await this.applyStandardNorms(machineIds, actorRef);
+    return { created, deactivated, reactivated };
   }
 
   /**

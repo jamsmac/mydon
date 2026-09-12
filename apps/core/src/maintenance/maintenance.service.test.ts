@@ -310,14 +310,33 @@ describe("Нормативы и сроки", () => {
 
 describe("Стандартные нормативы на список объектов", () => {
   const M2 = "33333333-3333-4333-8333-333333333333";
-  /** Первый select — карточки автоматов с видом, второй — заведённые планы. */
-  const stub = (cards: Row[], plans: Row[], inserted: Row[], updated?: Row[]) =>
-    stubDb({ selects: [cards, plans], inserted, updated });
+  /**
+   * Первый select — карточки автоматов с видом, второй — заведённые планы,
+   * третий — ОПОЗНАННЫЕ узлы на автоматах (номер + подтверждённая наклейка).
+   * Третий появился с решением 12.09.2026: норматив про узел не заводится,
+   * пока узла нет в учёте.
+   */
+  const stub = (cards: Row[], plans: Row[], inserted: Row[], updated?: Row[], identified: Row[] = []) =>
+    stubDb({ selects: [cards, plans, identified], inserted, updated });
   const coffeeCard = (id: string) => ({ entityId: id, kind: "coffee" });
+  const mixerOn = (id: string) => ({ machineId: id, partKind: "mixer" });
 
-  it("кофейному автомату заводит все три норматива с числами владельца", async () => {
+  it("миксер не размечен — мойки в графике нет (решение 12.09.2026)", async () => {
+    // Работа «помой миксер» адресна: помыть надо конкретный, и отметить факт
+    // можно только о конкретном. Пока наклейки нет, у требования нет
+    // подлежащего — 24 такие строки краснели при нуле наклеенных миксеров.
     const inserted: Row[] = [];
     const s = new MaintenanceService(stub([coffeeCard(MACHINE)], [], inserted));
+    const res = await s.applyStandardNorms([MACHINE]);
+
+    assert.equal(res.created.length, 2);
+    assert.equal(res.created.some((p) => p.partKind === "mixer"), false);
+    assert.equal(res.created.some((p) => p.partKind === "water_filter"), true, "остальные нормативы не трогаются");
+  });
+
+  it("кофейному автомату с опознанным миксером заводит все три норматива с числами владельца", async () => {
+    const inserted: Row[] = [];
+    const s = new MaintenanceService(stub([coffeeCard(MACHINE)], [], inserted, undefined, [mixerOn(MACHINE)]));
     const res = await s.applyStandardNorms([MACHINE]);
 
     assert.equal(res.created.length, 3);
@@ -346,7 +365,7 @@ describe("Стандартные нормативы на список объек
   it("смешанный список: каждому своё", async () => {
     const inserted: Row[] = [];
     const s = new MaintenanceService(
-      stub([coffeeCard(MACHINE), { entityId: M2, kind: "snack" }], [], inserted),
+      stub([coffeeCard(MACHINE), { entityId: M2, kind: "snack" }], [], inserted, undefined, [mixerOn(MACHINE)]),
     );
     const res = await s.applyStandardNorms([MACHINE, M2]);
 
@@ -357,7 +376,7 @@ describe("Стандартные нормативы на список объек
 
   it("первый срок — период от сегодня, а не красный экран на старте", async () => {
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stub([coffeeCard(MACHINE)], [], inserted));
+    const s = new MaintenanceService(stub([coffeeCard(MACHINE)], [], inserted, undefined, [mixerOn(MACHINE)]));
     await s.applyStandardNorms([MACHINE]);
     const mixer = inserted.find((r) => r.title === "Мойка миксера")!;
     assert.equal(mixer.dueOn, addDays(todayInTz(), 10));
@@ -378,6 +397,7 @@ describe("Стандартные нормативы на список объек
         ],
         inserted,
         updated,
+        [mixerOn(MACHINE)],
       ),
     );
     const res = await s.applyStandardNorms([MACHINE]);
@@ -388,7 +408,7 @@ describe("Стандартные нормативы на список объек
 
   it("объект в списке дважды получает один комплект", async () => {
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stub([coffeeCard(MACHINE)], [], inserted));
+    const s = new MaintenanceService(stub([coffeeCard(MACHINE)], [], inserted, undefined, [mixerOn(MACHINE)]));
     const res = await s.applyStandardNorms([MACHINE, MACHINE]);
     assert.equal(res.created.length, 3, "вызывающий не обязан чистить список");
     assert.equal(res.skipped, 3);
@@ -400,7 +420,7 @@ describe("Стандартные нормативы на список объек
     // два оставшихся, а существующий останется нетронутым.
     const inserted: Row[] = [];
     const s = new MaintenanceService(
-      stub([coffeeCard(M2)], [{ entityId: M2, kind: "service", partKind: null }], inserted),
+      stub([coffeeCard(M2)], [{ entityId: M2, kind: "service", partKind: null }], inserted, undefined, [mixerOn(M2)]),
     );
     const res = await s.applyStandardNorms([M2]);
     assert.equal(res.created.length, 2);
@@ -425,7 +445,7 @@ describe("Автомат без карточки вида", () => {
     // привязки молча признавался прочим. Теперь отсутствие карточки — это
     // честное «не размечен»: даём только то, что применимо к любому автомату.
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stubDb({ selects: [[], []], inserted }));
+    const s = new MaintenanceService(stubDb({ selects: [[], [], []], inserted }));
     const res = await s.applyStandardNorms([NOCARD]);
     assert.equal(res.created.length, 1);
     assert.equal(res.coffee, 0);
@@ -525,6 +545,9 @@ describe("Пауза норматива: снять и вернуть", () => {
             { entityId: MACHINE, kind: "part_replace", partKind: "water_filter", isActive: true },
             { entityId: MACHINE, kind: "service", partKind: null, isActive: true },
           ],
+          // Миксер опознан: иначе мойка не завелась бы и по новому правилу, и
+          // тест перестал бы проверять то, ради чего написан.
+          [{ machineId: MACHINE, partKind: "mixer" }],
         ],
         inserted,
       }),
