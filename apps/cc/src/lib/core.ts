@@ -1043,6 +1043,8 @@ export interface CashReconcileReport {
  * хорошая новость, а не ошибка.
  */
 export interface Gap {
+  /** Устойчивое тождество строки; null — у пробела его нет (кластер по окну). */
+  key: string | null;
   /** Что именно нельзя посчитать. */
   topic: string;
   /** За какой период — если пробел привязан ко времени. */
@@ -1053,6 +1055,20 @@ export interface Gap {
   scale: string | null;
   /** Что сделать, чтобы закрылся. */
   action: string;
+}
+
+/** Сводка за сутки по реестру пробелов (Н-2, волна 6). */
+export interface GapDigest {
+  day: string;
+  /** Пробелы, закрывшиеся в этот день, — то самое «стало известно». */
+  becameKnown: { key: string; topic: string; missing: string; openDays: number }[];
+  /** Появились впервые. */
+  appeared: { key: string; topic: string; missing: string }[];
+  /** Были закрыты и вернулись: закрытие оказалось мнимым или данные откатились. */
+  returned: { key: string; topic: string; missing: string }[];
+  open: { total: number; stale: { key: string; topic: string; openDays: number }[] };
+  /** Проходила ли сверка в этот день. `false` — это «не смотрели», а не «тихо». */
+  reconciled: boolean;
 }
 
 // ── Склад техники GLOBERENT (перенос warehouse_vehicles PROMACH) ──
@@ -3948,6 +3964,8 @@ export const core = {
    * всё, что можно посчитать, посчитано, а не что запрос сломан.
    */
   gaps: () => get<Gap[]>("/gaps"),
+  /** Сводка за сутки: что стало известно, что появилось, что вернулось (Н-2). */
+  gapDigest: (day?: string) => get<GapDigest>(`/gaps/digest${day === undefined ? "" : `?day=${day}`}`),
 
   // ── Источники (сырой слой) ──
   rawSources: () => get<{ sources: RawSourceState[] }>("/raw/sources"),

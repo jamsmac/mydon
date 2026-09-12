@@ -2107,3 +2107,12 @@ article.doc .doc-img { color: var(--tx-3); font-style: italic; }
 /* Деталь — сырой payload: моно, приглушённо и переносом, чтобы длинный JSON
    не тянул страницу вбок. */
 .flow-timeline code { font-family: var(--fm); font-size: 11.5px; color: var(--tx-2); overflow-wrap: anywhere; min-width: 0; }
+
+/* ── Опора под цифрой (Н-3, Н-4) ────────────────────────────────────────────
+   Слово, а не полоска: «предварительно» читается с первого взгляда, а шкала
+   требует легенды. Цветом отличается только «нет данных» — порог доверия НЕ
+   порог сокрытия, и слабая цифра не должна выглядеть сломанной. */
+.support { font-size: 11.5px; letter-spacing: 0.01em; color: var(--tx-3); white-space: nowrap; }
+.support-preliminary { color: var(--tx-2); }
+.support-stable { color: var(--ok); }
+.support-none { color: var(--tx-3); font-style: italic; }

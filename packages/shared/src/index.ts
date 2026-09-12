@@ -142,6 +142,7 @@ export * from "./machine-status";
 export * from "./maintenance-norms";
 export * from "./parts";
 export * from "./lid";
+export * from "./support";
 export * from "./machine-number";
 export * from "./parts-template";
 

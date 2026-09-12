@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { SupportMark } from "./support-mark";
 import type { NormFactPeriodRow, NormFactReport } from "../lib/core";
 import { plural } from "../lib/format";
 import { fmtDay } from "../lib/globerent";
@@ -181,6 +182,12 @@ export function NormFactBook({
             <div className="tile">
               <div className="lab">Разница</div>
               <div className="v">{diffGrams(report.итог.разница)}</div>
+              <div className="foot">
+                <span className="mk" />
+                {/* Опора именно здесь: «разница» — та цифра, которую читают как
+                    вывод, и она же сильнее всех страдает от неполных данных. */}
+                <SupportMark facts={report.итог.периодов} of={report.итог.периодов + report.внеИтога.периодов} unit="периодов" />
+              </div>
               <div className="foot">
                 <span className="mk" />
                 число, не признак недостачи

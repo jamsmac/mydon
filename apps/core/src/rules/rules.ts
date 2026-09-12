@@ -229,11 +229,28 @@ export const RULES: Rule[] = [
   },
 
   // ── Работа системы ──
+  // Согласования: поштучно — только то, из-за чего что-то потеряется сегодня
+  // (волна 6, решение владельца 10.09.2026 «сводка ЗАМЕНЯЕТ поштучные сигналы»).
+  //
+  // Граница проведена по тиру, а не по отправителю: T2 и выше — это деньги и
+  // необратимое (закуп, списание), там сутки ожидания стоят денег. T0/T1 —
+  // предложения агентов и записи задним числом: они уже посчитаны и ждать до
+  // утренней сводки могут. Раньше немедленным было ВСЁ, и каждый тик крона
+  // любого навыка бил в телефон владельца — от такого потока перестают читать
+  // и сводку тоже, а во «Входящих» и без того 42 непрочитанных.
+  {
+    id: "approval.requested.urgent",
+    eventType: "approval.requested",
+    urgency: "immediate",
+    when: (c) => ["T2", "T3"].includes(str(c.payload.tier, "")),
+    format: (c) => `✋ Требует решения: ${str(c.payload.action)} (${str(c.payload.tier)})`,
+  },
   {
     id: "approval.requested",
     eventType: "approval.requested",
-    urgency: "immediate",
-    format: (c) => `✋ Требует решения: ${str(c.payload.action)} (${str(c.payload.tier)})`,
+    urgency: "briefing",
+    when: (c) => !["T2", "T3"].includes(str(c.payload.tier, "")),
+    format: (c) => `✋ Ждёт решения: ${str(c.payload.action)} (${str(c.payload.tier)})`,
   },
   {
     id: "agent.failed",

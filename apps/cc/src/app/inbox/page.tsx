@@ -4,8 +4,10 @@ import {
   type Approval,
   type Attachment,
   type EntityDraft,
+  type GapDigest,
 } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
+import { GapDigestBlock } from "../../components/gap-digest";
 import { ApprovalCard } from "../../components/approval-card";
 import { ApproveAllCards, PendingCardTile, PendingFieldGroup } from "../../components/queue-view";
 import { coffeeImportDetails, stripPayload } from "../../lib/approval-details";
@@ -35,6 +37,15 @@ export default async function Inbox() {
     fields = pending.fields;
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
+  }
+
+  // Сводка за сутки: новости, а не очередь дел. Ошибка тут не должна ронять
+  // экран — очередь решений важнее новостей, и без сводки она работает.
+  let digest: GapDigest | null = null;
+  try {
+    digest = await core.gapDigest();
+  } catch {
+    digest = null;
   }
 
   // Сводки больших импортов (кофе): владелец видит, что именно заносится.
@@ -69,6 +80,8 @@ export default async function Inbox() {
         <h1 className="h1">Входящие</h1>
         <p className="lead">Всё, что ждёт твоего слова — решения агентов и карточки реестра — в одном месте.</p>
       </div>
+
+      {digest !== null && <GapDigestBlock digest={digest} />}
 
       {total === 0 ? (
         <div className="empty">
