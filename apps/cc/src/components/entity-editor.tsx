@@ -74,8 +74,56 @@ const MANAGED_KEYS = new Set<string>([
  * запятую; массив объектов (снимки вроде «что поставляет») не расплющиваем,
  * а считаем записи — построчный вид ему даст только свой редактор.
  */
+/**
+ * Строка, в которой лежит JSON — считается своей структурой, а не текстом.
+ *
+ * `меню`, `раскладка`, `состав` хранятся В БАЗЕ строкой
+ * (`attrs["меню"] = JSON.stringify(lines)`), поэтому ветка объектов ниже до них
+ * не доходила, и паспорт печатал владельцу
+ * `[{"productId":"018f…","price":9000},…]` — идентификаторы, которые ему не
+ * нужны и по которым ничего не сделать.
+ *
+ * Разворачиваем только массивы и объекты: строка «12» или «2026-09-12» тоже
+ * разбирается JSON'ом, но числом и датой она и должна остаться.
+ */
+function parsedStructure(value: unknown): unknown | null {
+  if (typeof value !== "string") return null;
+  const t = value.trim();
+  if (!t.startsWith("[") && !t.startsWith("{")) return null;
+  try {
+    const parsed: unknown = JSON.parse(t);
+    return typeof parsed === "object" && parsed !== null ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Чем считать содержимое поля со своим редактором: «12 позиций» понятнее, чем
+ * «12 записей», а «где это правится» — единственное, что владельцу тут нужно.
+ */
+const MANAGED_HINT: Record<string, { единица: [string, string, string]; где: string }> = {
+  меню: { единица: ["позиция", "позиции", "позиций"], где: "вкладка «Меню»" },
+  раскладка: { единица: ["ячейка", "ячейки", "ячеек"], где: "вкладка «Раскладка»" },
+  состав: { единица: ["строка", "строки", "строк"], где: "редактор рецепта" },
+  "история цен": { единица: ["запись", "записи", "записей"], где: "считается сама" },
+  "история цены покупки": { единица: ["запись", "записи", "записей"], где: "считается сама" },
+};
+
+/** Сводка поля со своим редактором: сколько в нём всего и где оно правится. */
+export function managedSummary(key: string, value: unknown): string | null {
+  const hint = MANAGED_HINT[key];
+  if (hint === undefined) return null;
+  const structured = parsedStructure(value) ?? value;
+  if (!Array.isArray(structured)) return null;
+  const [one, few, many] = hint.единица;
+  return `${structured.length} ${plural(structured.length, one, few, many)} · ${hint.где}`;
+}
+
 export function attrText(value: unknown): string {
   if (value === null || value === undefined) return "—";
+  const structured = parsedStructure(value);
+  if (structured !== null) return attrText(structured);
   if (Array.isArray(value)) {
     if (value.length === 0) return "—";
     return value.some((v) => typeof v === "object" && v !== null)
@@ -153,17 +201,28 @@ export function EntityEditor({ entity }: { entity: Entity }) {
             <span className="act">✎</span>
           </div>
           {attrsAll.map(([key, value]) => {
+            // Поле со своим редактором: показываем сводку и место правки, а
+            // саму структуру — нет. Форма его не возит (MANAGED_KEYS), и
+            // предлагать «✎» значило бы звать туда, где этого поля не будет.
+            const сводка = managedSummary(key, value);
             const текст =
-              key === "вид" && typeof value === "string" && value in PRODUCT_KIND_LABELS
+              сводка !== null
+                ? сводка
+                : key === "вид" && typeof value === "string" && value in PRODUCT_KIND_LABELS
                 ? PRODUCT_KIND_LABELS[value as keyof typeof PRODUCT_KIND_LABELS]
                 : (key === "цена" || key === "цена покупки" || key === "цена продажи") &&
                     typeof value === "number"
                   ? `${Number(value).toLocaleString("ru-RU")} сум`
-                  : // Объекты и массивы — читаемым текстом (см. attrText):
-                    // String() расплющил бы их в «[object Object]».
-                    attrText(value);
+                    : // Объекты и массивы — читаемым текстом (см. attrText):
+                      // String() расплющил бы их в «[object Object]».
+                      attrText(value);
             const длинное = текст.length > 40;
-            return (
+            return сводка !== null ? (
+              <div className={`mct${длинное ? " mct-wide" : ""}`} key={key}>
+                <span className="lb">{key}</span>
+                <b className="vl">{текст}</b>
+              </div>
+            ) : (
               <div
                 className={`mct${длинное ? " mct-wide" : ""}`}
                 key={key}

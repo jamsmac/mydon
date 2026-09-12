@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Entity } from "../lib/core";
-import { attrText, EntityEditor } from "./entity-editor";
+import { attrText, managedSummary, EntityEditor } from "./entity-editor";
 
 const mocks = vi.hoisted(() => ({
   saveEntity: vi.fn(),
@@ -30,6 +30,35 @@ function товар(attrs: Record<string, unknown>): Entity {
     updatedAt: "2026-08-01T00:00:00.000Z",
   };
 }
+
+describe("паспорт не показывает сырой JSON (хвост плана 12.09.2026)", () => {
+  it("«меню» хранится JSON-СТРОКОЙ — на экран идёт сводка, а не productId", () => {
+    const меню = JSON.stringify([
+      { productId: "018f0000-0000-4000-8000-000000000001", price: 9000 },
+      { productId: "018f0000-0000-4000-8000-000000000002", price: null },
+    ]);
+    expect(managedSummary("меню", меню)).toBe("2 позиции · вкладка «Меню»");
+    // Идентификаторы владельцу не нужны и по ним ничего не сделать.
+    expect(attrText(меню)).not.toContain("productId");
+  });
+
+  it("раскладка и состав — своими единицами", () => {
+    expect(managedSummary("раскладка", JSON.stringify([{ slot: "A1" }]))).toBe("1 ячейка · вкладка «Раскладка»");
+    expect(managedSummary("состав", JSON.stringify([1, 2, 3, 4, 5]))).toBe("5 строк · редактор рецепта");
+  });
+
+  it("обычные строки JSON не разбираются: число и дата остаются собой", () => {
+    expect(attrText("12")).toBe("12");
+    expect(attrText("2026-09-12")).toBe("2026-09-12");
+    expect(attrText("[не json")).toBe("[не json");
+  });
+
+  it("поле без своего редактора сводкой не подменяется", () => {
+    expect(managedSummary("адрес", "Ташкент")).toBe(null);
+    // Испорченное значение не выдаём за пустое меню.
+    expect(managedSummary("меню", "не массив")).toBe(null);
+  });
+});
 
 describe("attrText", () => {
   it("объект разворачивает в пары «ключ: значение»", () => {
