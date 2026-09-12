@@ -51,6 +51,23 @@ const opt = (name, def = null) => {
   return i >= 0 && args[i + 1] !== undefined ? args[i + 1] : def;
 };
 const DRY = args.includes("--dry");
+/**
+ * Только возвраты: пропустить весь LLM-разбор.
+ *
+ * Возвраты разбираются регуляркой (формат темы «Остатки с бункеров» известен
+ * точно), модель им не нужна вовсе. А заливки за тот же период обычно уже
+ * пришли живьём через бота — гонять по ним сотни пачек модели значит платить
+ * лимитами подписки за дубли, которые владельцу же потом и отклонять.
+ * Флаг позволяет донести ровно то, чего в системе нет.
+ */
+const RETURNS_ONLY = args.includes("--returns-only");
+/**
+ * Нижняя граница дня (включительно): предлагать только то, чего в системе ещё
+ * нет. Дедуп в ядре идемпотентен, но список из тысячи уже записанных строк
+ * владелец читать не станет — а согласование, которое не читают, ничего не
+ * согласовывает.
+ */
+const SINCE = opt("since");
 const PHOTOS = args.includes("--photos");
 // Фото только из одной темы форума (id из fetch-telegram-history.mjs --topics):
 // тема «Заполнение бункеров» — таблицы, остальные темы vision не гоняем.
@@ -74,6 +91,8 @@ if (!file) {
       "  result.json — экспорт чата/канала (Telegram Desktop → Настройки → Экспорт данных → JSON).\n" +
       "  --photos — разбирать фото-таблицы (экспорт должен включать картинки; лежат рядом с result.json).\n" +
       "  --photo-topic N — фото только из темы форума N (id — из fetch-telegram-history.mjs --topics).\n" +
+      "  --returns-only — только возвраты «позиция. набор. вес» (регулярка, без модели и без фото).\n" +
+      "  --since YYYY-MM-DD — брать возвраты только с этого дня (чего ещё нет в системе).\n" +
       "  --payload файл — отправить на согласование готовый payload прошлого прогона (без пере-разбора).",
   );
   process.exit(1);
@@ -153,6 +172,7 @@ for (const m of textMessages) {
     continue;
   }
   const returnedDate = String(m.date ?? "").slice(0, 10);
+  if (SINCE !== null && returnedDate < SINCE) continue;
   for (const r of parsed.returns) {
     returns.push({ ...r, returnedDate, ...(parsed.locationNote ? { locationNote: parsed.locationNote } : {}) });
   }
@@ -162,6 +182,29 @@ console.log(
   `Экспорт «${raw.name ?? file}»: сообщений всего ${allMessages.length}, с текстом ${textMessages.length}; ` +
     `возвратов наборов разобрано детерминированно: ${returns.length}${returnsRejected.length ? ` (отклонено строк: ${returnsRejected.length})` : ""}.`,
 );
+if (RETURNS_ONLY) {
+  if (returns.length === 0) {
+    console.log("Возвратов в экспорте не нашлось — предлагать нечего.");
+    process.exit(0);
+  }
+  const byDay = new Map();
+  for (const r of returns) byDay.set(r.returnedDate, (byDay.get(r.returnedDate) ?? 0) + 1);
+  const days = [...byDay.keys()].sort();
+  console.log(
+    `Только возвраты: ${returns.length} строк за ${days.length} дней (${days[0]} → ${days[days.length - 1]}).`,
+  );
+  if (returnsRejected.length > 0) {
+    console.log(`Отклонено строк (числа вне диапазонов): ${returnsRejected.length}`);
+    for (const line of returnsRejected.slice(0, 20)) console.log(`  ${line}`);
+  }
+  if (DRY) {
+    console.log("--dry: согласование не создаётся.");
+    process.exit(0);
+  }
+  await submitApproval([], returns, []);
+  process.exit(0);
+}
+
 // Фото считаются работой тоже: экспорт одной фото-темы текста может не иметь.
 const hasPhotosToDo =
   PHOTOS && allMessages.some((m) => m.type === "message" && typeof m.photo === "string" && m.photo.length > 0);
