@@ -24,6 +24,8 @@ export async function submitCoffeeRefill(input: {
   filledWeight: number;
   packageCount?: number;
   enteredDate: string;
+  /** Когда произошла заливка, до минуты (R-H-1…R-H-4); задним числом уйдёт на одобрение. */
+  occurredAt?: string;
 }): Promise<ActionResult> {
   try {
     await core.submitCoffeeRefill({ ...input, createdBy: await resolveActor() });

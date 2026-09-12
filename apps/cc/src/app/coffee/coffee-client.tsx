@@ -1,6 +1,8 @@
 "use client";
 
 import { Fragment, useMemo, useState, useTransition } from "react";
+import { tashkentLocalInput } from "@mydon/shared";
+import { OccurredAtField } from "../../components/occurred-at-field";
 import type {
   CoffeeBunkerIngredient,
   CoffeeConsumableRow,
@@ -152,7 +154,10 @@ function EntryTab({
   recentRefills: CoffeeRefillRow[];
 }) {
   const [pending, start] = useTransition();
-  const [date, setDate] = useState(todayIso());
+  // Когда ПРОИЗОШЛА заливка (R-H-1): по умолчанию «сейчас», ташкентскими
+  // часами. Голая дата не годится — две заливки одного бункера за день
+  // должны различаться порядком (R-H-2).
+  const [occurredAt, setOccurredAt] = useState(() => tashkentLocalInput(new Date()));
   const [locationId, setLocationId] = useState("");
   const [position, setPosition] = useState("");
   const [container, setContainer] = useState("");
@@ -215,7 +220,10 @@ function EntryTab({
         ...(container ? { containerNumber: Number(container) } : {}),
         ...(ingredientId ? { ingredientId } : {}),
         filledWeight: w,
-        enteredDate: date,
+        // День события Core выводит из момента: два источника одной правды
+        // разъехались бы (в базе это держит CHECK).
+        enteredDate: occurredAt.slice(0, 10),
+        occurredAt,
       });
       if (res.ok) {
         setMsg("Сохранено ✅");
@@ -229,10 +237,7 @@ function EntryTab({
 
   return (
     <div className="card coffee-form">
-      <label>
-        Дата
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-      </label>
+      <OccurredAtField value={occurredAt} onChange={setOccurredAt} label="Когда залили" />
       <label>
         Адрес
         <select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
@@ -290,6 +295,7 @@ function EntryTab({
                   {r.enteredDate}
                 </small>
               </div>
+              {r.approvalPending && <span className="chip h">ждёт одобрения</span>}
               <span className="pill">
                 {r.filledWeight}г{r.packageCount == null ? "" : ` · ${r.packageCount} уп.`}
               </span>
@@ -371,6 +377,7 @@ function JournalTab({
                   {sourceLabel(r.createdBy, peopleById) ? ` · ${sourceLabel(r.createdBy, peopleById)}` : ""}
                 </small>
               </div>
+              {r.approvalPending && <span className="chip h">ждёт одобрения</span>}
               <span className="pill">
                 {r.filledWeight}г{r.packageCount == null ? "" : ` · ${r.packageCount} уп.`}
               </span>

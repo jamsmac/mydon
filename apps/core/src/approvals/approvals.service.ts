@@ -12,13 +12,14 @@ import {
   coffeeContainerReturn,
   coffeeRefill,
   entity,
+  stockMovement,
   entityDraft,
   event,
   org,
   vendingPurchaseOrder,
 } from "@mydon/db";
 import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
-import { DOMAINS, type Domain, actorKindOf } from "@mydon/shared";
+import { DOMAINS, type Domain, actorKindOf, tashkentDayStart } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import { EventsService } from "../events/events.service";
@@ -184,8 +185,52 @@ export class ApprovalsService {
         await this.executeCoffeeImport(tx, updated, actorRef);
         await this.executeEntityApprove(tx, updated, actorRef);
       }
+      // Отклонение тоже исполняется — этого не было до волны 5: запись задним
+      // числом СЧИТАЕТСЯ сразу (R-H-13), и «отклонил» обязано означать «её
+      // больше нет», а не только строку в журнале решений.
+      if (decision === "rejected") {
+        await this.executeBackdatedReject(tx, updated, actorRef);
+      }
 
       return updated;
+    });
+  }
+
+  /**
+   * Отклонение записи задним числом (R-H-13): `payload.backdatedRecord`.
+   *
+   * Отменяем тем же путём, что обычную ошибочную запись, — удалением со
+   * строкой в журнале (`coffee.refill.delete`), а не отдельным состоянием
+   * «отменена»: состояние пришлось бы фильтровать в каждом из дюжины путей
+   * чтения, и забытый фильтр оставил бы отменённую заливку в расчёте.
+   *
+   * Списание со склада уходит ВМЕСТЕ с заливкой: иначе расход сырья остался
+   * бы от записи, которой больше нет, — ровно та тихая неправда, ради
+   * которой всё это и делается.
+   *
+   * Запись уже удалили руками — молча выходим: решение по очереди не должно
+   * падать из-за того, что владелец опередил его в журнале.
+   */
+  private async executeBackdatedReject(tx: Tx, row: ApprovalRow, actorRef: string): Promise<void> {
+    const p = (row.payload ?? {}) as { backdatedRecord?: { kind?: string; rowId?: string } };
+    const rec = p.backdatedRecord;
+    if (!rec || rec.kind !== "coffee_refill" || typeof rec.rowId !== "string") return;
+    const [refill] = await tx.select().from(coffeeRefill).where(eq(coffeeRefill.id, rec.rowId));
+    if (!refill) return;
+    // Порядок обязателен: сначала заливка, потом её списание. Обратный порядок
+    // упирается в внешний ключ coffee_refill.stock_movement_id — поймано
+    // сценарием на настоящем SQL, на заглушке этого не видно.
+    await tx.delete(coffeeRefill).where(eq(coffeeRefill.id, rec.rowId));
+    if (refill.stockMovementId) {
+      await tx.delete(stockMovement).where(eq(stockMovement.id, refill.stockMovementId));
+    }
+    await tx.insert(auditLog).values({
+      actorKind: actorKindOf(actorRef),
+      actorRef,
+      action: "coffee.refill.delete",
+      target: rec.rowId,
+      before: refill,
+      after: { reason: "запись задним числом отклонена", approvalId: row.id },
     });
   }
 
@@ -569,7 +614,20 @@ export class ApprovalsService {
           seen.add(k);
           fresh.push(v);
         }
-        for (const part of chunked(fresh)) await tx.insert(coffeeRefill).values(part);
+        // Два времени (R-H-1): у истории из канала известен только ДЕНЬ события —
+        // occurred_at ставим на полночь того дня и помечаем точность «day», а
+        // recorded_at — момент одобрения пачки (R-H-15: одобрение на всю пачку,
+        // источник «из канала» отличает её от ручного ввода).
+        const importedAt = new Date();
+        for (const part of chunked(fresh))
+          await tx.insert(coffeeRefill).values(
+            part.map((v) => ({
+              ...v,
+              occurredAt: tashkentDayStart(v.enteredDate)!,
+              occurredPrecision: "day" as const,
+              recordedAt: importedAt,
+            })),
+          );
         created = fresh.length;
       }
     }

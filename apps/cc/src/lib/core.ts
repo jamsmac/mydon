@@ -529,6 +529,14 @@ export interface CoffeeRefillRow {
   measuredBefore: number | null;
   packageCount: number;
   enteredDate: string;
+  /** Когда произошла заливка (R-H-1); день события выводится из неё. */
+  occurredAt: string;
+  /** `day` — время не называли: известен только день (история из канала, ввод без времени). */
+  occurredPrecision: "minute" | "day";
+  /** Когда записана (R-H-1): разрыв между временами виден владельцу. */
+  recordedAt: string;
+  /** Задним числом и ждёт слова владельца (R-H-13) — пометка рядом с цифрой. */
+  approvalPending: boolean;
   createdBy: string | null;
   createdAt: string;
 }
@@ -3449,8 +3457,10 @@ export const core = {
     filledWeight: number;
     packageCount?: number;
     enteredDate: string;
+    /** Когда произошла заливка, до минуты (R-H-1…R-H-4). */
+    occurredAt?: string;
     createdBy?: string;
-  }) => send<{ id: string }>("/coffee/refill", "POST", input),
+  }) => send<{ id: string; approvalId: string | null }>("/coffee/refill", "POST", input),
   recentCoffeeRefills: (limit = 20) =>
     get<CoffeeRefillRow[]>(`/coffee/refill/recent?limit=${limit}`),
   coffeeLocationSummary: () => get<CoffeeLocationSummaryRow[]>("/coffee/summary"),

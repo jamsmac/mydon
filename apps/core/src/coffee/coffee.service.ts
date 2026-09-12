@@ -2,6 +2,7 @@ import { BadRequestException, Inject, Injectable, NotFoundException } from "@nes
 import { and, asc, desc, eq, gte, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import {
+  approval,
   coffeeBunkerConfig,
   coffeeConsumable,
   coffeeConsumableLog,
@@ -18,7 +19,8 @@ import {
   coffeeWashSchedule,
   entity,
   machineCard,
-  org,} from "@mydon/db";
+  org,
+} from "@mydon/db";
 import {
   buildLocationSummary,
   consumedSince,
@@ -42,6 +44,11 @@ import {
   machineIsOperational,
   placeNameKeys,
   actorKindOf,
+  isBackdated,
+  parseOccurred,
+  tashkentDay,
+  tashkentDayStart,
+  truncateToMinute,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { requestActor } from "../common/request-actor";
@@ -240,7 +247,13 @@ export interface SubmitRefillInput {
   filledWeight: number;
   measuredBefore?: number;
   packageCount?: number;
-  enteredDate: string; // ISO date, «Дата» из формы
+  enteredDate: string; // ISO date, «Дата» из формы (день события)
+  /**
+   * Когда произошла заливка — до минуты (R-H-1, R-H-2). Нет — берём день из
+   * `enteredDate`: сегодняшний день значит «сегодня, время не названо»
+   * (`occurred_precision = day`), прошлый — полночь того дня.
+   */
+  occurredAt?: string;
   createdBy?: string;
 }
 
@@ -248,6 +261,14 @@ export interface RefillRow {
   id: string;
   locationId: string;
   locationName: string;
+  /** Когда произошла заливка (R-H-1). */
+  occurredAt: string;
+  /** `day` — время не называли, известен только день (история из канала, ввод без времени). */
+  occurredPrecision: "minute" | "day";
+  /** Когда записана (R-H-1): по обоим временам виден разрыв. */
+  recordedAt: string;
+  /** Запись задним числом ждёт слова владельца (R-H-13) — пометка рядом с цифрой. */
+  approvalPending: boolean;
   position: number;
   containerNumber: number | null;
   ingredientId: string | null;
@@ -1024,7 +1045,26 @@ export class CoffeeService {
   // ── Ввод данных: ежедневная заливка ─────────────────────────────────────
 
   /** Занести заливку бункера («Сохранить» в «Ввод данных»). */
-  async submitRefill(input: SubmitRefillInput): Promise<{ id: string }> {
+  async submitRefill(input: SubmitRefillInput, now = new Date()): Promise<{ id: string; occurredAt: Date; backdated: boolean }> {
+    // Два времени (R-H-1). Событие в будущем не записывается — проверка ЗДЕСЬ,
+    // на сервере, а не только в форме: форма не граница (R-H-4).
+    let occurredAt: Date;
+    let precision: "minute" | "day";
+    if (input.occurredAt !== undefined && input.occurredAt.trim() !== "") {
+      const parsed = parseOccurred(input.occurredAt, now);
+      if ("problem" in parsed) throw new BadRequestException(parsed.problem);
+      occurredAt = parsed.at;
+      precision = "minute";
+    } else {
+      // Время не названо: день известен, минута — нет. Сегодняшний день берёт
+      // «сейчас» (чтобы порядок заливок внутри дня был), прошлый — полночь.
+      const day = input.enteredDate.slice(0, 10);
+      if (day > tashkentDay(now)) throw new BadRequestException("Событие в будущем записать нельзя — проверьте дату");
+      occurredAt = day === tashkentDay(now) ? truncateToMinute(now) : tashkentDayStart(day)!;
+      precision = "day";
+    }
+    const enteredDate = tashkentDay(occurredAt);
+
     // Ингредиент, не названный клиентом, выводим из конфига бункеров ЗДЕСЬ,
     // а не в каждом клиенте: бот вывод уже делает, а панель не делала — и её
     // заливки выпадали из сверки «ожидали против налили» (reconcile пропускает
@@ -1046,11 +1086,29 @@ export class CoffeeService {
         filledWeight: input.filledWeight,
         measuredBefore: input.measuredBefore ?? null,
         packageCount: input.packageCount ?? null,
-        enteredDate: input.enteredDate,
+        // День события выводится из occurredAt, а не приходит отдельно: два
+        // источника одной правды разъехались бы (CHECK в базе это и держит).
+        enteredDate,
+        occurredAt,
+        occurredPrecision: precision,
+        recordedAt: now,
         createdBy: input.createdBy ?? null,
       })
       .returning({ id: coffeeRefill.id });
-    return { id: row!.id };
+    return { id: row!.id, occurredAt, backdated: isBackdated(occurredAt, now) };
+  }
+
+  /** Имя места — для человекочитаемого текста запроса на одобрение. */
+  async locationName(id: string): Promise<string | null> {
+    const [row] = await this.db.select({ name: entity.name }).from(entity).where(eq(entity.id, id)).limit(1);
+    return row?.name ?? null;
+  }
+  /**
+   * Привязать запись задним числом к запросу на одобрение (R-H-12, R-H-13).
+   * Запись уже считается; пометка «ждёт одобрения» живёт этой ссылкой.
+   */
+  async attachRefillApproval(refillId: string, approvalId: string): Promise<void> {
+    await this.db.update(coffeeRefill).set({ approvalId }).where(eq(coffeeRefill.id, refillId));
   }
 
   /** Последние N заливок — «История ввода». */
@@ -1067,14 +1125,28 @@ export class CoffeeService {
         measuredBefore: coffeeRefill.measuredBefore,
         packageCount: coffeeRefill.packageCount,
         enteredDate: coffeeRefill.enteredDate,
+        occurredAt: coffeeRefill.occurredAt,
+        occurredPrecision: coffeeRefill.occurredPrecision,
+        recordedAt: coffeeRefill.recordedAt,
+        approvalDecision: approval.decision,
         createdBy: coffeeRefill.createdBy,
         createdAt: coffeeRefill.createdAt,
       })
       .from(coffeeRefill)
       .innerJoin(place, eq(coffeeRefill.locationId, place.id))
+      // LEFT JOIN: одобрение есть только у записей задним числом (R-H-12).
+      .leftJoin(approval, eq(approval.id, coffeeRefill.approvalId))
       .orderBy(desc(coffeeRefill.createdAt))
       .limit(Math.min(Math.max(limit, 1), 200));
-    return rows.map((r) => ({ ...r, enteredDate: String(r.enteredDate), createdAt: r.createdAt.toISOString() }));
+    return rows.map(({ approvalDecision, ...r }) => ({
+      ...r,
+      enteredDate: String(r.enteredDate),
+      occurredAt: r.occurredAt.toISOString(),
+      occurredPrecision: r.occurredPrecision === "day" ? ("day" as const) : ("minute" as const),
+      recordedAt: r.recordedAt.toISOString(),
+      approvalPending: approvalDecision === "pending",
+      createdAt: r.createdAt.toISOString(),
+    }));
   }
 
   /**
@@ -1098,7 +1170,7 @@ export class CoffeeService {
         // заливках одной позиции за день (легальный случай: «Вторая заливка —
         // записать») порядок строк внутри даты Postgres не гарантирует.
         // «Последней» обязана быть действительно последняя, а не случайная.
-        .orderBy(asc(coffeeRefill.enteredDate), asc(coffeeRefill.createdAt)),
+        .orderBy(asc(coffeeRefill.occurredAt), asc(coffeeRefill.createdAt)),
     ]);
 
     // Последняя заливка на (locationName, position) — берём по порядку возрастания
@@ -1142,7 +1214,7 @@ export class CoffeeService {
         // заливках одной позиции за день (легальный случай: «Вторая заливка —
         // записать») порядок строк внутри даты Postgres не гарантирует.
         // «Последней» обязана быть действительно последняя, а не случайная.
-        .orderBy(asc(coffeeRefill.enteredDate), asc(coffeeRefill.createdAt)),
+        .orderBy(asc(coffeeRefill.occurredAt), asc(coffeeRefill.createdAt)),
       this.tareByKey(),
       this.bunkerConfig(),
     ]);
@@ -1634,7 +1706,7 @@ export class CoffeeService {
         .select()
         .from(coffeeRefill)
         .where(eq(coffeeRefill.locationId, locationId))
-        .orderBy(asc(coffeeRefill.position), asc(coffeeRefill.enteredDate), asc(coffeeRefill.createdAt)),
+        .orderBy(asc(coffeeRefill.position), asc(coffeeRefill.occurredAt), asc(coffeeRefill.createdAt)),
       this.db.select().from(coffeeSale).where(eq(coffeeSale.locationId, locationId)),
       this.products(),
       this.priceableIngredients(),
@@ -1742,7 +1814,7 @@ export class CoffeeService {
       this.db
         .select()
         .from(coffeeRefill)
-        .orderBy(asc(coffeeRefill.position), asc(coffeeRefill.enteredDate), asc(coffeeRefill.createdAt)),
+        .orderBy(asc(coffeeRefill.position), asc(coffeeRefill.occurredAt), asc(coffeeRefill.createdAt)),
       this.db.select().from(coffeeSale),
       this.products(),
       this.priceableIngredients(),

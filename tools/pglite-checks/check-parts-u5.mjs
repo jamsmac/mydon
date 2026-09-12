@@ -16,7 +16,7 @@ try {
   await run(`insert into coffee_ingredient (name) values ('Молоко сухое')`);
   const [ing] = await run(`select id from coffee_ingredient where name = 'Кофе зерновой'`);
   const [milk] = await run(`select id from coffee_ingredient where name = 'Молоко сухое'`);
-  await run(`insert into coffee_refill (location_id, position, container_number, ingredient_id, filled_weight, measured_before, entered_date) values ('${LOC}',1,27,'${ing.id}',800,300,'2026-08-01'), ('${LOC}',3,5,'${milk.id}',600,null,'2026-08-03')`);
+  await run(`insert into coffee_refill (location_id, position, container_number, ingredient_id, filled_weight, measured_before, entered_date, occurred_at) values ('${LOC}',1,27,'${ing.id}',800,300,'2026-08-01','2026-08-01T00:00:00+05:00'), ('${LOC}',3,5,'${milk.id}',600,null,'2026-08-03','2026-08-03T00:00:00+05:00')`);
   await run(`insert into coffee_container_tare (container_number, position, tare_weight) values (27,1,410)`);
   const p = new PartsService(db), stock = new StockService(db), coffee = new CoffeeService(db), ledger = new CoffeeLedgerService(db, stock);
   await p.provision({ machineIds: [A], actorRef: "owner" });

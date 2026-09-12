@@ -13,8 +13,8 @@ try {
   await run(`insert into machine_placement (entity_id, location_id, start_date) values ('${A}','${LOC}','2026-01-01')`);
   await run(`insert into coffee_ingredient (name) values ('Кофе зерновой')`);
   const [ing] = await run(`select id from coffee_ingredient limit 1`);
-  await run(`insert into coffee_refill (location_id, position, container_number, ingredient_id, filled_weight, entered_date) values
-    ('${LOC}',1,27,'${ing.id}',800,'2026-08-01'), ('${LOC}',1,19,'${ing.id}',800,'2026-07-01'), ('${LOC}',2,27,'${ing.id}',700,'2026-08-02'), ('${LOC}',3,5,'${ing.id}',600,'2026-08-03')`);
+  await run(`insert into coffee_refill (location_id, position, container_number, ingredient_id, filled_weight, entered_date, occurred_at) values
+    ('${LOC}',1,27,'${ing.id}',800,'2026-08-01','2026-08-01T00:00:00+05:00'), ('${LOC}',1,19,'${ing.id}',800,'2026-07-01','2026-07-01T00:00:00+05:00'), ('${LOC}',2,27,'${ing.id}',700,'2026-08-02','2026-08-02T00:00:00+05:00'), ('${LOC}',3,5,'${ing.id}',600,'2026-08-03','2026-08-03T00:00:00+05:00')`);
   await run(`insert into coffee_container_tare (container_number, position, tare_weight) values (27,1,410), (27,2,415)`);
   const p = new PartsService(db); const m = new MaintenanceService(db);
   // на B уже стоит миксер в слоте 2 (заведён руками) — его не дублируем
@@ -91,9 +91,9 @@ try {
     await run(`insert into coffee_ingredient (name) values ('Кофе зерновой')`);
     const [ing] = await run(`select id from coffee_ingredient limit 1`);
     // набор 27 стоял на точке A, уехал на мойку и вернулся на точку B — последняя заливка ОБЕИХ точек называет 27
-    await run(`insert into coffee_refill (location_id, position, container_number, ingredient_id, filled_weight, entered_date) values
-      ('${LA}',1,27,'${ing.id}',800,'2026-08-01'), ('${LA}',2,27,'${ing.id}',800,'2026-08-01'),
-      ('${LB}',1,27,'${ing.id}',800,'2026-08-20'), ('${LB}',2,27,'${ing.id}',800,'2026-08-20')`);
+    await run(`insert into coffee_refill (location_id, position, container_number, ingredient_id, filled_weight, entered_date, occurred_at) values
+      ('${LA}',1,27,'${ing.id}',800,'2026-08-01','2026-08-01T00:00:00+05:00'), ('${LA}',2,27,'${ing.id}',800,'2026-08-01','2026-08-01T00:00:00+05:00'),
+      ('${LB}',1,27,'${ing.id}',800,'2026-08-20','2026-08-20T00:00:00+05:00'), ('${LB}',2,27,'${ing.id}',800,'2026-08-20','2026-08-20T00:00:00+05:00')`);
     const p2 = new PartsService(db);
     const nos = (arr) => arr.map((x) => (x.match(/[A-ZА-Я]?-?\b([MGBFH]-\d+(?:-\d+)?)/) ?? [null, "—"])[1]);
     const dry = await p2.provision({ dryRun: true });
@@ -168,7 +168,7 @@ try {
     await run(`insert into machine_placement (entity_id, location_id, start_date) values ('${M}','${LOC}','2026-01-01')`);
     await run(`insert into coffee_ingredient (name) values ('Кофе зерновой')`);
     const [ing] = await run(`select id from coffee_ingredient limit 1`);
-    await run(`insert into coffee_refill (location_id, position, container_number, ingredient_id, filled_weight, entered_date) values ('${LOC}',1,9,'${ing.id}',800,'2026-08-01')`);
+    await run(`insert into coffee_refill (location_id, position, container_number, ingredient_id, filled_weight, entered_date, occurred_at) values ('${LOC}',1,9,'${ing.id}',800,'2026-08-01','2026-08-01T00:00:00+05:00')`);
     await run(`insert into part_unit (part_kind, inventory_no, set_number, hopper_position, retired_at, retired_reason) values ('hopper','H-9-1',9,1,'2026-03-01','треснул')`);
     const p4 = new PartsService(db);
     const dry = await p4.provision({ dryRun: true });
