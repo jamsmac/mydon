@@ -68,6 +68,11 @@ const RETURNS_ONLY = args.includes("--returns-only");
  * согласовывает.
  */
 const SINCE = opt("since");
+/**
+ * Верхняя граница дня (включительно). Нужна, чтобы взять ВЫБОРКУ из истории:
+ * проверить, как разобрались старые таблицы, не разбирая весь архив заново.
+ */
+const UNTIL = opt("until");
 const PHOTOS = args.includes("--photos");
 // Фото только из одной темы форума (id из fetch-telegram-history.mjs --topics):
 // тема «Заполнение бункеров» — таблицы, остальные темы vision не гоняем.
@@ -92,7 +97,7 @@ if (!file) {
       "  --photos — разбирать фото-таблицы (экспорт должен включать картинки; лежат рядом с result.json).\n" +
       "  --photo-topic N — фото только из темы форума N (id — из fetch-telegram-history.mjs --topics).\n" +
       "  --returns-only — только возвраты «позиция. набор. вес» (регулярка, без модели и без фото).\n" +
-      "  --since YYYY-MM-DD — брать возвраты только с этого дня (чего ещё нет в системе).\n" +
+      "  --since YYYY-MM-DD / --until YYYY-MM-DD — окно дней (и текст, и фото): того, что уже в системе, модель не касается.\n" +
       "  --payload файл — отправить на согласование готовый payload прошлого прогона (без пере-разбора).",
   );
   process.exit(1);
@@ -140,7 +145,25 @@ try {
   console.error(`Не удалось прочитать/разобрать ${file}: ${err.message}`);
   process.exit(1);
 }
-const allMessages = Array.isArray(raw.messages) ? raw.messages : [];
+const allRawMessages = Array.isArray(raw.messages) ? raw.messages : [];
+/**
+ * `--since` отсекает ВЕСЬ вход, а не только возвраты.
+ *
+ * Иначе прогон по фото идёт по всему архиву: 527 таблиц вместо 36 новых —
+ * часы работы модели и лимиты подписки, потраченные на то, что в системе уже
+ * есть. День сообщения берём как есть: экспорт Telegram отдаёт локальное время
+ * владельца, тем же днём запись и попадёт в учёт.
+ */
+const inWindow = (m) => {
+  const day = String(m.date ?? "").slice(0, 10);
+  return (SINCE === null || day >= SINCE) && (UNTIL === null || day <= UNTIL);
+};
+const allMessages = SINCE === null && UNTIL === null ? allRawMessages : allRawMessages.filter(inWindow);
+if (SINCE !== null || UNTIL !== null) {
+  console.log(
+    `окно ${SINCE ?? "начало"} → ${UNTIL ?? "конец"}: из ${allRawMessages.length} сообщений в работу взято ${allMessages.length}.`,
+  );
+}
 
 // Готовый payload прошлого прогона: сразу на согласование, без LLM-разбора.
 if (PAYLOAD_FILE) {
@@ -172,7 +195,6 @@ for (const m of textMessages) {
     continue;
   }
   const returnedDate = String(m.date ?? "").slice(0, 10);
-  if (SINCE !== null && returnedDate < SINCE) continue;
   for (const r of parsed.returns) {
     returns.push({ ...r, returnedDate, ...(parsed.locationNote ? { locationNote: parsed.locationNote } : {}) });
   }
@@ -269,6 +291,13 @@ const schema = {
 };
 
 const knownLocations = locations.map((l) => l.name).join(", ");
+/**
+ * Тара из фото-таблиц: «набор:позиция» → все встреченные значения.
+ * Объявлена рядом с остальными накопителями: её наполняет и текстовый разбор,
+ * и разбор фото, а они идут в разном порядке.
+ */
+const taresFromTables = new Map();
+
 const records = [];
 const unmatchedFromModel = [];
 const unmatchedLocationName = [];
@@ -345,6 +374,28 @@ for (let i = 0; i < messages.length; i += BATCH_SIZE) {
       unmatchedLocationName.push(`${r.locationName}: кривые данные (бункер ${r.position}, ${r.filledWeight}г, ${r.enteredDate})`);
       continue;
     }
+    // Таблица проверяет себя сама: брутто − тара = нетто. Если модель взяла не
+    // ту колонку (а она брала красное нетто и клала его в поле брутто —
+    // систематическая ошибка ровно в тару), равенство не сойдётся, и строка
+    // уйдёт на глаза, а не в учёт. Допуск 2 г — на описку в одной цифре.
+    const tare = Number(r.tareWeight);
+    const net = Number(r.netWeight);
+    // Тара набора из тетради — отдельным сбором, в записи заливки её нет.
+    // На 12.09.2026 у 97 бункеров из 200 тара неизвестна, а в таблице она
+    // стоит в каждой строке. Пишем НЕ сразу: сначала показать владельцу, что
+    // получилось, и не разойтись ли с матрицей 27×8 (`coffee_container_tare`).
+    if (tare > 0 && Number.isInteger(r.containerNumber) && r.containerNumber >= 1 && r.containerNumber <= 27) {
+      const k = `${r.containerNumber}:${position}`;
+      if (!taresFromTables.has(k)) taresFromTables.set(k, []);
+      taresFromTables.get(k).push(tare);
+    }
+    if (tare > 0 && net > 0 && Math.abs(filledWeight - tare - net) > 2) {
+      unmatchedLocationName.push(
+        `${r.locationName}: таблица не сходится (бункер ${r.position}: брутто ${filledWeight} − тара ${tare} ≠ нетто ${net}) — ` +
+          `похоже, прочитана не та колонка`,
+      );
+      continue;
+    }
     const canonName = loc ? null : rememberNewLocation(r.locationName);
     if (!loc && !canonName) {
       unmatchedLocationName.push(`${r.locationName} (бункер ${r.position}, ${r.filledWeight}г, ${r.enteredDate})`);
@@ -405,11 +456,30 @@ if (PHOTOS && photoMessages.length > 0) {
           properties: {
             locationName: { type: "string" },
             position: { type: "integer", description: "Колонка 1–8" },
-            containerNumber: { type: "integer", description: "Номер набора из ячейки (зелёная пометка), 1–27" },
-            filledWeight: { type: "integer", description: "Вес из ячейки, грамм" },
+            containerNumber: { type: "integer", description: "Номер набора, 1–27 — ВТОРОЕ число в строке" },
+            tareWeight: {
+              type: "integer",
+              description: "ТАРА набора, грамм — ТРЕТЬЕ число в строке (пустой бункер, обычно 600–700)",
+            },
+            filledWeight: {
+              type: "integer",
+              description:
+                "БРУТТО, грамм — ЧЕТВЁРТОЕ число в строке, самое большое (бункер вместе с содержимым, обычно 1400–2100). " +
+                "НЕ брать красное число: красным пишут нетто, оно равно брутто минус тара.",
+            },
+            netWeight: {
+              type: "integer",
+              description: "НЕТТО, грамм — пятое число, обычно написано КРАСНЫМ. Нужно только для проверки: нетто = брутто − тара.",
+            },
             date: { type: "string", description: "Дата из ЗАГОЛОВКА таблицы, YYYY-MM-DD" },
           },
           required: ["locationName", "position", "filledWeight", "date"],
+          // Порядок колонок в тетради (проверено на фото 17.08.2026):
+          // точка | позиция | набор | ТАРА | БРУТТО | нетто красным | расходники.
+          // Пока в схеме стояло одно «вес из ячейки», модель брала красное
+          // число — то есть НЕТТО — и оно ложилось в поле брутто. Ошибка ровно
+          // в тару, в одну сторону, в каждой строке: на сверке 17.08 из 78 пар
+          // 51 разошлась на 600–700 г.
         },
       },
       consumables: {
@@ -529,6 +599,25 @@ if (PHOTOS && photoMessages.length > 0) {
         unmatchedLocationName.push(`${r.locationName} (фото: бункер ${r.position}, ${r.filledWeight}г, ${r.date})`);
         continue;
       }
+      // Таблица проверяет себя сама: брутто − тара = нетто. Модель, не знавшая
+      // про колонки, брала красное НЕТТО и клала его в поле брутто —
+      // систематическая ошибка ровно в тару, в каждой строке. Сверка 12.09.2026
+      // на участке, где есть и тетрадь, и живой ввод: до правки совпало 0 из 76,
+      // после — 70. Допуск 2 г — на описку в одной цифре.
+      const tare = Number(r.tareWeight);
+      const net = Number(r.netWeight);
+      if (tare > 0 && net > 0 && Math.abs(filledWeight - tare - net) > 2) {
+        unmatchedLocationName.push(
+          `${r.locationName} (фото ${date}, бункер ${position}): таблица не сходится — ` +
+            `брутто ${filledWeight} − тара ${tare} ≠ нетто ${net}; похоже, прочитана не та колонка`,
+        );
+        continue;
+      }
+      if (tare > 0 && Number.isInteger(r.containerNumber) && r.containerNumber >= 1 && r.containerNumber <= 27) {
+        const k = `${r.containerNumber}:${position}`;
+        if (!taresFromTables.has(k)) taresFromTables.set(k, []);
+        taresFromTables.get(k).push(tare);
+      }
       records.push({
         ...(loc ? { locationId: loc.id } : { locationName: canonName }),
         position,
@@ -599,17 +688,44 @@ if (records.length === 0 && returns.length === 0 && consumables.length === 0) {
   console.log("\nПредлагать нечего — согласование не создаётся.");
   process.exit(0);
 }
-if (DRY) {
-  console.log("\n(сухой прогон — согласование не создано)");
-  process.exit(0);
+// ── 5. Разбор на диск — ДО любого выхода ──────────────────────────────────
+// Многочасовой vision-разбор не должен пропасть ни из-за отвалившегося туннеля
+// к Core, ни из-за того, что прогон был сухим. Раньше `--dry` выходил здесь
+// раньше сохранения: посмотреть глазами и потом отправить то же самое было
+// нельзя — только разбирать заново, платя моделью второй раз.
+// ── Тара из тетради: отчёт, а не запись ───────────────────────────────────
+// В таблице тара стоит в каждой строке, а в системе её нет у 97 бункеров из
+// 200. Но записывать её отсюда молча нельзя: тара — измеренная величина, и
+// расхождение с матрицей 27×8 означает либо перекалибровку, либо ошибку
+// чтения. Показываем и оставляем решение владельцу.
+if (taresFromTables.size > 0) {
+  const стабильные = [];
+  const спорные = [];
+  for (const [k, vals] of taresFromTables) {
+    const uniq = [...new Set(vals)];
+    if (uniq.length === 1) стабильные.push(`${k}=${uniq[0]}`);
+    else спорные.push(`${k}: ${uniq.sort((a, b) => a - b).join(" / ")}`);
+  }
+  console.log(`\nТара из тетради: ${taresFromTables.size} пар «набор:позиция»; одинаковая во всех строках — ${стабильные.length}.`);
+  if (спорные.length > 0) {
+    console.log(`Разные значения у одной пары (${спорные.length}) — глазами, это либо перекалибровка, либо ошибка чтения:`);
+    for (const line of спорные.slice(0, 15)) console.log(`  ${line}`);
+  }
+  writeFileSync(join(dirname(file), "coffee-tares-from-tables.json"), JSON.stringify(Object.fromEntries(taresFromTables), null, 1));
+  console.log(`Сохранено: ${join(dirname(file), "coffee-tares-from-tables.json")}`);
 }
 
-// ── 5. Одно согласование со всем списком (T0 — владелец решает) ────────────
-// Многочасовой vision-разбор не должен пропасть из-за отвалившегося туннеля к
-// Core: payload сохраняется на диск ДО отправки, повтор — через --payload.
 const payloadPath = join(dirname(file), "coffee-import-payload.json");
 writeFileSync(payloadPath, JSON.stringify({ records, returns, consumables, newLocations }, null, 1));
 console.log(`\nPayload сохранён: ${payloadPath}`);
+
+if (DRY) {
+  console.log("(сухой прогон — согласование не создано)");
+  console.log(`Отправить разобранное без пере-разбора:\n  node tools/import-telegram-coffee.mjs ${file} --payload ${payloadPath}`);
+  process.exit(0);
+}
+
+// ── 6. Одно согласование со всем списком (T0 — владелец решает) ────────────
 try {
   await submitApproval(records, returns, consumables, newLocations);
 } catch (err) {
