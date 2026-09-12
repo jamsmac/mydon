@@ -18,6 +18,7 @@ import {
 } from "class-validator";
 import { Type } from "class-transformer";
 import { UNITS, tashkentDay, type Unit } from "@mydon/shared";
+import { VisitsService } from "./visits.service";
 import { ApprovalsService } from "../approvals/approvals.service";
 import { CoffeeService } from "./coffee.service";
 import { CoffeeLedgerService } from "./coffee-ledger.service";
@@ -327,6 +328,7 @@ export class CoffeeController {
     private readonly orders: CoffeeOrdersService,
     private readonly ledger: CoffeeLedgerService,
     private readonly approvals: ApprovalsService,
+    private readonly visitsService: VisitsService,
   ) {}
 
   @Get("locations")
@@ -552,6 +554,21 @@ export class CoffeeController {
   @Post("container-return/backfill-net")
   backfillReturnNet(@Query("actor") actor?: string) {
     return this.ledger.backfillReturnNetWeight(actor ?? requestActor("owner"));
+  }
+
+  /**
+   * Визиты за окно: кто и когда был на точке. Визит вычисляется из уже
+   * записанных фактов (заливки, расходники) — своей таблицы у него нет.
+   */
+  @Get("visits")
+  visits(@Query("from") from: string, @Query("to") to: string) {
+    return this.visitsService.list(from, to);
+  }
+
+  /** Когда точку видели в последний раз. `null` — ни разу за окно. */
+  @Get("visits/last-seen")
+  visitsLastSeen(@Query("from") from: string, @Query("to") to: string, @Query("today") today?: string) {
+    return this.visitsService.lastSeen(from, to, today ?? tashkentDay(new Date()));
   }
 
   @Get("container-return/unposted")
