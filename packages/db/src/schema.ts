@@ -2914,10 +2914,45 @@ export const coffeeRefill = pgTable(
     stockMovementId: uuid("stock_movement_id").references(() => stockMovement.id),
     /** «Дата» из формы — календарная дата обхода, без времени. */
     enteredDate: date("entered_date").notNull(),
+    /**
+     * КОГДА ПРОИЗОШЛА заливка (волна 5, R-H-1, R-H-2). Расчёты — по этому
+     * времени, а не по времени записи: техник заливает утром, в панель это
+     * попадает вечером. Точность до минуты: две заливки одного бункера в
+     * день должны различаться порядком, иначе расход между ними не посчитать.
+     */
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    /**
+     * Точность `occurred_at`. У строк до волны 5 известен только день
+     * (`entered_date`), и время у них — полночь Ташкента: это НЕ «залили в
+     * 00:00». Колонка отличает такую полночь от настоящей.
+     */
+    occurredPrecision: text("occurred_precision").default("minute").notNull(),
+    /** КОГДА ЗАПИСАНО (R-H-1): аудит идёт по обоим временам. */
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).defaultNow().notNull(),
+    /**
+     * Запись задним числом ждёт одобрения владельца (R-H-12, R-H-13): она
+     * СЧИТАЕТСЯ сразу, но помечена «ждёт одобрения». Отклонение отменяет её
+     * тем же путём, что обычная ошибочная запись, — удалением со строкой в
+     * журнале (`deleteRefill`), а не отдельным состоянием: состояние «отменена»
+     * пришлось бы фильтровать в КАЖДОМ из дюжины путей чтения (сводка,
+     * недолив, расход, сверка, леджер), и забытый фильтр оставил бы отменённую
+     * заливку в расчёте.
+     */
+    approvalId: uuid("approval_id").references(() => approval.id),
     createdBy: text("created_by"),
     createdAt: createdAt(),
   },
   (t) => [
+    // День события выводится из occurred_at и не должен с ним разъезжаться.
+    // Сначала момент приводится к UTC БЕЗ зоны, и только потом считается
+    // ташкентский день: голое `timestamptz::date` зависит от TimeZone СЕССИИ —
+    // проверено на pglite, вечерняя заливка (23:30 Ташкента) принималась при
+    // сессии в UTC и отвергалась при сессии в Asia/Tashkent. Смещение +5
+    // числом: у Ташкента нет перехода на летнее время.
+    check(
+      "coffee_refill_entered_date_matches_occurred",
+      sql`((occurred_at at time zone 'UTC') + interval '5 hours')::date = entered_date`,
+    ),
     index("coffee_refill_location_position_idx").on(t.locationId, t.position, t.enteredDate),
     check("coffee_refill_position_range", sql`${t.position} between 1 and 8`),
     check(

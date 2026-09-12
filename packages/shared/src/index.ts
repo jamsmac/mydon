@@ -179,6 +179,7 @@ export * from "./bank-statement";
  * (срез K, задача 7).
  */
 export * from "./tashkent-time";
+export * from "./backdating";
 
 /** Единый денежный протокол платных LLM-вызовов через MYDON Core. */
 export * from "./llm-ledger";

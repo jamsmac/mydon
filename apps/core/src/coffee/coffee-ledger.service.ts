@@ -98,7 +98,7 @@ export class CoffeeLedgerService {
       .select({ ingredientId: coffeeRefill.ingredientId })
       .from(coffeeRefill)
       .where(and(eq(coffeeRefill.containerNumber, containerNumber), eq(coffeeRefill.position, position), lte(coffeeRefill.enteredDate, returnedDate)))
-      .orderBy(desc(coffeeRefill.enteredDate), desc(coffeeRefill.createdAt))
+      .orderBy(desc(coffeeRefill.occurredAt), desc(coffeeRefill.createdAt))
       .limit(1);
     if (!refill?.ingredientId) return null;
     const [ing] = await this.db

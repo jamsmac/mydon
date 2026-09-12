@@ -17,7 +17,8 @@ import {
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
-import { UNITS, type Unit } from "@mydon/shared";
+import { UNITS, tashkentDay, type Unit } from "@mydon/shared";
+import { ApprovalsService } from "../approvals/approvals.service";
 import { CoffeeService } from "./coffee.service";
 import { CoffeeLedgerService } from "./coffee-ledger.service";
 import { CoffeeOrdersService } from "./coffee-orders.service";
@@ -161,6 +162,10 @@ export class SubmitRefillDto {
 
   @IsISO8601()
   enteredDate!: string;
+
+  /** Когда произошла заливка, до минуты (R-H-1…R-H-4); нет — день из enteredDate. */
+  @IsOptional() @IsString() @MaxLength(40)
+  occurredAt?: string;
 
   @IsOptional() @IsString() @MaxLength(128)
   createdBy?: string;
@@ -313,6 +318,7 @@ export class CoffeeController {
     private readonly coffee: CoffeeService,
     private readonly orders: CoffeeOrdersService,
     private readonly ledger: CoffeeLedgerService,
+    private readonly approvals: ApprovalsService,
   ) {}
 
   @Get("locations")
@@ -414,6 +420,42 @@ export class CoffeeController {
   @Post("refill")
   async submitRefill(@Body() dto: SubmitRefillDto) {
     const saved = await this.coffee.submitRefill(dto);
+    // Запись задним числом идёт в СУЩЕСТВУЮЩУЮ очередь одобрений (R-H-7a,
+    // R-H-12) и считается сразу (R-H-13): отклонение её отменит. Сбой
+    // очереди не должен терять факт заливки — как и сбой склада ниже.
+    let approvalId: string | null = null;
+    if (saved.backdated) {
+      const actor = dto.createdBy ?? requestActor("owner");
+      const place = await this.coffee.locationName(dto.locationId);
+      try {
+        const ap = await this.approvals.request({
+          agent: actor,
+          action:
+            "Заливка задним числом: " +
+            (place ?? "точка") +
+            ", бункер " +
+            dto.position +
+            ", за " +
+            tashkentDay(saved.occurredAt) +
+            " (" +
+            dto.filledWeight +
+            " г)",
+          tier: "T1",
+          payload: {
+            backdatedRecord: {
+              kind: "coffee_refill",
+              rowId: saved.id,
+              occurredAt: saved.occurredAt.toISOString(),
+            },
+          },
+          clientKey: "backdated:coffee_refill:" + saved.id,
+        });
+        approvalId = ap.id;
+        await this.coffee.attachRefillApproval(saved.id, ap.id);
+      } catch {
+        approvalId = null;
+      }
+    }
     // Списание со склада — после записи заливки и НЕ вместо неё: сбой склада
     // не должен терять факт заливки. Результат идёт в ответ, а не в лог.
     let stock: Awaited<ReturnType<CoffeeLedgerService["consumeRefill"]>> | { error: string };
@@ -422,7 +464,7 @@ export class CoffeeController {
     } catch (e) {
       stock = { error: e instanceof Error ? e.message : String(e) };
     }
-    return { ...saved, stock };
+    return { ...saved, approvalId, stock };
   }
 
   /** Заливки без списания за период — сверка «что не ушло со склада». */

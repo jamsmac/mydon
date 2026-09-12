@@ -589,7 +589,7 @@ export class PartsService {
       .select({ position: coffeeRefill.position, containerNumber: coffeeRefill.containerNumber, enteredDate: coffeeRefill.enteredDate })
       .from(coffeeRefill)
       .where(and(eq(coffeeRefill.locationId, placement.locationId), sql`${coffeeRefill.containerNumber} is not null`))
-      .orderBy(desc(coffeeRefill.enteredDate), desc(coffeeRefill.createdAt))
+      .orderBy(desc(coffeeRefill.occurredAt), desc(coffeeRefill.createdAt))
       .limit(200);
     const out = new Map<number, number>();
     for (const r of rows) if (!out.has(r.position) && r.containerNumber !== null) out.set(r.position, r.containerNumber);

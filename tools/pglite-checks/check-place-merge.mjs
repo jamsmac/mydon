@@ -19,8 +19,8 @@ try {
     ('${O}','product','Эспрессо','{}'), ('${P}','location','4 Корпус  Кардиология','{}')`);
   await run(`insert into machine_placement (location_id, entity_id, start_date, end_date) values
     ('${S}','${M}','2026-08-01','2026-08-19'), ('${T}','${M}','2026-08-20', null)`);
-  await run(`insert into coffee_refill (location_id, position, filled_weight, entered_date) values
-    ('${S}',1,600,'2026-08-10'), ('${S}',2,500,'2026-08-11'), ('${T}',1,590,'2026-09-01')`);
+  await run(`insert into coffee_refill (location_id, position, filled_weight, entered_date, occurred_at) values
+    ('${S}',1,600,'2026-08-10','2026-08-10T00:00:00+05:00'), ('${S}',2,500,'2026-08-11','2026-08-11T00:00:00+05:00'), ('${T}',1,590,'2026-09-01','2026-09-01T00:00:00+05:00')`);
   await run(`insert into coffee_consumable (location_id, logged_date, water, cups) values
     ('${S}','2026-08-10',5,40), ('${T}','2026-09-01',4,30)`);
   await run(`insert into geo_point (entity_id, lat, lng) values ('${S}',41.32362,69.2999), ('${T}',41.3237,69.3)`);

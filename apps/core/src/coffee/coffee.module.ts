@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { ApprovalsModule } from "../approvals/approvals.module";
 import { StockModule } from "../stock/stock.module";
 import { CoffeeController } from "./coffee.controller";
 import { CoffeeLedgerService } from "./coffee-ledger.service";
@@ -9,7 +10,7 @@ import { NormFactController } from "./norm-fact.controller";
 import { NormFactService } from "./norm-fact.service";
 
 @Module({
-  imports: [StockModule],
+  imports: [StockModule, ApprovalsModule],
   controllers: [CoffeeController, NormFactController],
   providers: [CoffeeService, CoffeeOrdersService, NormFactService, CoffeeLedgerService, CoffeeOrdersStaleService],
   exports: [CoffeeService, CoffeeOrdersService, NormFactService, CoffeeLedgerService],
