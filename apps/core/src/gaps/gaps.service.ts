@@ -1,6 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import {
   coffeeBunkerConfig,
+  coffeeContainerReturn,
   coffeeContainerTare,
   coffeeIngredient,
   coffeeRefill,
@@ -582,6 +583,13 @@ export function healthTimezoneGap(actualTz: string, expectedTz: string): Gap[] {
 const PRACTICE_WINDOW_DAYS = 30;
 
 /**
+ * Порог тишины возвратов. Короче инкассационного (14 дней): бункер возвращают
+ * в том же выезде, что и заливают, и две недели без единого возврата при живых
+ * заливках — это уже не пауза, а оборванный контур.
+ */
+const CONTAINER_RETURN_SILENCE_DAYS = 14;
+
+/**
  * Срез F, задача 4 (факт 7 плана): бот спрашивает вес бункера ДО досыпки
  * (`coffee-refill.ts::beforeStep`), но кнопка «пропустить» есть. Без замера
  * расход между заливками виден только по числу упаковок (`consumedSince()` в
@@ -629,6 +637,56 @@ export function refillMeasuredBeforeMissingGap(
       action: always
         ? "весить бункер перед досыпкой и указывать «сколько было» — шаг в боте есть, но с кнопкой «пропустить»"
         : "привычка есть, добирать оставшиеся: «пропустить» на шаге «сколько было» жать только когда бункер реально пуст",
+    },
+  ];
+}
+
+/* ── Детектор 15б: возвраты бункеров молчат, а заливки идут ──────────────── */
+
+/**
+ * Сколько дней нет ни одного возврата бункера — при том, что заливки идут.
+ *
+ * ЗАЧЕМ ОТДЕЛЬНЫЙ ДЕТЕКТОР (найдено 12.09.2026). Реестр держал 28 строк и НИ
+ * ОДНОЙ про возвраты, хотя дыра была самой дорогой: последний возврат
+ * 03.08.2026, а заливок за 30 дней — 111. Кофе уходит в аппараты и не
+ * возвращается в учёт: остаток бункера ниоткуда не взять, расход по набору не
+ * закрыть, склад не пополнить возвратным сырьём. Молчание одного плеча пары
+ * «залили — вернули» не видно ни одному детектору, который смотрит на плечи
+ * по отдельности.
+ *
+ * СРАВНИВАЕТСЯ С ЗАЛИВКАМИ, А НЕ С КАЛЕНДАРЁМ. Если не заливают вовсе (смена
+ * встала, сезон), то и возвращать нечего — тишина возвратов тогда не новость,
+ * а следствие. Пробел поднимается ТОЛЬКО когда одно плечо живо, а второе нет:
+ * это и есть противоречие в данных, а не просто пауза.
+ */
+export function containerReturnSilenceGap(
+  returnedDates: readonly string[],
+  refillDates: readonly string[],
+  today: string,
+  silenceDays = CONTAINER_RETURN_SILENCE_DAYS,
+): Gap[] {
+  const since = addDays(today, -silenceDays);
+  const refillsRecent = refillDates.filter((d) => d >= since).length;
+  // Заливок нет — сравнивать не с чем, и тишина возвратов ничего не значит.
+  if (refillsRecent === 0) return [];
+  const lastReturn = returnedDates.length === 0 ? null : returnedDates.reduce((a, b) => (a > b ? a : b));
+  if (lastReturn !== null && lastReturn >= since) return [];
+  const days = lastReturn === null ? null : (daysBetween(lastReturn, today) ?? 0);
+  return [
+    {
+      key: "container-return-silence",
+      topic: "возвраты бункеров: тишина при живых заливках",
+      period: lastReturn === null ? null : { from: lastReturn, to: today },
+      missing:
+        (lastReturn === null
+          ? "возвратов бункеров в системе нет вовсе"
+          : `последний возврат бункера ${lastReturn}, ${days} дней тишины`) +
+        `, при этом заливок за ${silenceDays} дней — ${refillsRecent}: кофе уходит в аппараты и не возвращается в учёт ` +
+        "(остаток бункера не восстановить, расход по набору не закрыть, возвратное сырьё не приходуется на склад)",
+      scale: `${refillsRecent} заливок без единого возврата`,
+      action:
+        "слать возвраты боту теми же строками «позиция. набор. вес» (формат группы он принимает дословно; " +
+        "строка «без крышки» на сообщение — если взвешивали без неё)",
     },
   ];
 }
@@ -1111,6 +1169,7 @@ export class GapsService {
       intakeRows,
       productCardRows,
       locationRows,
+      containerReturnRows,
     ] = await Promise.all([
       this.db.select({ collectedAt: collection.collectedAt }).from(collection).where(ne(collection.status, "cancelled")),
       this.collections.reconcile(EPOCH_FROM, today),
@@ -1165,6 +1224,7 @@ export class GapsService {
       this.db.select({ ingredientId: stockMovement.ingredientId, dt: stockMovement.dt }).from(stockMovement).where(eq(stockMovement.kind, "intake")),
       this.db.select({ id: entity.id, name: entity.name, type: entity.type, attrs: entity.attrs }).from(entity).where(eq(entity.type, "product")),
       this.db.select({ id: entity.id, name: entity.name }).from(entity).where(eq(entity.type, "location")),
+      this.db.select({ returnedDate: coffeeContainerReturn.returnedDate }).from(coffeeContainerReturn),
     ]);
 
     const ingredients = ingredientRows.map((r) => ({ ...r, cardAttrs: (r.cardAttrs ?? null) as Record<string, unknown> | null }));
@@ -1210,6 +1270,11 @@ export class GapsService {
       ...bankFlowsWithoutDomainGap(moneyFlowRows),
       ...healthTimezoneGap(appConfig.tz, TZ),
       ...refillMeasuredBeforeMissingGap(refillRows, today),
+      ...containerReturnSilenceGap(
+        containerReturnRows.map((r) => r.returnedDate),
+        refillRows.map((r) => r.enteredDate),
+        today,
+      ),
       // Ревью: позиции 3 и 4 были зашиты литералами — ровно те две, что болели
       // на день написания детектора. Третья сломанная позиция появилась бы
       // молча. `usedPositions` посчитан строкой выше, детектор сам возвращает
