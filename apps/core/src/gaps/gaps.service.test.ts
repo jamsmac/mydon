@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   coffeeBunkerConfig as coffeeBunkerConfigTable,
+  coffeeContainerReturn as coffeeContainerReturnTable,
   coffeeIngredient as coffeeIngredientTable,
   coffeeRefill as coffeeRefillTable,
   collection as collectionTable,
@@ -23,6 +24,7 @@ import {
   batchesWithoutInvoiceDateGap,
   billReconciliationGap,
   bunkerTareNetNonPositiveGap,
+  containerReturnSilenceGap,
   impossibleRefillWeightGap,
   collectionSilenceGap,
   GapsService,
@@ -536,6 +538,40 @@ describe("Реестр пробелов — здоровье: часовой п�
 
 /* ── Детектор 15: заливки — замер «до досыпки» не делают ─────────────────── */
 
+describe("Реестр пробелов — возвраты бункеров молчат при живых заливках", () => {
+  const TODAY = "2026-09-12";
+  const fills = (n: number, date: string) => Array.from({ length: n }, () => date);
+
+  it("случай прода 12.09.2026: последний возврат 03.08, заливок за 14 дней — 40", () => {
+    const [gap] = containerReturnSilenceGap(["2026-08-03"], fills(40, "2026-09-05"), TODAY);
+    assert.equal(gap.topic, "возвраты бункеров: тишина при живых заливках");
+    assert.match(gap.missing, /последний возврат бункера 2026-08-03, 40 дней тишины/);
+    assert.match(gap.missing, /заливок за 14 дней — 40/);
+    assert.match(gap.action, /позиция\. набор\. вес/);
+  });
+
+  it("ГЛАВНОЕ: не заливают — тишина возвратов не новость, а следствие", () => {
+    // Иначе реестр краснел бы весь мёртвый сезон, требуя возвращать то, чего
+    // не заливали, и его перестали бы читать.
+    assert.deepEqual(containerReturnSilenceGap(["2026-08-03"], [], TODAY), []);
+    assert.deepEqual(containerReturnSilenceGap([], [], TODAY), []);
+  });
+
+  it("возвраты пошли — пробел исчезает сам", () => {
+    assert.deepEqual(containerReturnSilenceGap(["2026-09-10"], fills(10, "2026-09-09"), TODAY), []);
+  });
+
+  it("возвратов нет вовсе, но заливают — говорим и это", () => {
+    const [gap] = containerReturnSilenceGap([], fills(5, "2026-09-09"), TODAY);
+    assert.match(gap.missing, /нет вовсе/);
+  });
+
+  it("порог считается от переданного дня, а не от системных часов", () => {
+    assert.equal(containerReturnSilenceGap(["2026-09-01"], fills(3, "2026-09-10"), "2026-09-12").length, 0);
+    assert.equal(containerReturnSilenceGap(["2026-09-01"], fills(3, "2026-09-10"), "2026-09-20").length, 1);
+  });
+});
+
 describe("Реестр пробелов — заливки: замер «до досыпки»", () => {
   const TODAY = "2026-09-12";
   const ref = (measuredBefore: number | null, enteredDate: string) => ({ measuredBefore, enteredDate });
@@ -1043,6 +1079,8 @@ describe("GapsService.list() — сборка реестра", () => {
       [coffeeBunkerConfigTable, Array.from({ length: 8 }, (_, i) => ({ position: i + 1, ingredientId: "ing1", targetFillWeight: 500 }))],
       [machinePlacementTable, [{ locationId: "loc1" }]],
       [stockMovementTable, [{ ingredientId: "ent-ing1", dt: TODAY }]],
+      // Возврат сегодня: контур «залили — вернули» замкнут, детектор 15б молчит.
+      [coffeeContainerReturnTable, [{ returnedDate: TODAY }]],
     ]);
     const db = stubDb(tables);
     const collections = { reconcile: async () => EMPTY_RECONCILE } as unknown as CollectionsService;
