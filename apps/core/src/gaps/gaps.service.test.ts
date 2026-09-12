@@ -536,29 +536,48 @@ describe("Реестр пробелов — здоровье: часовой п�
 
 /* ── Детектор 15: заливки — замер «до досыпки» не делают ─────────────────── */
 
-describe("Реестр пробелов — заливки: замер «до досыпки» не делают", () => {
-  it("0 из 1153 (проверено на проде 22.08.2026) — гэп с числом", () => {
-    const refills = Array.from({ length: 1153 }, () => ({ measuredBefore: null }));
-    const gaps = refillMeasuredBeforeMissingGap(refills);
-    assert.equal(gaps.length, 1);
-    assert.match(gaps[0].missing, /1153 из 1153/);
+describe("Реестр пробелов — заливки: замер «до досыпки»", () => {
+  const TODAY = "2026-09-12";
+  const ref = (measuredBefore: number | null, enteredDate: string) => ({ measuredBefore, enteredDate });
+
+  it("привычки нет: все заливки окна без замера — заголовок «не делают»", () => {
+    const refills = Array.from({ length: 40 }, () => ref(null, "2026-09-01"));
+    const [gap] = refillMeasuredBeforeMissingGap(refills, TODAY);
+    assert.equal(gap.topic, "заливки: замер «до досыпки» не делают");
+    assert.match(gap.missing, /40 из 40/);
   });
 
-  it("заливок нет вовсе — нечего мерить, пусто", () => {
-    assert.deepEqual(refillMeasuredBeforeMissingGap([]), []);
+  it("ГЛАВНОЕ: по годовой истории пробел не судит — иначе он не закроется НИКОГДА", () => {
+    // Случай прода 12.09.2026: 101 из 111 заливок месяца с замером, а по всей
+    // истории 101 из 1254. Старую заливку взвесить задним числом нельзя.
+    const старые = Array.from({ length: 1143 }, () => ref(null, "2026-01-15"));
+    const свежие = [
+      ...Array.from({ length: 101 }, () => ref(900, "2026-09-05")),
+      ...Array.from({ length: 10 }, () => ref(null, "2026-09-05")),
+    ];
+    const [gap] = refillMeasuredBeforeMissingGap([...старые, ...свежие], TODAY);
+    assert.equal(gap.topic, "заливки: замер «до досыпки» иногда пропускают", "привычка есть — и это видно");
+    assert.match(gap.missing, /10 из 111 заливок за 30 дней/);
+    assert.match(gap.missing, /1143 из 1143 без замера, их уже не восстановить/, "история названа, но не выдана за настоящее");
+    assert.match(gap.action, /привычка есть/);
   });
 
-  it("КЛЮЧЕВОЙ ТЕСТ: замер стали делать частично — число падает, у всех — гэп исчезает", () => {
-    const было = refillMeasuredBeforeMissingGap([{ measuredBefore: null }, { measuredBefore: null }]);
-    assert.equal(было.length, 1);
-    assert.match(было[0].missing, /2 из 2/);
+  it("КЛЮЧЕВОЙ ТЕСТ: смена стала мерить всегда — пробел исчезает, несмотря на архив", () => {
+    const старые = Array.from({ length: 500 }, () => ref(null, "2026-02-01"));
+    const свежие = Array.from({ length: 20 }, () => ref(880, "2026-09-10"));
+    assert.deepEqual(refillMeasuredBeforeMissingGap([...старые, ...свежие], TODAY), []);
+  });
 
-    const частично = refillMeasuredBeforeMissingGap([{ measuredBefore: 900 }, { measuredBefore: null }]);
-    assert.equal(частично.length, 1);
-    assert.match(частично[0].missing, /1 из 2/);
+  it("заливок в окне нет — судить о привычке не по чему, молчим", () => {
+    const старые = Array.from({ length: 50 }, () => ref(null, "2026-01-01"));
+    assert.deepEqual(refillMeasuredBeforeMissingGap(старые, TODAY), []);
+    assert.deepEqual(refillMeasuredBeforeMissingGap([], TODAY), []);
+  });
 
-    const стало = refillMeasuredBeforeMissingGap([{ measuredBefore: 900 }, { measuredBefore: 850 }]);
-    assert.deepEqual(стало, []);
+  it("окно считается от переданного дня, а не от системных часов", () => {
+    const refills = [ref(null, "2026-08-20")];
+    assert.equal(refillMeasuredBeforeMissingGap(refills, "2026-09-12", 7).length, 0, "23 дня назад — вне окна 7 дней");
+    assert.equal(refillMeasuredBeforeMissingGap(refills, "2026-09-12", 30).length, 1, "в окне 30 дней — внутри");
   });
 });
 

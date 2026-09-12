@@ -14,7 +14,7 @@ import {
   stockBatch,
   stockMovement,
 } from "@mydon/db";
-import { netWeight, parseRecipe, productKind, resolveIngredientPrice, strictNumber, TZ } from "@mydon/shared";
+import { addDays, netWeight, parseRecipe, productKind, resolveIngredientPrice, strictNumber, TZ } from "@mydon/shared";
 import { eq, ne, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { appConfig } from "../config";
@@ -578,26 +578,57 @@ export function healthTimezoneGap(actualTz: string, expectedTz: string): Gap[] {
 
 /* ── Детектор 15: заливки — замер «до досыпки» не делают ─────────────────── */
 
+/** Окно, по которому судят о ПРИВЫЧКЕ смены, а не о всей истории. */
+const PRACTICE_WINDOW_DAYS = 30;
+
 /**
  * Срез F, задача 4 (факт 7 плана): бот спрашивает вес бункера ДО досыпки
- * (`coffee-refill.ts::beforeStep`), но кнопка «пропустить» есть, и ей
- * пользуются буквально всегда — на проде 22.08.2026 `measured_before` пуст у
- * **0 из 1153** заливок. Без него расход между заливками виден только по
- * числу упаковок (`consumedSince()` в `coffee-calc.ts` — грубее, чем по весу).
+ * (`coffee-refill.ts::beforeStep`), но кнопка «пропустить» есть. Без замера
+ * расход между заливками виден только по числу упаковок (`consumedSince()` в
+ * `coffee-calc.ts` — грубее, чем по весу).
+ *
+ * СЧИТАЕТСЯ ПО ОКНУ, А НЕ ПО ВСЕЙ ИСТОРИИ (12.09.2026). Пробел о ПРИВЫЧКЕ
+ * («не делают») не может судить по годовому архиву: старую заливку взвесить
+ * задним числом нельзя, значит по истории он не закроется НИКОГДА — что бы
+ * смена ни делала. Вечный пробел приучает не смотреть в реестр и прямо
+ * противоречит R-K4: «если пробел закрылся данными — он обязан исчезнуть сам».
+ *
+ * Замер прода 12.09.2026 показал ровно эту ложь: по всей истории «1153 из 1254
+ * без замера», а за последние 30 дней замер есть у **101 из 111** заливок —
+ * привычка появилась в этом месяце, а реестр продолжал писать «не делают».
+ *
+ * История не замалчивается: она названа отдельной фразой, но заголовком служит
+ * то, что происходит СЕЙЧАС и что ещё можно изменить.
  */
-export function refillMeasuredBeforeMissingGap(refills: readonly { measuredBefore: number | null }[]): Gap[] {
-  if (refills.length === 0) return [];
-  const missing = refills.filter((r) => r.measuredBefore === null).length;
+export function refillMeasuredBeforeMissingGap(
+  refills: readonly { measuredBefore: number | null; enteredDate: string }[],
+  today: string,
+  windowDays = PRACTICE_WINDOW_DAYS,
+): Gap[] {
+  const since = addDays(today, -windowDays);
+  const recent = refills.filter((r) => r.enteredDate >= since);
+  // Заливок в окне нет вовсе — судить о привычке не по чему. Молчание смены —
+  // забота других детекторов, а не этого.
+  if (recent.length === 0) return [];
+  const missing = recent.filter((r) => r.measuredBefore === null).length;
   if (missing === 0) return [];
+  const older = refills.length - recent.length;
+  const olderMissing = refills.filter((r) => r.enteredDate < since && r.measuredBefore === null).length;
+  const always = missing * 2 >= recent.length;
+  const хвост =
+    olderMissing > 0
+      ? `; в истории до этого — ${olderMissing} из ${older} без замера, их уже не восстановить`
+      : "";
   return [
     {
       key: "refill-measured-before",
-      topic: "заливки: замер «до досыпки» не делают",
-      period: null,
-      missing: `${missing} из ${refills.length} заливок без замера «до досыпки» — расход между заливками виден только по числу упаковок, не по весу`,
-      scale: `${missing} из ${refills.length} заливок`,
-      action:
-        "весить бункер перед досыпкой и указывать «сколько было» в форме — шаг в боте уже есть, но с кнопкой «пропустить», которой пока пользуются всегда",
+      topic: always ? "заливки: замер «до досыпки» не делают" : "заливки: замер «до досыпки» иногда пропускают",
+      period: { from: since, to: today },
+      missing: `${missing} из ${recent.length} заливок за ${windowDays} дней без замера «до досыпки» — по ним расход между заливками виден только по числу упаковок, не по весу${хвост}`,
+      scale: `${missing} из ${recent.length} заливок`,
+      action: always
+        ? "весить бункер перед досыпкой и указывать «сколько было» — шаг в боте есть, но с кнопкой «пропустить»"
+        : "привычка есть, добирать оставшиеся: «пропустить» на шаге «сколько было» жать только когда бункер реально пуст",
     },
   ];
 }
@@ -1178,7 +1209,7 @@ export class GapsService {
       ...billReconciliationGap(billReportRows),
       ...bankFlowsWithoutDomainGap(moneyFlowRows),
       ...healthTimezoneGap(appConfig.tz, TZ),
-      ...refillMeasuredBeforeMissingGap(refillRows),
+      ...refillMeasuredBeforeMissingGap(refillRows, today),
       // Ревью: позиции 3 и 4 были зашиты литералами — ровно те две, что болели
       // на день написания детектора. Третья сломанная позиция появилась бы
       // молча. `usedPositions` посчитан строкой выше, детектор сам возвращает
