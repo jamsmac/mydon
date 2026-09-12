@@ -609,3 +609,30 @@ describe("LLM operational alerts", () => {
     assert.ok((legacy?.text.length ?? Infinity) <= MAX_NOTIFICATION_TEXT + 1);
   });
 });
+
+describe("Согласования: поштучно только необратимое (волна 6)", () => {
+  it("T0 и T1 уходят в сводку, а не в телефон", () => {
+    for (const tier of ["T0", "T1"]) {
+      const [n] = applyRules(ctx("approval.requested", { action: "Разобрать за день", tier }));
+      assert.equal(n?.urgency, "briefing", `${tier} не должен бить немедленно`);
+      assert.equal(applyRules(ctx("approval.requested", { action: "x", tier })).length, 1, "и ровно одним сообщением");
+    }
+  });
+
+  it("T2 и T3 — деньги и необратимое — по-прежнему немедленно", () => {
+    for (const tier of ["T2", "T3"]) {
+      const [n] = applyRules(ctx("approval.requested", { action: "Закуп вендинга", tier }));
+      assert.equal(n?.urgency, "immediate");
+    }
+  });
+
+  it("тир не назван — считаем несрочным, а не бьём на всякий случай", () => {
+    const [n] = applyRules(ctx("approval.requested", { action: "без тира" }));
+    assert.equal(n?.urgency, "briefing");
+  });
+
+  it("немедленный отбор больше не пропускает предложения агентов", () => {
+    const all = applyRules(ctx("approval.requested", { action: "Разобрать за день", tier: "T1" }));
+    assert.deepEqual(immediateOnly(all), []);
+  });
+});

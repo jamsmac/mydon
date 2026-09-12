@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { CollectionsModule } from "../collections/collections.module";
 import { FinanceModule } from "../finance/finance.module";
+import { GapSignalService } from "./gap-signal.service";
 import { GapsController } from "./gaps.controller";
 import { GapsService } from "./gaps.service";
 
@@ -12,7 +13,7 @@ import { GapsService } from "./gaps.service";
 @Module({
   imports: [CollectionsModule, FinanceModule],
   controllers: [GapsController],
-  providers: [GapsService],
-  exports: [GapsService],
+  providers: [GapsService, GapSignalService],
+  exports: [GapsService, GapSignalService],
 })
 export class GapsModule {}

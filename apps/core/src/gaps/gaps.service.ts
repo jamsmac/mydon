@@ -53,6 +53,24 @@ export interface Gap {
    * решит, что пробел неисправим. При любом переименовании вкладок эти
    * строки надо перечитывать глазами — других сторожей у них нет.
    */
+  /**
+   * Устойчивое тождество строки — чтобы отличить «пробел закрылся» от
+   * «формулировку переписали» (Н-2, волна 6).
+   *
+   * Реестр по-прежнему ВЫЧИСЛЯЕТСЯ (R-K4); ключ ничего не хранит, он только
+   * позволяет сравнить вчерашний список с сегодняшним и сказать, что стало
+   * известно. Без него пришлось бы опознавать строку по её же тексту — и
+   * любая правка слов читалась бы как закрытие пробела, то есть как ложный
+   * сигнал «данных стало достаточно». Такой сигнал хуже молчания.
+   *
+   * `null` — у пробела НЕТ устойчивого тождества (кластер по окну дат: границы
+   * окна двигаются сами собой). Такие строки видны в реестре, но о их
+   * закрытии мы не сигналим: отличить закрытие от переразбиения нечем.
+   *
+   * Ключ — латинский идентификатор, а не подпись: он живёт в базе и переживает
+   * любые переформулировки темы.
+   */
+  key: string | null;
   /** Что именно нельзя посчитать. */
   topic: string;
   /** За какой период — если пробел привязан ко времени. null — пробел не о конкретном окне. */
@@ -96,6 +114,7 @@ export function collectionSilenceGap(collectedAt: readonly (Date | string)[], to
   if (collectedAt.length === 0) {
     return [
       {
+        key: "collection-silence",
         topic: "инкассации: тишина",
         period: null,
         missing: "в системе нет ни одной непогашенной (не отменённой) инкассации вовсе",
@@ -110,6 +129,7 @@ export function collectionSilenceGap(collectedAt: readonly (Date | string)[], to
   if (days <= COLLECTION_SILENCE_DAYS) return [];
   return [
     {
+      key: "collection-silence",
       topic: "инкассации: тишина",
       period: { from: lastDay, to: today },
       missing: `последняя инкассация ${lastDay}, ${days} дней без единой новой записи`,
@@ -138,6 +158,7 @@ export function bankDepositsWithoutCollectionGaps(periods: readonly CashReconcil
   return periods
     .filter((p) => p.status === "noWithdrawn")
     .map((p) => ({
+      key: `bank-deposit-no-collection:${p.period}`,
       topic: "касса: банк показал взнос, инкассации в системе нет",
       period: monthBounds(p.period),
       missing: `банк показал взнос ${formatSum(p.deposited)} (${p.depositedCount} операций) за ${p.period}, инкассаций в системе за этот месяц нет ни одной`,
@@ -241,6 +262,7 @@ export function journalHoleGaps(intervals: readonly ИнтервалСверки
     .map((iv): RawJournalHole => ({ machineId: iv.machineId, from: iv.с.slice(0, 10), to: iv.по.slice(0, 10), expected: iv.ожидалось, collected: iv.изъято ?? 0 }));
   if (holes.length === 0) return [];
   return clusterJournalHoles(holes).map((c) => ({
+    key: null,
     topic: "инкассации: дыра в журнале",
     period: { from: c.from, to: c.to },
     missing: `${c.machines.size} автоматов без инкассаций в этом окне: ожидалось ~${formatSum(c.expected)} наличной выручки против ${formatSum(c.collected)} записанных`,
@@ -261,6 +283,7 @@ export function neverCollectedRevenueGaps(rows: readonly РезультатСв�
   return rows
     .filter((r) => r.статус === "инкассаций нет вовсе")
     .map((r) => ({
+      key: `never-collected:${r.machineId}`,
       topic: "инкассации: выручка есть, инкассаций нет вовсе",
       period: null,
       missing: `«${r.имя ?? r.machineId}»: наличная выручка ${formatSum(r.выручка)} за всю историю, ни одной инкассации по автомату не заведено`,
@@ -280,6 +303,7 @@ export function refillsWithoutIngredientGap(
   const dates = missing.map((r) => r.enteredDate).sort();
   return [
     {
+      key: "refills-without-ingredient",
       topic: "заливки без ингредиента",
       period: { from: dates[0], to: dates[dates.length - 1] },
       missing: `${missing.length} заливок бункера без указанного ингредиента, суммарно ${kg.toLocaleString("ru-RU")} кг`,
@@ -299,6 +323,7 @@ export function batchesWithoutExpiryGap(
   const dates = missing.map((b) => b.receivedOn).sort();
   return [
     {
+      key: "batches-without-expiry",
       topic: "сроки годности партий",
       period: { from: dates[0], to: dates[dates.length - 1] },
       missing: `${missing.length} из ${batches.length} партий без даты производства и срока годности — отчёт «Сроки годности» пуст не потому, что всё свежее, а потому что данные не введены`,
@@ -314,6 +339,7 @@ export function batchesWithoutInvoiceDateGap(batches: readonly { receivedOn: str
   const dates = missing.map((b) => b.receivedOn).sort();
   return [
     {
+      key: "batches-without-invoice-date",
       topic: "партии без даты счёта",
       period: { from: dates[0], to: dates[dates.length - 1] },
       missing: `${missing.length} из ${batches.length} партий без даты счёта-фактуры`,
@@ -330,6 +356,7 @@ export function purchasesWithoutDateGap(purchases: readonly { dt: string | null 
   if (missing.length === 0) return [];
   return [
     {
+      key: "purchases-without-date",
       topic: "закупки без даты прихода",
       period: null,
       missing: `${missing.length} из ${purchases.length} строк реестра закупок без даты прихода`,
@@ -359,6 +386,7 @@ export function ingredientsWithoutPriceGap(
   if (missing.length === 0) return [];
   return [
     {
+      key: "ingredients-without-price",
       topic: "ингредиенты без цены",
       period: null,
       missing: `${missing.length} из ${ingredients.length}: нет цены ни в карточке, ни в реестре — ${missing.map((m) => m.name).join(", ")}`,
@@ -397,6 +425,7 @@ export function ingredientsWithoutPackageWeightGap(
   if (missing.length === 0) return [];
   return [
     {
+      key: "ingredients-without-package-weight",
       topic: "ингредиенты без веса упаковки",
       period: null,
       missing: `${missing.length}: приход считается пачками (заливки со счётом упаковок в журнале), а вес упаковки не указан — ${missing.map((m) => m.name).join(", ")}`,
@@ -418,6 +447,7 @@ export function snackPaymentChannelGap(saleCount: number): Gap[] {
   if (saleCount <= 0) return [];
   return [
     {
+      key: "snack-payment-channel",
       topic: "снек: канала оплаты нет",
       period: null,
       missing: `${saleCount} продаж снека считаются наличными целиком — в источнике нет колонки платёжного канала вовсе`,
@@ -445,6 +475,7 @@ export function billReconciliationGap(reportDefs: readonly { sourceCode: string;
   if (hasBillReport) return [];
   return [
     {
+      key: "bill-report-missing",
       topic: "сверка купюр по автомату — односторонняя",
       period: null,
       missing:
@@ -513,6 +544,7 @@ export function bankFlowsWithoutDomainGap(
   const note = unconverted > 0 ? ` (ещё ${unconverted} записей без курса, в сумму не вошли)` : "";
   return [
     {
+      key: "bank-flows-without-domain",
       topic: "банковские записи без направления",
       period: null,
       missing: `${unassigned.length} записей банковской выписки без направления: приход ${formatSum(inUzs)}, расход ${formatSum(outUzs)} (сальдо ${formatSum(netUzs)}) — счёт общий, наличные итоги по направлению их не видят${note}`,
@@ -534,6 +566,7 @@ export function healthTimezoneGap(actualTz: string, expectedTz: string): Gap[] {
   if (actualTz === expectedTz) return [];
   return [
     {
+      key: "health-timezone",
       topic: "здоровье: часовой пояс процесса",
       period: null,
       missing: `процесс сообщает часовой пояс «${actualTz}», ожидается «${expectedTz}» — /health при этом отдаёт status: "ok"`,
@@ -558,6 +591,7 @@ export function refillMeasuredBeforeMissingGap(refills: readonly { measuredBefor
   if (missing === 0) return [];
   return [
     {
+      key: "refill-measured-before",
       topic: "заливки: замер «до досыпки» не делают",
       period: null,
       missing: `${missing} из ${refills.length} заливок без замера «до досыпки» — расход между заливками виден только по числу упаковок, не по весу`,
@@ -609,6 +643,7 @@ export function bunkerTareNetNonPositiveGap(
   const median = sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
   return [
     {
+      key: `bunker-tare:${position}`,
       topic: `тара бункера: позиция ${position} не откалибрована`,
       period: null,
       missing: `${nonPositive} из ${nets.length} заливок позиции ${position} с известной тарой дают нетто ≤ 0 (медиана нетто ${Math.round(median)} г) — тара физического набора замерена неверно`,
@@ -636,6 +671,7 @@ export function unconfiguredBunkerPositionGap(
   if (missing.length === 0) return [];
   return [
     {
+      key: "bunker-position-unconfigured",
       topic: "бункеры: позиция не сконфигурирована",
       period: null,
       missing: `позици${missing.length === 1 ? "я" : "и"} ${missing.join(", ")} встреча${missing.length === 1 ? "ется" : "ются"} в заливках, но ни одного ингредиента для неё в coffee_bunker_config не задано`,
@@ -675,6 +711,7 @@ export function targetFillWeightMissingGap(configs: readonly { position: number;
     // незакрываемая константа, от которой уходим.
     return [
       {
+        key: "target-fill-weight",
         topic: "бункеры: недолив не проверяется",
         period: null,
         missing: "бункеры не сконфигурированы ни одним ингредиентом — эталонному весу заливки не к чему привязаться, недолив не ловится нигде",
@@ -688,6 +725,7 @@ export function targetFillWeightMissingGap(configs: readonly { position: number;
   const хвост = missing === configs.length ? " — недолив заливки не ловится ни на одной" : "";
   return [
     {
+      key: "target-fill-weight",
       topic: "бункеры: недолив не проверяется",
       period: null,
       missing: `target_fill_weight (эталонный чистый вес заливки) не задан у ${missing} из ${configs.length} настроенных бункеров${хвост}`,
@@ -728,6 +766,7 @@ export function telegramImportStalledGap(
   const lastAny = [...refills.map((r) => r.enteredDate)].sort().at(-1) ?? lastImport;
   return [
     {
+      key: "telegram-import-stalled",
       topic: "заливки: телеграм-импорт архива застыл",
       period: { from: lastImport, to: today },
       missing: `последняя заливка из телеграм-архива — ${lastImport} (${days} дней без новых строк оттуда); живой ввод продолжается — последняя заливка вообще ${lastAny}`,
@@ -762,6 +801,7 @@ export function stockIntakeSilenceGap(intakeDates: readonly string[], today: str
   if (days <= STOCK_INTAKE_SILENCE_DAYS) return [];
   return [
     {
+      key: "stock-intake-silence",
       topic: "закупки сырья: тишина",
       period: { from: lastDay, to: today },
       missing: `последний приход сырья на склад ${lastDay}, ${days} дней без новой закупки`,
@@ -806,6 +846,7 @@ export function ingredientsWithoutPurchaseGap(
   const головаNames = missing.length > 0 ? ` — ${missing.map((m) => m.name).join(", ")}` : "";
   return [
     {
+      key: "ingredients-without-purchase",
       topic: "закупки сырья: у ингредиента нет ни одной закупки",
       period: null,
       missing: `${missing.length} из ${всего} бункерных ингредиентов ни разу не приходовались складом${головаNames}${хвост}`,
@@ -876,6 +917,7 @@ export function locationsWithoutMachinePlacementGap(
   const хвост = безТары > 0 ? ` (заливок с неизвестной тарой: ${безТары} — нетто по ним не посчитать, в сумму не вошли)` : "";
   return [
     {
+      key: "locations-without-placement",
       topic: "заливки: точка без размещения автомата",
       period: null,
       missing: `${byLocation.size} точек с заливками бункера, но без единого размещения автомата за всю историю — продажи к ним не привязать, норма всегда «нет данных»: ${names.join(", ")}, суммарно ${kg.toLocaleString("ru-RU")} кг нетто${хвост}`,
@@ -907,6 +949,7 @@ export function recipeCardsWithoutCompositionGap(
   if (missing.length === 0) return [];
   return [
     {
+      key: "recipe-cards-without-composition",
       topic: "карточка-рецепт без состава",
       period: null,
       missing: `${missing.length} карточек товара с принципом «рецепт», но пустым составом — себестоимость по ним посчитается как «0 сум» вместо «неизвестна»: ${missing.map((m) => m.name).join(", ")}`,

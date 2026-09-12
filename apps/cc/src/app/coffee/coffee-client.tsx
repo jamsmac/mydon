@@ -4,6 +4,7 @@ import { Fragment, useMemo, useState, useTransition } from "react";
 import { tashkentLocalInput } from "@mydon/shared";
 import { OccurredAtField } from "../../components/occurred-at-field";
 import { useRememberedBasis, WeighBasisPicker } from "../../components/weigh-basis";
+import { SupportMark } from "../../components/support-mark";
 import type {
   CoffeeBunkerIngredient,
   CoffeeConsumableRow,
@@ -706,6 +707,7 @@ export function ReconcileTab({
                 <th>Себестоимость, сум</th>
                 <th>Пар</th>
                 <th>Не посчитать</th>
+                <th>Опора</th>
               </tr>
             </thead>
             <tbody>
@@ -716,6 +718,12 @@ export function ReconcileTab({
                   <td>{l.cost !== null ? num(Math.round(l.cost)) : "—"}</td>
                   <td>{l.pairs}</td>
                   <td>{l.unknownPairs > 0 ? l.unknownPairs : ""}</td>
+                  {/* На скольких замкнутых парах стоит расход этой точки (Н-3):
+                      без этого «12 300 г» по трём парам читается так же
+                      уверенно, как по сорока. */}
+                  <td>
+                    <SupportMark facts={l.pairs} of={l.pairs + l.unknownPairs} unit="пар" />
+                  </td>
                 </tr>
               ))}
             </tbody>
