@@ -23,6 +23,7 @@ import {
   batchesWithoutInvoiceDateGap,
   billReconciliationGap,
   bunkerTareNetNonPositiveGap,
+  impossibleRefillWeightGap,
   collectionSilenceGap,
   GapsService,
   healthTimezoneGap,
@@ -561,6 +562,41 @@ describe("Реестр пробелов — заливки: замер «до д
   });
 });
 
+describe("Реестр пробелов — вес, которым бункер быть не может (прод 12.09.2026)", () => {
+  const tare = new Map<string, number>([["6:8", 643], ["22:8", 620]]);
+  const ref = (containerNumber: number, filledWeight: number, position = 8, enteredDate = "2026-01-15") => ({
+    position,
+    containerNumber,
+    filledWeight,
+    enteredDate,
+  });
+
+  it("«заливка» в 4 г при таре 643 г — это ошибка ввода, и так и сказано", () => {
+    const gaps = impossibleRefillWeightGap([ref(6, 4)], tare);
+    assert.equal(gaps.length, 1);
+    assert.match(gaps[0].missing, /не вес бункера/);
+    assert.match(gaps[0].action, /тару перекалибровывать не нужно/);
+  });
+
+  it("пустой бункер (брутто = таре) невозможным весом НЕ считается", () => {
+    assert.deepEqual(impossibleRefillWeightGap([ref(22, 620)], tare), []);
+  });
+
+  it("мусорные строки не попадают в диагноз тары — иначе он зовёт делать ненужную работу", () => {
+    // Ровно случай позиции 8 на проде: 4 записи по 1–10 г и одна настоящая.
+    const refills = [ref(6, 4), ref(6, 10), ref(6, 1), ref(6, 1), ref(22, 620)];
+    const tareGap = bunkerTareNetNonPositiveGap(8, refills, tare);
+    assert.equal(tareGap.length, 1, "настоящая запись с нетто 0 остаётся видимой");
+    assert.match(tareGap[0].missing, /1 из 1/, "знаменатель считается по правдоподобным весам");
+  });
+
+  it("порог — от тары набора, а не константа в граммах", () => {
+    // Половина тары и выше — правдоподобно; ниже — нет. Смена парка не ломает правило.
+    assert.deepEqual(impossibleRefillWeightGap([ref(6, 322)], tare), []);
+    assert.equal(impossibleRefillWeightGap([ref(6, 321)], tare).length, 1);
+  });
+});
+
 /* ── Детекторы 16–17: тара бункера — позиции 3 и 4 ────────────────────────── */
 
 describe("Реестр пробелов — тара бункера: позиции 3 и 4 не откалиброваны", () => {
@@ -574,7 +610,7 @@ describe("Реестр пробелов — тара бункера: позиц�
     const nonPositive = Array.from({ length: 42 }, () => ({ position: 4, containerNumber: 1, filledWeight: 500 })); // нетто 0
     const gaps = bunkerTareNetNonPositiveGap(4, [...positive, ...nonPositive], tare);
     assert.equal(gaps.length, 1);
-    assert.equal(gaps[0].topic, "тара бункера: позиция 4 не откалибрована");
+    assert.equal(gaps[0].topic, "тара бункера: позиция 4 не сходится");
     assert.match(gaps[0].missing, /42 из 90/);
   });
 
@@ -583,13 +619,23 @@ describe("Реестр пробелов — тара бункера: позиц�
     const nonPositive = Array.from({ length: 13 }, () => ({ position: 3, containerNumber: 1, filledWeight: 480 }));
     const gaps = bunkerTareNetNonPositiveGap(3, [...positive, ...nonPositive], tare);
     assert.equal(gaps.length, 1);
-    assert.equal(gaps[0].topic, "тара бункера: позиция 3 не откалибрована");
+    assert.equal(gaps[0].topic, "тара бункера: позиция 3 не сходится");
     assert.match(gaps[0].missing, /13 из 58/);
   });
 
   it("заливки без известной тары не входят в знаменатель — это другой пробел", () => {
     const refills = [{ position: 4, containerNumber: 99, filledWeight: 100 }]; // тары для набора 99 нет
     assert.deepEqual(bunkerTareNetNonPositiveGap(4, refills, tare), []);
+  });
+
+  it("строка называет ОБЕ причины и величину недобора, а не зовёт сразу калибровать", () => {
+    // Постоянный недобор в одну сторону — подпись разнобоя состояния взвешивания
+    // (решение о крышке 12.09.2026), и это проверяется одним замером крышки.
+    const refills = Array.from({ length: 5 }, () => ({ position: 4, containerNumber: 1, filledWeight: 420 }));
+    const [gap] = bunkerTareNetNonPositiveGap(4, refills, tare);
+    assert.match(gap.missing, /типичный недобор 80 г/);
+    assert.match(gap.action, /взвесить крышку/);
+    assert.match(gap.action, /около 80 г/);
   });
 
   it("КЛЮЧЕВОЙ ТЕСТ: тару перекалибровали — нетто ушло в плюс, гэп исчезает", () => {
