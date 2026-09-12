@@ -31,6 +31,8 @@ function unit(over: Partial<PartUnit>): PartUnit {
     setNumber: null,
     hopperPosition: null,
     tareWeight: null,
+    tareBasis: "with_lid",
+    lidWeight: null,
     purchaseDate: null,
     purchasePrice: null,
     warrantyUntil: null,

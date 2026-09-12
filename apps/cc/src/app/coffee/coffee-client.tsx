@@ -3,6 +3,7 @@
 import { Fragment, useMemo, useState, useTransition } from "react";
 import { tashkentLocalInput } from "@mydon/shared";
 import { OccurredAtField } from "../../components/occurred-at-field";
+import { useRememberedBasis, WeighBasisPicker } from "../../components/weigh-basis";
 import type {
   CoffeeBunkerIngredient,
   CoffeeConsumableRow,
@@ -162,6 +163,9 @@ function EntryTab({
   const [position, setPosition] = useState("");
   const [container, setContainer] = useState("");
   const [weight, setWeight] = useState("");
+  // С крышкой бункер на весах или без — свойство ЭТОГО замера (решение
+  // 12.09.2026). Выбор помнится: смена мерит подряд одинаково.
+  const [basis, setBasis] = useRememberedBasis();
   const [msg, setMsg] = useState<string | null>(null);
 
   /**
@@ -220,6 +224,7 @@ function EntryTab({
         ...(container ? { containerNumber: Number(container) } : {}),
         ...(ingredientId ? { ingredientId } : {}),
         filledWeight: w,
+        weighedWithLid: basis === "with_lid",
         // День события Core выводит из момента: два источника одной правды
         // разъехались бы (в базе это держит CHECK).
         enteredDate: occurredAt.slice(0, 10),
@@ -275,6 +280,11 @@ function EntryTab({
         Вес (г)
         <input type="number" min={0} value={weight} onChange={(e) => setWeight(e.target.value)} />
       </label>
+      <WeighBasisPicker
+        value={basis}
+        onChange={setBasis}
+        hint="Как удобно — лишь бы отмечено верно: система сама приведёт замеры друг к другу по весу крышки этого бункера."
+      />
       <button className="btn primary" disabled={pending} onClick={submit}>
         {pending ? "Сохраняю…" : "Сохранить"}
       </button>

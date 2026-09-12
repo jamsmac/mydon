@@ -13,8 +13,15 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from "class-validator";
-import { PART_KINDS, PART_LOCATIONS, type PartKind } from "@mydon/shared";
+import {
+  LID_WEIGHT_MAX,
+  PART_KINDS,
+  PART_LOCATIONS,
+  WEIGH_BASES,
+  type PartKind,
+} from "@mydon/shared";
 import { PartsService } from "./parts.service";
 import { requestActor } from "../common/request-actor";
 
@@ -82,6 +89,12 @@ export class UpdatePartUnitDto {
 
   @IsOptional() @IsInt() @Min(0) @Max(20000)
   tareWeight?: number | null;
+
+  @IsOptional() @IsIn([...WEIGH_BASES])
+  tareBasis?: string;
+
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsInt() @Min(1) @Max(LID_WEIGHT_MAX)
+  lidWeight?: number | null;
 
   @IsOptional() @IsISO8601({ strict: true })
   purchaseDate?: string | null;

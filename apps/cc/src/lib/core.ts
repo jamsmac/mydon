@@ -2600,6 +2600,10 @@ export interface PartUnit {
   setNumber: number | null;
   hopperPosition: number | null;
   tareWeight: number | null;
+  /** С чем взвешена тара: `with_lid` (умолчание) или `without_lid`. */
+  tareBasis: string;
+  /** Вес крышки этого бункера; `null` — не измерен, состояния не сравниваются. */
+  lidWeight: number | null;
   purchaseDate: string | null;
   purchasePrice: string | null;
   warrantyUntil: string | null;
@@ -3455,6 +3459,8 @@ export const core = {
      */
     ingredientId?: string;
     filledWeight: number;
+    /** Была ли крышка на бункере при взвешивании (решение 12.09.2026). */
+    weighedWithLid?: boolean;
     packageCount?: number;
     enteredDate: string;
     /** Когда произошла заливка, до минуты (R-H-1…R-H-4). */

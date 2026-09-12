@@ -141,6 +141,7 @@ export * from "./entity-name";
 export * from "./machine-status";
 export * from "./maintenance-norms";
 export * from "./parts";
+export * from "./lid";
 export * from "./machine-number";
 export * from "./parts-template";
 

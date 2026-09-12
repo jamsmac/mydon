@@ -153,7 +153,28 @@ describe("parseContainerReturnMessage — строки «позиция. наб�
 
   it("обычный текст без числовых строк — не сообщение о возвратах", () => {
     const res = parseContainerReturnMessage("Привет, завтра приедем позже");
-    assert.deepEqual(res, { returns: [], locationNote: null, rejected: [] });
+    assert.deepEqual(res, { returns: [], locationNote: null, rejected: [], weighedWithLid: true });
+  });
+
+  it("молчание значит прежнее правило: мерили с крышкой", () => {
+    assert.equal(parseContainerReturnMessage("1. 026. 1119").weighedWithLid, true);
+  });
+
+  it("пометка «без крышки» относится ко всему сообщению и не съедает подсказку точки", () => {
+    const res = parseContainerReturnMessage("Кпп остатки\nбез крышки\n1. 026. 1119\n2. 019. 1944");
+    assert.equal(res.weighedWithLid, false);
+    assert.equal(res.locationNote, "Кпп остатки");
+    assert.equal(res.returns.length, 2);
+  });
+
+  it("пометка первой строкой не становится названием точки", () => {
+    const res = parseContainerReturnMessage("Без крышек.\n1. 026. 1119");
+    assert.equal(res.weighedWithLid, false);
+    assert.equal(res.locationNote, null, "«без крышек» — это состояние, а не точка");
+  });
+
+  it("«с крышкой» пишут явно — и это тоже читается", () => {
+    assert.equal(parseContainerReturnMessage("с крышкой\n1. 026. 1119").weighedWithLid, true);
   });
 });
 

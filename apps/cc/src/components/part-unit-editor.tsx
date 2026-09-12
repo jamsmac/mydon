@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import type { PartUnit } from "../lib/core";
 import { movePartUnit, retirePartUnit, savePartUnit, setPartNumber } from "../app/parts/actions";
+import { HopperLid } from "./hopper-lid";
 
 /**
  * Паспорт узла и номер. Номер отдельно от паспорта: подтверждение наклейки —
@@ -127,6 +128,7 @@ export function PartUnitEditor({ unit }: { unit: PartUnit }) {
               <input name="tareWeight" defaultValue={unit.tareWeight ?? ""} inputMode="numeric" placeholder="пустой контейнер на весах" />
               <small className="hint">Без тары возврат бункера не приходуется на склад: нетто = брутто − тара.</small>
             </label>
+            <HopperLid tareBasis={unit.tareBasis} lidWeight={unit.lidWeight} />
           </>
         )}
         {!hopper && <input type="hidden" name="tareWeight" value="" />}

@@ -22,6 +22,8 @@ export async function submitCoffeeRefill(input: {
   /** Ингредиент, если позиция допускает несколько (см. core.submitCoffeeRefill). */
   ingredientId?: string;
   filledWeight: number;
+  /** Была ли крышка на бункере при взвешивании (решение 12.09.2026). */
+  weighedWithLid?: boolean;
   packageCount?: number;
   enteredDate: string;
   /** Когда произошла заливка, до минуты (R-H-1…R-H-4); задним числом уйдёт на одобрение. */

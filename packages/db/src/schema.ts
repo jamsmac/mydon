@@ -2901,6 +2901,11 @@ export const coffeeRefill = pgTable(
     filledWeight: integer("filled_weight").notNull(),
     measuredBefore: integer("measured_before"),
     /**
+     * Была ли крышка на бункере при ЭТИХ замерах (оба — один акт взвешивания).
+     * Умолчание `true`: до решения 12.09.2026 действовало «всегда с крышкой».
+     */
+    weighedWithLid: boolean("weighed_with_lid").default(true).notNull(),
+    /**
      * Сколько упаковок ушло. NULL — не спрашивали (учёт идёт в граммах).
      *
      * Раньше поле было notNull с умолчанием 1, и «не спрашивали» было
@@ -2979,6 +2984,8 @@ export const coffeeContainerReturn = pgTable(
     containerNumber: integer("container_number").notNull(),
     /** Вес брутто при возврате (с тарой), г. */
     weight: integer("weight").notNull(),
+    /** Была ли крышка на бункере при взвешивании возврата (см. part_unit.lid_weight). */
+    weighedWithLid: boolean("weighed_with_lid").default(true).notNull(),
     returnedDate: date("returned_date").notNull(),
     locationNote: text("location_note"),
     // ── Приход на склад (R-PU-9, срез У5). NULL у записей до среза и у возвратов без тары. ──
@@ -3504,6 +3511,19 @@ export const partUnit = pgTable(
     hopperPosition: integer("hopper_position"),
     /** Тара, г — для бункеров/контейнеров; нетто возврата = брутто − тара (R-PU-9). */
     tareWeight: integer("tare_weight"),
+    /**
+     * Основание хранимой тары: взвешена С КРЫШКОЙ или без (решение владельца
+     * 12.09.2026). До него правило требовало «всегда с крышкой» (R-B-19) —
+     * поэтому умолчание `with_lid`: так тару и мерили.
+     */
+    tareBasis: text("tare_basis").default("with_lid").notNull(),
+    /**
+     * Вес крышки ЭТОГО бункера (крышка пронумерована и принадлежит своему
+     * бункеру). Знаем его — замеры «с крышкой» и «без» приводятся друг к
+     * другу, и техник взвешивает так, как удобно. Не знаем — разные
+     * состояния не сравниваются (R-B-9), форма просит взвесить крышку раз.
+     */
+    lidWeight: integer("lid_weight"),
     purchaseDate: date("purchase_date"),
     purchasePrice: numeric("purchase_price", { precision: 14, scale: 2 }),
     warrantyUntil: date("warranty_until"),
@@ -3517,6 +3537,12 @@ export const partUnit = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
+    // Основание тары — только из двух известных состояний: третье значение
+    // означало бы «непонятно, с чем взвешено», и приведение врало бы молча.
+    check("part_unit_tare_basis_known", sql`tare_basis in ('with_lid', 'without_lid')`),
+    // Вес крышки положительный и правдоподобный: «крышка 900 г» — это опечатка
+    // или перепутанные поля, а не крышка (LID_WEIGHT_MAX в @mydon/shared).
+    check("part_unit_lid_weight_sane", sql`lid_weight is null or (lid_weight > 0 and lid_weight <= 800)`),
     // Номер уникален без учёта регистра и пробелов: «m-001» и «M-001 » — одна наклейка.
     uniqueIndex("part_unit_inventory_no_key")
       .on(sql`upper(regexp_replace(${t.inventoryNo}, '\\s', '', 'g'))`)

@@ -254,6 +254,11 @@ export interface SubmitRefillInput {
    * (`occurred_precision = day`), прошлый — полночь того дня.
    */
   occurredAt?: string;
+  /**
+   * Была ли крышка на бункере при взвешивании (решение 12.09.2026). Нет —
+   * `true`: до решения действовало «всегда с крышкой» (R-B-19).
+   */
+  weighedWithLid?: boolean;
   createdBy?: string;
 }
 
@@ -1086,6 +1091,7 @@ export class CoffeeService {
         filledWeight: input.filledWeight,
         measuredBefore: input.measuredBefore ?? null,
         packageCount: input.packageCount ?? null,
+        weighedWithLid: input.weighedWithLid ?? true,
         // День события выводится из occurredAt, а не приходит отдельно: два
         // источника одной правды разъехались бы (CHECK в базе это и держит).
         enteredDate,
