@@ -624,6 +624,84 @@ export function refillMeasuredBeforeMissingGap(refills: readonly { measuredBefor
  * дефект того же рода, слабее выражен, но реален и не должен потеряться за
  * позицией 4.
  */
+/**
+ * Вес, которым бункер быть не может: меньше половины собственной тары.
+ *
+ * Порог не из головы и не константой в граммах: пустой бункер весит ровно
+ * тару, полный — больше, и «вдвое легче себя пустого» физически невозможно
+ * ни при какой заливке. Правило само подстраивается под любой набор, а
+ * константа в граммах устарела бы при первой же смене парка.
+ */
+function impossibleGross(filledWeight: number, tare: number): boolean {
+  return filledWeight * 2 < tare;
+}
+
+function medianOf(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/**
+ * Заливки с НЕВОЗМОЖНЫМ весом — это ошибка ввода, а не тары.
+ *
+ * ПОЧЕМУ ОТДЕЛЬНОЙ СТРОКОЙ (найдено на проде 12.09.2026). Позиция 8 показывала
+ * «5 из 5 заливок дают нетто ≤ 0, тара замерена неверно» и звала
+ * перекалибровать 26 контейнеров. На деле тара позиции 8 ровная и правдоподобная
+ * (612–669 г по всем 26 наборам), а четыре «заливки» весили **1, 4 и 10 г** —
+ * это не вес бункера, это число, попавшее не в то поле. Пятая запись (620 г при
+ * таре 620) — настоящая, пустой бункер.
+ *
+ * Детектор, который валит обе причины в одну строку, посылает владельца делать
+ * дорогую и ненужную работу, а настоящую — четыре строки исправить — прячет.
+ * Строка одна на весь парк, а не на позицию: это дефект ввода, и чинится он
+ * записями, а не позициями.
+ */
+export function impossibleRefillWeightGap(
+  refills: readonly { position: number; containerNumber: number | null; filledWeight: number; enteredDate: string }[],
+  tareByKey: ReadonlyMap<string, number>,
+): Gap[] {
+  const bad: { position: number; weight: number; date: string }[] = [];
+  for (const r of refills) {
+    if (r.containerNumber === null) continue;
+    const tare = tareByKey.get(`${r.containerNumber}:${r.position}`);
+    if (tare === undefined) continue;
+    if (impossibleGross(r.filledWeight, tare)) bad.push({ position: r.position, weight: r.filledWeight, date: r.enteredDate });
+  }
+  if (bad.length === 0) return [];
+  const shown = bad.slice(0, 8).map((b) => `${b.date} поз.${b.position} — ${b.weight} г`);
+  return [
+    {
+      key: "impossible-refill-weight",
+      topic: "заливки: вес, которым бункер быть не может",
+      period: null,
+      missing:
+        `${bad.length} заливок с весом меньше половины собственной тары — это не вес бункера, а число, попавшее не в то поле: ` +
+        `${shown.join("; ")}${bad.length > shown.length ? "; …" : ""}`,
+      scale: `${bad.length} записей`,
+      action: "исправить или удалить эти записи в журнале заливок — тару перекалибровывать не нужно",
+    },
+  ];
+}
+
+/**
+ * Тара позиции: нетто ≤ 0 там, где вес правдоподобен.
+ *
+ * ЛОВУШКА (см. бриф задачи 4): проверка тары в `bunkerPeriod()` (срез F,
+ * задача 2) идёт РАНЬШЕ проверки однозначности ингредиента — пара позиции 3
+ * с «возврат тяжелее заливки» падает в корзину «тара не откалибрована», а не
+ * «позиция неоднозначна». Поэтому тару считаем ЗДЕСЬ отдельно и по КАЖДОЙ
+ * позиции своей строкой.
+ *
+ * Невозможные веса (см. `impossibleRefillWeightGap`) отсюда ИСКЛЮЧЕНЫ: они
+ * ломали и знаменатель, и медиану, и диагноз.
+ *
+ * ДВЕ ПРИЧИНЫ, А НЕ ОДНА. Постоянный недобор в одну сторону — это либо неверная
+ * тара, либо замеры в другом состоянии, чем тара (крышку сняли, а тару мерили с
+ * ней). Второе стало проверяемым 12.09.2026 (решение о крышке): один замер
+ * крышки отвечает на вопрос. Поэтому строка называет обе причины и величину
+ * недобора, а не отправляет сразу перекалибровывать 26 контейнеров.
+ */
 export function bunkerTareNetNonPositiveGap(
   position: number,
   refills: readonly { position: number; containerNumber: number | null; filledWeight: number }[],
@@ -632,23 +710,29 @@ export function bunkerTareNetNonPositiveGap(
   const nets: number[] = [];
   for (const r of refills) {
     if (r.position !== position || r.containerNumber === null) continue;
-    const net = netWeight(r.filledWeight, tareByKey.get(`${r.containerNumber}:${position}`) ?? null);
+    const tare = tareByKey.get(`${r.containerNumber}:${position}`);
+    if (tare === undefined) continue;
+    if (impossibleGross(r.filledWeight, tare)) continue;
+    const net = netWeight(r.filledWeight, tare);
     if (net !== null) nets.push(net);
   }
   if (nets.length === 0) return [];
-  const nonPositive = nets.filter((n) => n <= 0).length;
-  if (nonPositive === 0) return [];
-  const sorted = [...nets].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  const median = sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+  const bad = nets.filter((n) => n <= 0);
+  if (bad.length === 0) return [];
+  const shortfall = Math.round(Math.abs(medianOf(bad)));
   return [
     {
       key: `bunker-tare:${position}`,
-      topic: `тара бункера: позиция ${position} не откалибрована`,
+      topic: `тара бункера: позиция ${position} не сходится`,
       period: null,
-      missing: `${nonPositive} из ${nets.length} заливок позиции ${position} с известной тарой дают нетто ≤ 0 (медиана нетто ${Math.round(median)} г) — тара физического набора замерена неверно`,
-      scale: `${nonPositive} заливок`,
-      action: `перекалибровать тару контейнеров позиции ${position} в «Полевая работа → Кофе → Настройки → Веса бункеров»`,
+      missing:
+        `${bad.length} из ${nets.length} заливок позиции ${position} с известной тарой дают нетто ≤ 0 ` +
+        `(медиана нетто ${Math.round(medianOf(nets))} г, типичный недобор ${shortfall} г) — ` +
+        `либо тара набора замерена неверно, либо заливки взвешивали не в том состоянии, что тару`,
+      scale: `${bad.length} заливок`,
+      action:
+        `сначала взвесить крышку любого бункера позиции ${position} (карточка узла): если она весит около ${shortfall} г — ` +
+        `дело в состоянии замера, а не в таре. Иначе перекалибровать тару в «Полевая работа → Кофе → Настройки → Веса бункеров»`,
     },
   ];
 }
@@ -1099,6 +1183,7 @@ export class GapsService {
       // на день написания детектора. Третья сломанная позиция появилась бы
       // молча. `usedPositions` посчитан строкой выше, детектор сам возвращает
       // пусто там, где нетто везде положительное, — перечислять руками нечего.
+      ...impossibleRefillWeightGap(refillRows, tareByKey),
       ...[...usedPositions].sort((a, b) => a - b).flatMap((position) => bunkerTareNetNonPositiveGap(position, refillRows, tareByKey)),
       ...unconfiguredBunkerPositionGap(usedPositions, configuredPositions),
       ...targetFillWeightMissingGap(bunkerConfigRows),
