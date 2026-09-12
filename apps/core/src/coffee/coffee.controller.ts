@@ -544,6 +544,16 @@ export class CoffeeController {
   }
 
   /** Возвраты без прихода: нет тары, ингредиент неизвестен, склад не выбран. */
+  /**
+   * Досчитать нетто у возвратов, записанных мимо леджера (архивный импорт).
+   * Склад НЕ трогает: нетто — производная от брутто и тары, приход — факт
+   * движения товара, и задним числом он был бы односторонним.
+   */
+  @Post("container-return/backfill-net")
+  backfillReturnNet(@Query("actor") actor?: string) {
+    return this.ledger.backfillReturnNetWeight(actor ?? requestActor("owner"));
+  }
+
   @Get("container-return/unposted")
   unpostedReturns(@Query("limit") limit?: string) {
     return this.ledger.unpostedReturns(limit ? Number(limit) : undefined);

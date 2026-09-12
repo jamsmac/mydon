@@ -274,6 +274,69 @@ export class CoffeeLedgerService {
     return { ok: true };
   }
 
+  /**
+   * Досчитать нетто и привязку к узлу у возвратов, записанных МИМО леджера.
+   *
+   * ЗАЧЕМ. Архивный импорт из Telegram (`executeCoffeeImport`) кладёт строки
+   * прямой вставкой, без тары и без узла: на 12.09.2026 у всех 1262 возвратов
+   * `net_weight` пуст, и «расход по набору» не считается ни за один день, хотя
+   * тара известна у 1236 из них.
+   *
+   * СЧИТАЕТ, НО НЕ ПРИХОДУЕТ. Нетто — производная от того, что уже записано
+   * (брутто и тара), это не новый факт. Приход же на склад — факт движения
+   * товара, и задним числом он односторонний: расход по заливкам в системе
+   * ведётся только с 07.09.2026, и кредит за август без соответствующего
+   * дебета раздул бы остаток на всю возвращённую массу. Поэтому склад здесь не
+   * трогается вовсе — только считается то, что можно посчитать честно.
+   *
+   * ОСНОВАНИЕ ВЗВЕШИВАНИЯ проверяется как везде (решение о крышке 12.09.2026):
+   * замер и тара в разных состояниях при неизвестном весе крышки — строка
+   * остаётся без нетто, а не получает его со сдвигом ровно в крышку.
+   */
+  async backfillReturnNetWeight(actorRef = requestActor("owner")): Promise<{
+    considered: number;
+    filled: number;
+    skipped: { noTare: number; lighterThanTare: number; basis: number };
+  }> {
+    const rows = await this.db.select().from(coffeeContainerReturn).where(isNull(coffeeContainerReturn.netWeight));
+    const skipped = { noTare: 0, lighterThanTare: 0, basis: 0 };
+    let filled = 0;
+    for (const row of rows) {
+      const unit = await this.hopperUnit(row.containerNumber, row.position);
+      const tare = await this.tareOf(unit, row.containerNumber, row.position);
+      if (tare === null) {
+        skipped.noTare += 1;
+        continue;
+      }
+      const weighedBasis: WeighBasis = row.weighedWithLid ? "with_lid" : "without_lid";
+      const tareBasis: WeighBasis = isWeighBasis(unit?.tareBasis) ? unit.tareBasis : CANONICAL_BASIS;
+      const weightInTareBasis = toBasis(row.weight, weighedBasis, tareBasis, unit?.lidWeight ?? null);
+      if (weightInTareBasis === null) {
+        skipped.basis += 1;
+        continue;
+      }
+      if (weightInTareBasis < tare) {
+        skipped.lighterThanTare += 1;
+        continue;
+      }
+      await this.db
+        .update(coffeeContainerReturn)
+        .set({ netWeight: weightInTareBasis - tare, partUnitId: unit?.id ?? row.partUnitId })
+        .where(eq(coffeeContainerReturn.id, row.id));
+      filled += 1;
+    }
+    // Одна запись в журнале на весь прогон, а не 1232: это одна операция
+    // владельца, и читать её построчно никто не станет.
+    await this.db.insert(auditLog).values({
+      actorKind: actorKindOf(actorRef),
+      actorRef,
+      action: "coffee.return_net_backfilled",
+      target: null,
+      after: { considered: rows.length, filled, skipped },
+    });
+    return { considered: rows.length, filled, skipped };
+  }
+
   /** Возвраты без прихода — «без тары» и прочие причины, чтобы владелец их закрыл. */
   async unpostedReturns(limit = 100): Promise<
     { id: string; position: number; containerNumber: number; weight: number; returnedDate: string; partUnitId: string | null; unitLabel: string; reason: ReturnPostingReason | "не проведён (до среза)" }[]
