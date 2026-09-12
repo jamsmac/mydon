@@ -45,6 +45,21 @@ export interface MaintenanceNorm {
   /** Название в графике и в задаче исполнителю. */
   title: string;
   scope: NormScope;
+  /**
+   * Норматив требует ОПОЗНАННОГО узла на автомате: с номером и подтверждённой
+   * наклейкой (решение владельца 12.09.2026).
+   *
+   * ЗАЧЕМ. Работа «помой миксер» адресна: помыть надо конкретный миксер, и
+   * отметить факт можно только о конкретном. Пока миксеры не размечены
+   * физически, автомат получает норматив о предмете, которого в учёте нет, —
+   * и график краснеет за работу, у которой нет подлежащего. На 12.09.2026
+   * таких строк было 24 при нуле наклеенных миксеров из ста.
+   *
+   * Это тот же принцип, по которому существует `scope`: не давать графику
+   * требовать работу, которой не существует. И тот же принцип накопления
+   * (Н-1): норматив появляется сам, как только предмет опознан.
+   */
+  requiresIdentifiedPart?: true;
 }
 
 /**
@@ -59,7 +74,14 @@ export interface MaintenanceNorm {
  * сделали.
  */
 export const STANDARD_NORMS: readonly MaintenanceNorm[] = [
-  { kind: "cleaning", partKind: "mixer", everyDays: 10, title: "Мойка миксера", scope: "coffee" },
+  {
+    kind: "cleaning",
+    partKind: "mixer",
+    everyDays: 10,
+    title: "Мойка миксера",
+    scope: "coffee",
+    requiresIdentifiedPart: true,
+  },
   {
     kind: "part_replace",
     partKind: "water_filter",
@@ -82,6 +104,24 @@ export const STANDARD_NORMS: readonly MaintenanceNorm[] = [
  */
 export function normsFor(kind: MachineKind | undefined): readonly MaintenanceNorm[] {
   return kind === "coffee" ? STANDARD_NORMS : STANDARD_NORMS.filter((n) => n.scope === "any");
+}
+
+/**
+ * Нормативы, применимые к автомату СЕЙЧАС: из применимых по виду убираются те,
+ * чей предмет ещё не опознан.
+ *
+ * `identifiedParts` — виды узлов, которые стоят на этом автомате С НОМЕРОМ И
+ * НАКЛЕЙКОЙ. Именно наклейка, а не строка в реестре: номер, выданный системой,
+ * но не перенесённый на железо, не даёт технику отличить один миксер от
+ * другого — а без этого «помыл» нечем подписать.
+ */
+export function normsForNow(
+  kind: MachineKind | undefined,
+  identifiedParts: ReadonlySet<PartKind>,
+): readonly MaintenanceNorm[] {
+  return normsFor(kind).filter(
+    (n) => n.requiresIdentifiedPart !== true || (n.partKind !== null && identifiedParts.has(n.partKind)),
+  );
 }
 
 /**

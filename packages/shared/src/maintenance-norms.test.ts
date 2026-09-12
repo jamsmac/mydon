@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { firstDue } from "./maintenance-due";
 import { MAINTENANCE_KINDS, PART_KINDS } from "./maintenance";
-import { normKey, normsFor, STANDARD_NORMS } from "./maintenance-norms";
+import { normKey, normsFor, normsForNow, STANDARD_NORMS } from "./maintenance-norms";
 
 describe("стандартные нормативы", () => {
   it("хранит числа, названные владельцем", () => {
@@ -76,5 +76,24 @@ describe("стандартные нормативы", () => {
     for (const n of STANDARD_NORMS.filter((x) => x.partKind !== null)) {
       assert.equal(n.scope, "coffee", n.title);
     }
+  });
+});
+
+describe("normsForNow — норматив ждёт опознанного узла (решение 12.09.2026)", () => {
+  it("миксер не размечен — мойки в графике нет", () => {
+    const now = normsForNow("coffee", new Set());
+    assert.equal(now.some((n) => n.partKind === "mixer"), false, "нет подлежащего — нет требования");
+    assert.equal(now.some((n) => n.partKind === "water_filter"), true, "остальные нормативы не трогаются");
+    assert.equal(now.some((n) => n.kind === "service"), true);
+  });
+
+  it("наклейку подтвердили — мойка появляется сама", () => {
+    const now = normsForNow("coffee", new Set(["mixer"]));
+    assert.equal(now.length, normsFor("coffee").length, "комплект полный");
+    assert.equal(now.some((n) => n.partKind === "mixer"), true);
+  });
+
+  it("снек не получает мойку даже с опознанным миксером", () => {
+    assert.deepEqual(normsForNow("snack", new Set(["mixer"])), normsFor("snack"));
   });
 });

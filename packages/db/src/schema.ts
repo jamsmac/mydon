@@ -3854,6 +3854,17 @@ export const maintenancePlan = pgTable(
      */
     assigneeId: uuid("assignee_id").references(() => person.id),
     isActive: boolean("is_active").default(true).notNull(),
+    /**
+     * Почему норматив выключен СИСТЕМОЙ, а не человеком (решение владельца
+     * 12.09.2026: «мойка появляется по мере выставления номеров»).
+     *
+     * NULL — выключил человек («этот моем реже»), и включать обратно сам
+     * никто не имеет права. Заполнено — выключила сверка, потому что предмета
+     * работы нет в учёте; она же включит обратно, когда предмет появится.
+     * Один флаг на два разных решения означал бы, что машина переигрывает
+     * владельца молча.
+     */
+    autoOffReason: text("auto_off_reason"),
     note: text("note"),
     createdBy: text("created_by"),
     createdAt: createdAt(),

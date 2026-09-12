@@ -419,6 +419,19 @@ export class MaintenanceController {
     return { created: created.length, skipped, plans: created };
   }
 
+  /**
+   * Сверить нормативы «про опознанный узел» по всему парку — то же, что идёт
+   * в 06:20 по расписанию. Ручной вызов нужен, когда правило только что
+   * изменилось и ждать утра незачем.
+   */
+  @Post("plans/reconcile-identified")
+  async reconcileIdentifiedNorms(@Query("actor") actor?: string) {
+    const { created, deactivated, reactivated } = await this.maintenance.reconcileAllIdentifiedNorms(
+      actor ?? requestActor("owner"),
+    );
+    return { created: created.length, deactivated: deactivated.length, reactivated: reactivated.length, plans: created };
+  }
+
   @Delete("plans/:id")
   deactivatePlan(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string) {
     return this.maintenance.deactivatePlan(id, actor ?? requestActor("owner"));
