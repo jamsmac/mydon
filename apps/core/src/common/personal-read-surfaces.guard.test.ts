@@ -126,6 +126,10 @@ const REGISTRY: Record<string, { category: Category; reason: string }> = {
     category: "NON_PERSONAL_TABLES",
     reason: "join entity по coffeeOrder.machineId — имена автоматов кофе-контура",
   },
+  "coffee/visits.service.ts": {
+    category: "NON_PERSONAL_TABLES",
+    reason: "визиты кофе-контура: entity читается как точки (type location) заливок и расходников",
+  },
   "coffee/norm-fact.service.ts": {
     category: "NON_PERSONAL_TABLES",
     reason: "справочник entity для норма/факт кофе-контура (type product/location)",
